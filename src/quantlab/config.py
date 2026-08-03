@@ -6,11 +6,20 @@ Os defaults monetários seguem as premissas da spec da Fase 1
 """
 
 from functools import lru_cache
+from typing import Any
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from quantlab.exceptions import ConfigError
+
 __all__ = ["Settings", "get_settings"]
+
+_MISSING_MONGO_URI_MESSAGE = (
+    "QUANTLAB_MONGO_URI não foi definida. Sem ela, o app cairia no default do "
+    "driver e poderia conectar silenciosamente a um MongoDB local errado. "
+    "Rode `cp .env.example .env` e ajuste a URI antes de continuar."
+)
 
 
 class Settings(BaseSettings):
@@ -25,8 +34,9 @@ class Settings(BaseSettings):
     )
 
     mongo_uri: str = Field(
-        default="mongodb://localhost:27017",
-        description="String de conexão do MongoDB (ADR-0001).",
+        description="String de conexão do MongoDB (ADR-0001). Obrigatória: sem "
+        "default, para que uma variável ausente nunca conecte, em silêncio, a um "
+        "Mongo local sem relação com este projeto.",
     )
     mongo_db: str = Field(
         default="quantlab",
@@ -44,6 +54,18 @@ class Settings(BaseSettings):
         default=0.0,
         description="Taxa livre de risco anual usada no Sharpe (premissa 7).",
     )
+
+    def __init__(self, **data: Any) -> None:
+        try:
+            super().__init__(**data)
+        except ValidationError as exc:
+            missing_mongo_uri = any(
+                error["type"] == "missing" and error["loc"] == ("mongo_uri",)
+                for error in exc.errors()
+            )
+            if missing_mongo_uri:
+                raise ConfigError(_MISSING_MONGO_URI_MESSAGE) from exc
+            raise
 
 
 @lru_cache(maxsize=1)
