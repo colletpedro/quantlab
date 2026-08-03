@@ -42,14 +42,10 @@ test-unit: ## Apenas os testes marcados como unit
 	$(RUN) pytest -m unit
 
 test-integration: ## Apenas os testes marcados como integration (exige `make up`)
-	@# pytest devolve 5 quando não coleta nada. Na Fase 0 ainda não existe
-	@# teste de integração, e um alvo vermelho por ausência seria ruído.
-	@# Remover esta tolerância assim que o primeiro teste de integração entrar.
-	@$(RUN) pytest -m integration; status=$$?; \
-		if [ $$status -eq 5 ]; then \
-			echo "Nenhum teste de integração ainda (Fase 0)."; exit 0; \
-		fi; \
-		exit $$status
+	@# Sem tolerância a exit 5 (nada coletado): o Bloco A trouxe testes de
+	@# integração, e a partir daqui "nenhum teste coletado" é uma falha de
+	@# verdade — significa que a suíte sumiu, não que ela não existe.
+	$(RUN) pytest -m integration
 
 # ─── Qualidade ───────────────────────────────────────────────────────────────
 

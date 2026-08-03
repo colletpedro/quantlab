@@ -61,6 +61,54 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
+  integration:
+    name: Testes de integração
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # O único job que fala com serviço externo. O job "quality" acima continua
+    # offline de propósito (RNF-06): a suíte default tem de rodar sem rede, e
+    # separar os dois é o que mantém essa garantia verificável.
+    services:
+      mongo:
+        image: mongo:7
+        env:
+          MONGO_INITDB_ROOT_USERNAME: quantlab
+          MONGO_INITDB_ROOT_PASSWORD: quantlab
+        ports:
+          - 27017:27017
+        # Sem healthcheck o job corre contra um Mongo que ainda está subindo,
+        # e a falha aparece como teste intermitente em vez de serviço lento.
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 20s
+
+    env:
+      QUANTLAB_MONGO_URI: mongodb://quantlab:quantlab@localhost:27017/?authSource=admin
+      QUANTLAB_MONGO_DB: quantlab_ci
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Instala uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Instala Python 3.12
+        run: uv python install 3.12
+
+      - name: Instala dependências
+        run: make install
+
+      - name: Testes de integração
+        run: make test-integration
+
   audit:
     name: Auditoria de dependências
     runs-on: ubuntu-latest
