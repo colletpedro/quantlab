@@ -49,3 +49,89 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quantlab"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ruff — lint + formatação + import sort
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+    "RUF", # regras próprias do ruff
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["quantlab"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Typer declara defaults via chamada de função no parâmetro; é idiomático nele.
+extend-immutable-calls = ["typer.Argument", "typer.Option"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# mypy — RNF-05: tipagem verificada em modo estrito
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+warn_unreachable = true
+show_error_codes = true
+pretty = true
+mypy_path = "src"
+
+[tool.pydantic-mypy]
+init_typed = true
+init_forbid_extra = true
+warn_required_dynamic_aliases = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# pytest
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "-ra",
+    # RNF-06: a suíte default roda offline. Integração exige `make up` e é
+    # desmarcada aqui; `make test-integration` sobrescreve este filtro.
+    "-m",
+    "not integration",
+]
+markers = [
+    "unit: teste isolado, sem I/O e sem rede — roda sempre",
+    "integration: exige serviço externo (MongoDB); desmarcado por default",
+]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# coverage — RNF-02: mínimo de 80% em engine/ e analytics/
+# ─────────────────────────────────────────────────────────────────────────────
+[tool.coverage.run]
+# O piso vale só onde o erro custa dinheiro: o engine e a medição.
+# Os demais pacotes não entram no cálculo de propósito.
+source_pkgs = ["quantlab.engine", "quantlab.analytics"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+skip_empty = true
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+]

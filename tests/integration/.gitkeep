@@ -1,0 +1,2 @@
+# Testes que exigem serviço externo (MongoDB). Marcar com @pytest.mark.integration.
+# Rodam apenas via `make test-integration`, depois de `make up`.
