@@ -6,14 +6,17 @@ permite `from tests.support import FakeProvider` funcionar sem `tests/`
 precisar de `__init__.py`.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import date
 
 import pandas as pd
 
 from quantlab.ingestion.provider import RawCorporateActions
+from quantlab.storage.models import Bar, CorporateAction, QuarantinedBar
+from quantlab.storage.repository import WriteReport
 
-__all__ = ["FakeProvider", "empty_corporate_actions"]
+__all__ = ["FakeProvider", "FakeRepository", "empty_corporate_actions"]
 
 
 def empty_corporate_actions() -> RawCorporateActions:
@@ -63,3 +66,60 @@ class FakeProvider:
     def fetch_corporate_actions(self, ticker: str) -> RawCorporateActions:
         self.corporate_action_calls.append(ticker)
         return self._corporate_actions.get(ticker, empty_corporate_actions())
+
+
+@dataclass
+class FakeRepository:
+    """`IngestionRepository` de teste: registra o que o orquestrador gravaria.
+
+    Implementa a mesma forma que `orchestrator.IngestionRepository` declara —
+    não herda dela, é `Protocol` estrutural, igual a `FakeProvider` para
+    `MarketDataProvider`. Usada tanto por `test_orchestrator.py` (B4) quanto
+    por testes de CLI (B6) que precisam da lógica de `run_ingest` sem Mongo.
+    """
+
+    upserted_bars: list[Bar] = field(default_factory=list)
+    upserted_actions: list[CorporateAction] = field(default_factory=list)
+    quarantined: list[QuarantinedBar] = field(default_factory=list)
+    finished_calls: list[dict[str, object]] = field(default_factory=list)
+    next_run_id: str = "run-1"
+
+    def start_ingestion_run(self, tickers: Sequence[str], start: date, end: date) -> str:
+        return self.next_run_id
+
+    def upsert_bars(self, bars: Sequence[Bar]) -> WriteReport:
+        self.upserted_bars.extend(bars)
+        report = WriteReport()
+        report.inserted = len(bars)
+        return report
+
+    def upsert_corporate_actions(self, actions: Sequence[CorporateAction]) -> WriteReport:
+        self.upserted_actions.extend(actions)
+        return WriteReport()
+
+    def quarantine_bars(self, entries: Sequence[QuarantinedBar]) -> int:
+        self.quarantined.extend(entries)
+        return len(entries)
+
+    def finish_ingestion_run(
+        self,
+        run_id: str,
+        *,
+        succeeded: Sequence[str],
+        failed: Sequence[str],
+        bars_inserted: int,
+        bars_modified: int,
+        quarantined_count: int,
+        warnings: Sequence[str],
+    ) -> None:
+        self.finished_calls.append(
+            {
+                "run_id": run_id,
+                "succeeded": list(succeeded),
+                "failed": list(failed),
+                "bars_inserted": bars_inserted,
+                "bars_modified": bars_modified,
+                "quarantined_count": quarantined_count,
+                "warnings": list(warnings),
+            }
+        )
