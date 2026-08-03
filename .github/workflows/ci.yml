@@ -1,0 +1,89 @@
+name: CI
+
+# O job "quality" invoca os mesmos alvos do Makefile que `make check` encadeia
+# (lint, typecheck, test). Rodam como passos separados só para que a falha
+# aponte direto para o portão que quebrou — os comandos são idênticos.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Um push novo na mesma branch cancela a execução anterior.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # A suíte da Fase 0 roda offline (RNF-06): nenhum serviço externo é subido.
+  QUANTLAB_ENV: test
+
+jobs:
+  quality:
+    name: Lint, tipos e testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Instala uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Instala Python 3.12
+        run: uv python install 3.12
+
+      - name: Instala dependências
+        run: make install
+
+      - name: Lint
+        run: make lint
+
+      - name: Type check
+        run: make typecheck
+
+      - name: Testes com cobertura
+        run: make test
+
+      - name: Publica o relatório de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  audit:
+    name: Auditoria de dependências
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Informativo: uma CVE publicada em dependência transitiva não deve
+    # bloquear um PR que não a introduziu. O resultado é lido, não obedecido.
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Instala uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.15"
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+
+      - name: Instala Python 3.12
+        run: uv python install 3.12
+
+      - name: Instala dependências
+        run: make install
+
+      - name: pip-audit
+        run: make audit
