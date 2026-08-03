@@ -14,16 +14,16 @@ classifiers = [
 ]
 
 dependencies = [
-    "pandas>=2.2",
-    "numpy>=2.0",
-    "matplotlib>=3.9",
-    "pymongo>=4.8",
-    "yfinance>=0.2.40",
-    "typer>=0.12",
-    "pydantic>=2.8",
-    "pydantic-settings>=2.4",
-    "structlog>=24.4",
-    "pyyaml>=6.0",
+    "pandas>=3.0.5",
+    "numpy>=2.5.1",
+    "matplotlib>=3.11.1",
+    "pymongo>=4.17.0",
+    "yfinance>=1.5.2",
+    "typer>=0.27.0",
+    "pydantic>=2.13.4",
+    "pydantic-settings>=2.14.2",
+    "structlog>=26.1.0",
+    "pyyaml>=6.0.3",
 ]
 
 [project.scripts]
