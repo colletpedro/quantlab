@@ -1,0 +1,66 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---- Virtualenvs / uv ----
+.venv/
+venv/
+ENV/
+env/
+
+# ---- Testes e cobertura ----
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.hypothesis/
+
+# ---- Type checking e lint ----
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+.pyre/
+
+# ---- Ambiente ----
+# .env carrega segredos e configuração local; .env.example é versionado.
+.env
+.env.*
+!.env.example
+
+# ---- Artefatos gerados pelo projeto ----
+# Gráficos e relatórios de backtest são saída, não fonte.
+output/
+reports/
+*.png
+*.pdf
+
+# ---- Editores e SO ----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
