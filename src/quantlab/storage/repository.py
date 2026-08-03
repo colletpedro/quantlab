@@ -13,6 +13,7 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime
 
 import numpy as np
+from bson import ObjectId
 from numpy.typing import NDArray
 from pymongo import UpdateOne
 
@@ -22,7 +23,7 @@ from quantlab.storage.adjustment import adjustment_factors
 from quantlab.storage.client import MongoDatabase, MongoDocument
 from quantlab.storage.hashing import series_hash
 from quantlab.storage.models import Bar, CorporateAction, CorporateActionKind, QuarantinedBar
-from quantlab.storage.schema import BARS, CORPORATE_ACTIONS, QUARANTINED_BARS
+from quantlab.storage.schema import BARS, CORPORATE_ACTIONS, INGESTION_RUNS, QUARANTINED_BARS
 from quantlab.storage.series import PriceSeries
 
 __all__ = [
@@ -271,6 +272,59 @@ class MongoRepository:
                 reasons=list(entry.reasons),
             )
         return len(result.inserted_ids)
+
+    def start_ingestion_run(self, tickers: Sequence[str], start: date, end: date) -> str:
+        """Abre um `ingestion_run` e devolve seu id — design §3.4.
+
+        O documento é inserido **antes** de qualquer barra ser processada,
+        para que o id exista a tempo de ser gravado em cada `QuarantinedBar`
+        que a validação produzir (referência cruzada de design §3.3). O
+        restante dos campos é preenchido por `finish_ingestion_run`.
+        """
+        now = datetime.now(tz=UTC)
+        document: MongoDocument = {
+            "tickers": list(tickers),
+            "window_start": to_bson_date(start),
+            "window_end": to_bson_date(end),
+            "started_at": now,
+            "finished_at": None,
+            "succeeded": [],
+            "failed": [],
+            "bars_inserted": 0,
+            "bars_modified": 0,
+            "quarantined_count": 0,
+            "warnings": [],
+        }
+        result = self._db[INGESTION_RUNS].insert_one(document)
+        return str(result.inserted_id)
+
+    def finish_ingestion_run(
+        self,
+        run_id: str,
+        *,
+        succeeded: Sequence[str],
+        failed: Sequence[str],
+        bars_inserted: int,
+        bars_modified: int,
+        quarantined_count: int,
+        warnings: Sequence[str],
+    ) -> None:
+        """Fecha o `ingestion_run` com as contagens finais — design §3.4."""
+        now = datetime.now(tz=UTC)
+        self._db[INGESTION_RUNS].update_one(
+            {"_id": ObjectId(run_id)},
+            {
+                "$set": {
+                    "finished_at": now,
+                    "succeeded": list(succeeded),
+                    "failed": list(failed),
+                    "bars_inserted": bars_inserted,
+                    "bars_modified": bars_modified,
+                    "quarantined_count": quarantined_count,
+                    "warnings": list(warnings),
+                }
+            },
+        )
 
     # ── leitura ──────────────────────────────────────────────────────────
 
