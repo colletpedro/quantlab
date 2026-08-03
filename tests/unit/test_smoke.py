@@ -24,7 +24,9 @@ _DOMAIN_SUBPACKAGES = (
 
 
 @pytest.mark.unit
-def test_scaffold_imports_and_cli_answers(settings: Settings) -> None:
+def test_scaffold_imports_and_cli_answers(
+    clean_env: pytest.MonkeyPatch, settings: Settings
+) -> None:
     """O esqueleto da Fase 0 está de pé e coerente com a spec."""
     # Os cinco subpacotes de domínio existem e importam, ainda que vazios.
     for name in _DOMAIN_SUBPACKAGES:
@@ -37,6 +39,11 @@ def test_scaffold_imports_and_cli_answers(settings: Settings) -> None:
     # Defaults monetários vêm das premissas 4 e 7 da spec da Fase 1.
     assert settings.initial_capital == pytest.approx(100_000.0)
     assert settings.risk_free_rate == pytest.approx(0.0)
+
+    # O callback do CLI chama get_settings(), que exige QUANTLAB_MONGO_URI.
+    # Setado via env, não via .env: o teste não pode depender de um arquivo
+    # que não existe no ambiente do CI.
+    clean_env.setenv("QUANTLAB_MONGO_URI", settings.mongo_uri)
 
     # O CLI sobe e o comando `version` reporta a versão do pacote.
     result = CliRunner().invoke(app, ["version"])

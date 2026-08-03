@@ -12,9 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from quantlab.config import Settings
+from quantlab.config import Settings, get_settings
 
 _ENV_PREFIX = "QUANTLAB_"
+
+#: URI usada só para satisfazer o campo obrigatório em testes que não são
+#: sobre `mongo_uri` em si. Nunca aponta para um Mongo real.
+TEST_MONGO_URI = "mongodb://test:test@localhost:27017/?authSource=admin"
 
 
 @pytest.fixture
@@ -29,18 +33,27 @@ def workdir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
 
 
 @pytest.fixture
-def clean_env(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    """Remove toda variável ``QUANTLAB_*`` herdada da máquina.
+def clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
+    """Remove toda variável ``QUANTLAB_*`` herdada da máquina e isola o cache
+    de ``get_settings()``.
 
-    Sem isso, a configuração local de quem roda a suíte mudaria o resultado
-    dos testes — o oposto de RNF-01.
+    ``get_settings()`` usa ``lru_cache``. Sem limpar o cache antes e depois do
+    teste, o primeiro teste da suíte a chamá-lo congelaria os valores para
+    todos os que vierem depois — o resultado passaria a depender da ordem de
+    execução, o oposto de RNF-01.
     """
     for name in [key for key in os.environ if key.startswith(_ENV_PREFIX)]:
         monkeypatch.delenv(name, raising=False)
-    return monkeypatch
+    get_settings.cache_clear()
+    yield monkeypatch
+    get_settings.cache_clear()
 
 
 @pytest.fixture
 def settings(clean_env: pytest.MonkeyPatch) -> Settings:
-    """``Settings`` determinístico: sem env da máquina e sem ler ``.env``."""
-    return Settings(_env_file=None)
+    """``Settings`` determinístico: sem env da máquina e sem ler ``.env``.
+
+    ``mongo_uri`` é obrigatório e não representa nenhum ambiente real — é
+    fornecido aqui só para satisfazer a validação.
+    """
+    return Settings(_env_file=None, mongo_uri=TEST_MONGO_URI)
