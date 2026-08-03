@@ -68,7 +68,21 @@ def configure_logging(level: str = "INFO", *, json_logs: bool | None = None) -> 
         processors=[*processors, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
         logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
+        # False de propósito. `cache_logger_on_first_use=True` faz
+        # `BoundLoggerLazyProxy.bind()` sobrescrever `.bind` NA PRÓPRIA
+        # INSTÂNCIA do proxy na primeira chamada de log — não é cache de
+        # config global, é um monkeypatch permanente por instância que
+        # nenhuma reconfiguração futura desfaz. Para um logger de módulo
+        # (`_log = get_logger(__name__)`, criado uma vez na importação e
+        # reusado pela vida do processo), isso significa: se
+        # `configure_logging()` rodar mais de uma vez no mesmo processo — a
+        # suíte de testes de integração da CLI faz isso via `CliRunner`,
+        # e uma futura chamada programática do CLI faria o mesmo —, o
+        # primeiro log de cada módulo depois da primeira chamada fica preso
+        # para sempre na configuração daquele instante. quantlab é CLI/batch,
+        # não um serviço de alto throughput; o ganho de performance do cache
+        # não compensa essa classe de bug.
+        cache_logger_on_first_use=False,
     )
 
 

@@ -6,10 +6,12 @@ um `FakeProvider` — é o único ponto de acesso à rede no comando, e trocá-l
 escrita em Mongo de verdade, sem tocar `yfinance`.
 """
 
+import logging
 from collections.abc import Iterator
 
 import pandas as pd
 import pytest
+import structlog
 from typer.testing import CliRunner
 
 import quantlab.cli as cli_module
@@ -33,6 +35,39 @@ def _isolate_settings_cache() -> Iterator[None]:
     """
     yield
     get_settings.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_logging_config() -> Iterator[None]:
+    """Restaura structlog e o root logger do stdlib depois de cada teste.
+
+    `CliRunner().invoke(app, ...)` roda o callback `main()` de verdade, que
+    chama `configure_logging()` — e essa função faz `logging.basicConfig(...,
+    force=True)`, reconfigurando o root logger GLOBALMENTE para o processo
+    inteiro do pytest, não só para este teste. Sem restaurar, os handlers que
+    o pytest instala para capturar log ficam substituídos para o resto da
+    sessão.
+
+    A causa mais profunda — `cache_logger_on_first_use=True` fazendo
+    `BoundLoggerLazyProxy.bind()` sobrescrever `.bind` na própria instância do
+    proxy na primeira chamada, permanentemente, ignorando qualquer
+    reconfiguração futura — foi corrigida na fonte, em
+    `quantlab/logging.py`. `reset_defaults()` aqui é defesa em profundidade;
+    sem a correção na fonte, nenhum reset neste fixture teria bastado
+    (confirmado enquanto o bug ainda estava só aqui: os testes de A4/A6 que
+    dependem de `log_events` falhavam de forma dependente de ordem mesmo com
+    o config global restaurado, porque o proxy já monkeypatchado ignora
+    `structlog.configure()`/`reset_defaults()` subsequentes).
+    """
+    root_logger = logging.getLogger()
+    previous_handlers = list(root_logger.handlers)
+    previous_level = root_logger.level
+
+    yield
+
+    root_logger.handlers = previous_handlers
+    root_logger.setLevel(previous_level)
+    structlog.reset_defaults()
 
 
 def _prices_df(rows: int = 2) -> pd.DataFrame:
