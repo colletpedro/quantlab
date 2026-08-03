@@ -10,11 +10,11 @@ from datetime import date
 
 import pandas as pd
 import pytest
-from tests.support import FakeProvider
 
 from quantlab.exceptions import DataError
 from quantlab.ingestion.provider import RawCorporateActions
 from quantlab.ingestion.resilient_provider import ResilientProvider
+from tests.support import FakeProvider
 
 _START = date(2024, 1, 1)
 _END = date(2024, 1, 31)
