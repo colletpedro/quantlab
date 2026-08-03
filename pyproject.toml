@@ -41,6 +41,7 @@ dev = [
     # Stubs exigidos por `mypy --strict` (RNF-05).
     "types-pyyaml>=6.0",
     "pandas-stubs>=2.2",
+    "pytest-randomly>=4.1.0",
 ]
 
 [build-system]
