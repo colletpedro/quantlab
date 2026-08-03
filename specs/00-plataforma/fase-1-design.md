@@ -1,7 +1,7 @@
 # Fase 1 (MVP) — Design técnico
 
 **Status:** aprovada — gate check 2 concluído
-**Versão:** 0.2
+**Versão:** 0.3
 **Data:** 2026-08-03
 **Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0
 **ADRs vinculantes:** 0001, 0002, 0003
@@ -71,6 +71,8 @@ Dependências apontam para dentro. `engine/` não conhece MongoDB nem yfinance; 
 
 Índice isolado em `date` não é criado: seletividade baixa (20 tickers por data) e nenhuma consulta parte da data sem o ticker.
 
+**Semântica de escrita: upsert pela chave única, simétrica a `corporate_actions` (v0.3).** A v0.2 declarava isso para `corporate_actions` (§3.2) e citava a mesma política "para barras", mas nunca escrevia a regra aqui. Fica explícita: se o provedor devolve valor diferente para uma data já gravada, a chave `{ticker, date}` casa e o documento é **atualizado**, com o valor anterior logado (ING-03.2). Reexecutar sobre uma janela já ingerida mantém a contagem (ING-03.1) porque a operação nunca é insert.
+
 **Alternativa descartada — `_id` composto** (`_id: {t: ..., d: ...}`). Daria unicidade sem índice adicional. Descartada porque a ordenação de subdocumento em Mongo é por documento inteiro, o que torna consultas de intervalo em `_id.d` corretas mas frágeis a qualquer mudança na ordem dos campos. O ganho de um índice não compensa a armadilha.
 
 **Alternativa descartada — bucketing por mês** (um documento por ticker-mês, com array de barras). É o padrão recomendado para séries temporais em Mongo e reduz overhead de documento. Descartada por volume: 50 mil documentos não justificam a complexidade de leitura parcial e de upsert dentro de array.
@@ -126,9 +128,13 @@ Quarentena **não bloqueia** o run (diferente de falha de provedor, ING-04.1): a
 
 Um documento por execução: tickers pedidos, janela, contagem de barras inseridas e atualizadas, tickers falhos, contagem de quarentenadas (com referência cruzada via `ingestion_run_id`), `warnings`, timestamps de início e fim. Atende PER-03.1 e serve de trilha de auditoria.
 
+**Índice (v0.3):** nenhum especificado ainda. A v0.2 não declarava índice para esta coleção, e o HANDOFF do Bloco A registrou a lacuna em vez de resolvê-la por palpite — inventar índice antes de existir consulta é decidir por um padrão de acesso que ninguém escreveu. Fica para quando B4 (orquestrador) definir como `ingestion_runs` é lido: se a consulta dominante for por `(ticker, started_at)`, por exemplo, é isso que o índice deve servir. **B4 deve especificar o índice no mesmo commit que grava nesta coleção**, não deixar para depois.
+
 ### 3.5 Coleção `backtest_runs`
 
 Documento heterogêneo — a razão declarada de ADR-0001 para escolher Mongo. Guarda: parâmetros da estratégia (formato livre), janela, capital inicial, configuração de custos, métricas, lista de trades, curva de equity, hash da série consumida, `ingestion_run_id` de referência, e versão do código.
+
+**Índice (v0.3):** mesma lacuna e mesma razão que §3.4. Fica para F1 (CLI `backtest`), quando o padrão de leitura de resultados existir.
 
 ### 3.6 Fronteira de timezone — RNF-07
 
@@ -141,7 +147,11 @@ BSON não tem tipo data-sem-hora. Toda data em Mongo é um instante. A conversã
 | domínio (`engine`, `analytics`, `strategies`) | `datetime.date` sempre | nunca converte |
 | `storage/repository.py` | `date` ⇄ `datetime` 00:00 UTC | **fronteira de saída** |
 
-Regra verificável: `datetime` só aparece em `ingestion/normalizer.py` e `storage/repository.py`. Um teste de arquitetura varre os imports e falha se a regra for violada. **Bloqueante no CI** (decisão Q3 da v0.1, confirmada): aviso não-bloqueante vira ruído e para de ser lido.
+**Regra verificável (v0.3):** a formulação original — "`datetime` só aparece em `ingestion/normalizer.py` e `storage/repository.py`" — se mostrou impossível de cumprir ao pé da letra durante a implementação do Bloco A. O tipo do domínio é `datetime.date`, do mesmo módulo da biblioteca padrão que a linha acima proíbe, e esta própria tabela manda usá-lo "sempre" no domínio. Proibir o módulo `datetime` proibiria o tipo que o design exige em todo lugar.
+
+A regra passa a ser: **a classe `datetime` e o aparato de fuso (`timezone`, `tzinfo`, `UTC`) só podem aparecer em `ingestion/normalizer.py` e `storage/repository.py`.** Os tipos `date` e `timedelta` são livres em todo o projeto — são vocabulário de data-calendário, e RNF-07 exige exatamente esse vocabulário no domínio. O que não pode vazar da fronteira é o *instante*, não a *data*.
+
+Um teste de arquitetura varre os imports e falha se a regra for violada. **Bloqueante no CI** (decisão Q3 da v0.1, confirmada): aviso não-bloqueante vira ruído e para de ser lido.
 
 ### 3.7 Leitura ajustada e materialização — ADR-0003
 
@@ -156,7 +166,11 @@ def get_series(
 ) -> PriceSeries: ...
 ```
 
-`PriceSeries` é um value object: dataclass congelada contendo arrays de preço/volume, datas, e metadados (`ticker`, `adjusted`, `hash`, `ingestion_run_id`).
+`PriceSeries` é um value object: dataclass congelada contendo arrays de preço/volume, datas, e metadados (`ticker`, `adjusted`, `hash`, `last_ingested_at`).
+
+**Sobre `ingestion_run_id` (v0.3 — removido dos metadados).** A v0.2 listava o campo aqui, mas o documento de `bars` em §3.1 nunca o carregou — só `quarantined_bars` tem `ingestion_run_id`, e uma `PriceSeries` é lida de `bars`, não de `quarantined_bars`. O campo não tinha de onde sair, e o Bloco A confirmou isso na implementação: nada em `storage/` sabia preenchê-lo. Mais fundamental: o campo era mal definido mesmo em tese — uma série materializada por `get_series` cobre uma janela de datas que pode atravessar **N ingestões distintas** (uma barra de 2015 e uma de 2024 quase certamente vieram de runs diferentes), então não existe um `ingestion_run_id` singular para atribuir à série inteira. PER-03.1 continua atendido, pelo caminho que já existia: `last_ingested_at` (derivado de `max(ingested_at)` sobre a janela) mais `hash`. Rastrear uma barra específica até seu run de origem continua possível — é `bars` → `ingested_at` → busca em `ingestion_runs` por intervalo de tempo —, só não é um campo único na série agregada.
+
+**Sobre `dates` (v0.3).** É um array de objetos `datetime.date`, não `numpy.datetime64`. `datetime64` reintroduziria instante e fuso pela porta dos fundos, contra RNF-07 — a mesma razão pela qual §3.6 proíbe a classe `datetime` fora da fronteira. O custo é acesso por objeto Python em vez de vetorizado nessa coluna especificamente; aceitável porque data não entra no laço quente do engine, que opera por índice inteiro.
 
 **Sobre imutabilidade — precisão da claim:** `frozen=True` impede reatribuição de atributos, não mutação do conteúdo dos arrays. A imutabilidade **dos dados** vem de outra medida: **na materialização, todos os arrays internos são marcados `flags.writeable = False`**. As duas juntas dão o que a v0.1 chamava vagamente de "imutável": nem os atributos trocam, nem os dados mudam — por qualquer caminho, incluindo via `.base` de views derivadas (ver 4.1).
 
@@ -171,13 +185,24 @@ fator_evento(dividendo d, close C) = (C − d)/C sobre preços,  1 sobre volume
 
 onde `C` é o fechamento **bruto** do pregão anterior à data ex. O fator aplicado à barra em `t` é o produto de todos os fatores de eventos com data **estritamente posterior** a `t` — `cumprod` reverso sobre a série de fatores diários, O(n).
 
-Casos de borda: evento anterior à primeira barra disponível é ignorado (não há o que ajustar); dividendo cuja data ex não tem barra anterior no banco é registrado como aviso e ignorado, porque `C` seria indefinido.
+**Casos de borda (v0.3 — precisados).** A v0.2 dava duas regras que se sobrepunham quando o evento sem barra anterior era um dividendo ("evento anterior à primeira barra é ignorado" e "dividendo sem barra anterior vira aviso") sem dizer qual prevalece. Resolvido por especificidade — a regra mais específica ao tipo de evento vence:
+
+- **Split** sem nenhuma barra estritamente anterior a ele (evento anterior à primeira barra da série disponível): descartado em silêncio. Não há preço para dividir nem volume para multiplicar; não é uma anomalia, é a série simplesmente não cobrir aquele passado.
+- **Dividendo** sem nenhuma barra estritamente anterior: descartado, mas com **aviso**, porque `C` — o fechamento anterior — seria indefinido e descartar em silêncio esconderia um ajuste que deveria ter acontecido caso a série cobrisse uma barra a mais para trás.
+
+**Dividendo maior ou igual a `C` (v0.3 — não coberto na v0.2).** Produziria fator `(C − d)/C` nulo ou negativo, e um preço ajustado nulo ou negativo atravessaria o resto do sistema parecendo um número válido — o tipo de corrupção silenciosa que este projeto existe para evitar. Tratado como `DataError`: um dividendo maior ou igual ao fechamento do pregão anterior não corresponde a nenhum evento real e indica dado corrompido do provedor. A mensagem de erro deve sugerir a conferência dos eventos corporativos daquele ticker na data em questão.
 
 ### 3.8 Hash determinístico — PER-03.1
 
 SHA-256 sobre a representação canônica da série ajustada: linhas ordenadas por data, cada campo formatado com **6 casas decimais fixas**, separador fixo, sem localização.
 
 O arredondamento explícito não é cosmético: sem ele, diferenças de última casa entre plataformas produziriam hashes distintos para a mesma série, e a reprodutibilidade que o hash deveria provar seria justamente o que ele quebraria.
+
+**Campos que entram no hash (v0.3 — enumerados).** A v0.2 dizia "cada campo" sem listar quais, o que não faz sentido ao pé da letra para uma data (uma data não tem 6 casas decimais). Por linha: `date` em ISO-8601 (`AAAA-MM-DD`), seguida de `open`, `high`, `low`, `close`, `volume`, cada um com 6 casas decimais fixas.
+
+`ticker` e a flag `adjusted` **ficam fora** do hash — ambos já são registrados à parte no relatório (§3.5) como metadados da série, e o hash em si identifica o *conteúdo* da série de preços, não sua identidade. Consequência aceita: duas séries de tickers diferentes com preços numericamente idênticos produziriam o mesmo hash. Se isso vier a importar, ticker entra na representação canônica em versão futura — mudaria todo hash já gravado, por isso não é decisão a tomar sem necessidade concreta.
+
+**Zero negativo (v0.3).** `f"{-0.0:.6f}"` produz `"-0.000000"`, que como string difere de `"0.000000"` — hashes distintos para valores numericamente iguais. Não deveria aparecer em preço, mas é exatamente o tipo de "diferença de última casa" que este parágrafo já manda neutralizar; a implementação normaliza zero negativo para positivo antes de formatar.
 
 ---
 
@@ -349,3 +374,4 @@ O item 5 é consequência direta de ADR-0003 + premissa 3 do requirements (sem f
 |---|---|---|
 | 0.1 | 2026-08-03 | Rascunho inicial |
 | 0.2 | 2026-08-03 | Review incorporado: (1) claim "sem escapatória" do `MarketView` corrigida — `.base` do numpy documentado, arrays-mãe marcados read-only na materialização, teste de ENG-01.3 passa a exercitar o caminho de fuga, risco adicionado à tabela; (2) distorção de quantidade inteira sobre preço ajustado adicionada à seção fixa de vieses (item 5), junto com slippage que também faltava; (3) quarentena desenhada — coleção `quarantined_bars`, regras, destino, módulo responsável (3.3); (4) referências de CA prefixadas por família (ENG-/ANA-/ING-/PER-) eliminando colisões de namespace; (5) semântica de upsert de `corporate_actions` declarada + hash divergente após revisão retroativa explicitado como sinal esperado (3.2); menores: `LookaheadError` → `InsufficientHistoryError` para histórico insuficiente, imutabilidade da `PriceSeries` precisada (frozen + writeable=False). Q1–Q3 fechadas |
+| 0.3 | 2026-08-03 | Ambiguidades encontradas na implementação do Bloco A (HANDOFF §"Bloco A — storage", seção 4), resolvidas: (1) regra da fronteira de timezone (3.6) reescrita — proíbe a classe `datetime` e o aparato de fuso fora de `ingestion/normalizer.py`/`storage/repository.py`, não o módulo inteiro, que proibiria o próprio `datetime.date` que o design exige no domínio; (2) `ingestion_run_id` removido dos metadados da `PriceSeries` (3.7) — o documento de `bars` nunca carregou o campo, e uma série materializada pode atravessar N ingestões, então não existe um valor singular correto; PER-03.1 continua atendido por `last_ingested_at` + hash; (3) índices de `ingestion_runs` e `backtest_runs` (3.4, 3.5) explicitamente adiados para quando B4 e F1 definirem o padrão de acesso, em vez de ficarem como lacuna silenciosa; (4) campos do hash enumerados — data ISO-8601 + OHLCV, ticker e `adjusted` de fora (3.8); zero negativo normalizado antes de formatar; (5) as duas bordas de ajuste que se sobrepunham (3.7) resolvidas por especificidade: split sem barra anterior é silencioso, dividendo sem barra anterior é aviso + descarte; (6) dividendo ≥ fechamento bruto anterior definido como `DataError` (3.7) — fator nulo ou negativo seria corrupção silenciosa; (7) `dates` da `PriceSeries` especificado como array de `datetime.date`, nunca `datetime64` (3.7); (8) semântica de escrita de `bars` (3.1) escrita explicitamente — upsert pela chave única com log de revisão, simétrica ao que §3.2 já dizia de `corporate_actions`. A implementação do Bloco A já seguia sete das oito decisões (o gate estava code-first nesses pontos); a exceção foi o campo `ingestion_run_id` da `PriceSeries` (item 2), que existia na classe sem ser usado em lugar nenhum e foi removido no mesmo commit desta revisão, para o código não ficar contradizendo a spec por um campo morto. |

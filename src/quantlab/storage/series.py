@@ -54,10 +54,10 @@ class PriceSeries:
     adjusted: bool
     hash: str
     #: ISO-8601 da ingestão mais recente que tocou a janela (PER-03.1).
+    #: Não há `ingestion_run_id` na série (design v0.3 §3.7): uma série
+    #: materializada pode atravessar N ingestões, então não existe um valor
+    #: singular correto para atribuir a ela.
     last_ingested_at: str | None = None
-    #: Ver HANDOFF: o documento de `bars` em design §3.1 não carrega este
-    #: campo, então nada em storage sabe preenchê-lo. Fica para a v0.3.
-    ingestion_run_id: str | None = None
 
     def __post_init__(self) -> None:
         arrays = (self.dates, self.open, self.high, self.low, self.close, self.volume)
