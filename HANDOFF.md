@@ -437,3 +437,201 @@ original (a–h) mais os quatro extras pedidos nesta rodada (`test-unit`,
 `test-integration`, `audit`, `docker compose config`) foram todos reexecutados depois
 de cada mudança e terminaram verdes — sequência completa registrada por último logo
 antes do push final.
+
+---
+
+## Bloco A — storage
+
+**Data:** 2026-08-03
+**Origem:** `fase-1-tasks.md` v0.1, Bloco A, tarefas A1 a A10
+**Escopo:** apenas `storage/`. `ingestion/`, `engine/`, `strategies/` e `analytics/`
+continuam vazios — são dos Blocos B a E.
+
+### 1. O que foi implementado, por tarefa
+
+Um commit por tarefa, na ordem A1 → A10.
+
+| Tarefa | Entrega | Arquivos |
+|---|---|---|
+| **A1** | Cliente Mongo com pool, timeouts explícitos e fechamento determinístico. `DataError` acionável citando `make up` e `QUANTLAB_MONGO_URI` | `storage/client.py` |
+| **A2** | As cinco coleções de §3.1–3.5 com índices idempotentes | `storage/schema.py` |
+| **A3** | `to_bson_date`/`from_bson_date`, só no repositório | `storage/repository.py`, `storage/models.py` |
+| **A4** | Upsert de barras por `(ticker, date)` com log de revisão | `storage/repository.py` |
+| **A5** | Upsert de eventos por `(ticker, date, kind)` com log de revisão | `storage/repository.py` |
+| **A6** | Quarentena em coleção própria, payload bruto, todas as razões | `storage/repository.py` |
+| **A7** ⭐ | Fator de ajuste cumulativo por `cumprod` reverso, O(n) | `storage/adjustment.py` |
+| **A8** | `PriceSeries` congelada + arrays read-only; `get_series` | `storage/series.py`, `storage/repository.py` |
+| **A9** | SHA-256 canônico, 6 casas fixas | `storage/hashing.py` |
+| **A10** | Job de integração no CI; remoção da dívida do exit 5 | `.github/workflows/ci.yml`, `Makefile` |
+
+Pontos onde o design é específico e o mecanismo foi implementado como escrito:
+
+- **A2** — `bars` tem `{ticker: 1, date: 1}` **único** e nenhum índice isolado em
+  `date`. Há um teste que falha se alguém adicionar um. `IXSCAN` provado com
+  `explain()`, percorrendo o plano aninhado em vez de olhar só o topo (é aí que essa
+  verificação costuma passar por acidente).
+- **A3** — a conversão existe só em `repository.py`. Um teste de arquitetura varre os
+  imports de `storage/` e falha se outro módulo tocar em instante.
+- **A6** — coleção própria, não flag; payload bruto preservado inclusive nos campos
+  que o quantlab não conhece; todas as razões.
+- **A7** — `C` é o fechamento **bruto** do pregão anterior; `cumprod` reverso;
+  bordas de §3.7.
+- **A8** — `frozen=True` **e** `flags.writeable = False`, as duas; eventos sobre o
+  histórico completo.
+- **A9** — 6 casas decimais fixas, ordem por data, separador fixo, sem localização.
+
+### 2. Resultado da verificação e do CI
+
+**Local — tudo verde:**
+
+| Comando | Resultado |
+|---|---|
+| `make install` | exit 0 |
+| `make lint` | exit 0 |
+| `make typecheck` | exit 0 — 34 arquivos, `mypy --strict` |
+| `make test` | exit 0 — 108 unitários, cobertura ≥ 80% |
+| `make test-unit` | exit 0 — 108 |
+| `make test-integration` | exit 0 — 43 contra Mongo real |
+| `make check` | exit 0 |
+| `make audit` | exit 0 — nenhuma vulnerabilidade |
+| `pre-commit run --all-files` | exit 0 — 8 hooks |
+| `python -m quantlab version` | exit 0 |
+| `docker compose config` | exit 0 |
+
+**CI — [run 30836546555](https://github.com/colletpedro/quantlab/actions/runs/30836546555), os três jobs verdes:**
+
+| Job | Duração | Resultado |
+|---|---|---|
+| Lint, tipos e testes | 22 s | ✅ (offline, RNF-06) |
+| **Testes de integração** | 40 s | ✅ **43 passed, 108 deselected** contra `mongo:7` |
+| Auditoria de dependências | 18 s | ✅ |
+
+O log do job de integração confirma `collected 151 items / 108 deselected / 43
+selected` seguido de `43 passed` — os testes rodaram de verdade contra o serviço, não
+foram silenciosamente coletados como zero.
+
+**Verificação de A10, feita localmente e não commitada:** com os testes presentes
+`make test-integration` sai 0; movendo todos os `test_*.py` de `tests/integration/`
+para fora, o alvo falha (`108 deselected`, pytest exit 5); restaurados, volta a 0.
+
+**A7 conferido por mutação.** Como é a tarefa de maior risco e os testes passaram de
+primeira, verifiquei que eles têm dente, quebrando a implementação de propósito:
+
+| Mutação | Testes que caem |
+|---|---|
+| `bisect_left` → `bisect_right` (a barra da data ex passa a ser ajustada) | 15 |
+| split multiplica o preço em vez de dividir | 13 |
+| erro de 1e-7 no fator de volume | 1 |
+
+Arquivo restaurado byte a byte depois (conferido com `diff`), 27 testes verdes.
+
+### 3. Decisões que tomei por conta própria — revise
+
+**3.1 Dividendo ≥ fechamento anterior levanta `DataError`.** O design não diz o que
+fazer. O fator `(C − d)/C` viraria zero ou negativo, e preço nulo ou negativo
+atravessaria o resto do sistema parecendo um número. Optei por falhar alto. A
+alternativa — avisar e ignorar o evento — é defensável e produziria uma série
+*parcialmente* ajustada, que é o tipo de resultado que este projeto trata como pior
+que nenhum. Se preferir a outra, é uma linha.
+
+**3.2 Zero negativo normalizado no hash.** `f"{-0.0:.6f}"` devolve `"-0.000000"`, que
+difere de `"0.000000"` e daria hashes distintos para valores numericamente iguais.
+Não deveria aparecer em preço, mas é exatamente a "diferença de última casa" que §3.8
+manda neutralizar. Normalizei. Não está escrito no design.
+
+**3.3 O que entra no hash.** §3.8 diz "cada campo" sem enumerar. Incluí data (ISO-8601)
+mais os cinco campos OHLCV. **Ticker e flag `adjusted` ficaram de fora** — os dois já
+são registrados à parte no relatório. Consequência: duas séries de tickers diferentes
+com preços idênticos colidiriam no hash. Aceitável hoje; se você quiser o ticker
+dentro, é decisão sua e muda todo hash já gravado.
+
+**3.4 `MongoRepository` é classe, não funções soltas.** §3.7 mostra
+`def get_series(ticker, start, end, adjusted)` sem `self` nem parâmetro de banco. Como
+alguém precisa segurar a conexão, virou método — a assinatura pública vista pelo
+chamador é a mesma.
+
+**3.5 `volume` é `float64` na `PriceSeries`.** Split de razão não inteira deixa o
+volume fracionário; manter `int` obrigaria a truncar em silêncio. O volume não é usado
+pelo engine na Fase 1 (premissa 5: sem limite de participação).
+
+**3.6 `dates` é array de objetos `date`.** Não `datetime64`, que reintroduziria
+instante e fuso contra RNF-07. Custa performance de acesso, mas datas não estão no
+laço quente — o engine compara índices.
+
+**3.7 `ruff format` deixou de tocar `specs/`.** Esta versão do ruff reformata blocos
+```python dentro de Markdown, e ao versionar o design v0.2 o `make lint` passou a
+querer reescrevê-lo. Documento normativo não é reformatado por ferramenta, e os ADRs
+são declarados imutáveis em CLAUDE.md §2. Commit próprio.
+
+**3.8 Status dos gates nas specs.** Os headers diziam "aguardando gate check 2" e
+"draft — aguardando gate check 3", contradizendo a instrução de implementar. Marquei
+os três como aprovados em commit separado, antes de qualquer código, conforme
+CLAUDE.md §1. **A aprovação é sua declaração, não inferência minha** — se algum gate
+não estiver mesmo fechado, é aqui que se reverte.
+
+**3.9 `explicit_package_bases` no mypy.** Com dois `conftest.py` os nomes de módulo
+colidiam e a checagem parava antes de começar.
+
+### 4. Onde o design v0.2 se mostrou ambíguo ou incompleto — para a v0.3
+
+Em ordem de impacto.
+
+**4.1 §3.6 é impossível de cumprir ao literal.** "`datetime` só aparece em
+`ingestion/normalizer.py` e `storage/repository.py`" — mas o tipo do domínio é
+`datetime.date`, do mesmo módulo da biblioteca padrão, e a tabela da própria §3.6 diz
+"domínio: `datetime.date` sempre". Proibir o módulo proibiria o tipo que o design
+manda usar em toda parte. Implementei a regra pretendida: o que não pode vazar é a
+classe `datetime` e o aparato de fuso (`UTC`, `timezone`, `tzinfo`); `date` e
+`timedelta` são livres. **A v0.3 deveria escrever a regra assim**, porque B5 vai
+implementar a mesma varredura para o projeto inteiro e precisa da formulação certa.
+
+**4.2 `ingestion_run_id` na `PriceSeries` não tem de onde sair.** §3.7 lista o campo
+entre os metadados, mas o documento de `bars` em §3.1 **não tem esse campo** — só
+`quarantined_bars` tem. Nada em storage sabe preenchê-lo. Deixei `None` e atendi
+PER-03.1 pelo outro caminho que a §3.1 permite: `last_ingested_at`, derivado de
+`max(ingested_at)` sobre a janela. A v0.3 precisa escolher: (a) adicionar
+`ingestion_run_id` ao documento de `bars`, (b) resolver por consulta a
+`ingestion_runs`, ou (c) tirar o campo da `PriceSeries`.
+
+**4.3 §3.4 e §3.5 não declaram índice nenhum.** `ingestion_runs` e `backtest_runs`
+ficaram sem, porque inventar índice é decidir por um padrão de acesso que ninguém
+escreveu. Quando B4 e F1 forem escrever nessas coleções, o padrão vai aparecer e o
+índice deve ser especificado então.
+
+**4.4 §3.8 não enumera os campos do hash nem diz como formatar a data.** Ver 3.3
+acima. "Cada campo com 6 casas decimais" não se aplica a uma data.
+
+**4.5 As duas bordas de §3.7 se sobrepõem.** "Evento anterior à primeira barra é
+ignorado" e "dividendo sem barra anterior vira aviso e é ignorado" descrevem a mesma
+condição quando o evento é um dividendo. Implementei como: descarte silencioso para
+split, descarte com aviso para dividendo (a regra mais específica vence). Vale
+escrever assim.
+
+**4.6 §3.7 não diz o que fazer com dividendo ≥ `C`.** Ver 3.1.
+
+**4.7 §3.7 não especifica a representação de `dates` na `PriceSeries`.** §4.1 sugere
+`NDArray` ao listar `dates` junto dos preços, mas não diz o dtype. Ver 3.6.
+
+**4.8 A semântica de escrita de `bars` não está escrita.** §3.2 declara "upsert pela
+chave única" para `corporate_actions`, e diz que a política de log de ING-03.2 vale
+"para barras" — mas não há uma §3.1 equivalente dizendo o mesmo de `bars`. Deduzi da
+simetria. Vale explicitar.
+
+### 5. Próximo passo
+
+**Bloco B — ingestão**, que consome o Bloco A e é o próximo na ordem de dependência
+de `tasks.md`. B1 (cliente yfinance) → B2 (normalizador) → B3 (validador) → B4
+(orquestrador) → B5 (teste de arquitetura) → B6 (CLI `ingest`).
+
+Dois avisos para quem pegar:
+
+- **B5 deve reaproveitar a formulação de 4.1**, não a literal de §3.6. O recorte de
+  storage já está em `tests/unit/test_storage_date_isolation.py` e serve de base — B5
+  é a mesma varredura ampliada para o projeto inteiro.
+- **B3 (validador) é quem decide o que é inválido.** O Bloco A só entrega o destino
+  (`quarantine_bars`). As regras de ING-05.1 não estão implementadas em lugar nenhum
+  ainda, e os avisos não-bloqueantes de ING-05.2/05.3 dependem de `ingestion_runs`,
+  que B4 escreve.
+
+Antes de B1, vale decidir 4.1 e 4.2 na v0.3 do design: as duas afetam código que o
+Bloco B vai escrever, e corrigir a spec depois do código é o que CLAUDE.md §1 proíbe.
