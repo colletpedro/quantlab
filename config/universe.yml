@@ -1,0 +1,82 @@
+# Universo default do quantlab — 20 ações americanas líquidas.
+#
+# ATENÇÃO — VIÉS CONHECIDO E DECLARADO (RF-ANA-03):
+# Esta lista é FIXA e foi montada olhando para empresas que existem e são
+# líquidas HOJE (2026-08-03). Ela está, portanto, sujeita a SURVIVORSHIP BIAS:
+# empresas que faliram, foram adquiridas ou deslistadas ao longo da janela de
+# backtest simplesmente não aparecem aqui. O efeito é inflar o retorno de
+# qualquer estratégia testada sobre este universo — inclusive o do benchmark
+# buy-and-hold. Todo relatório de backtest deve declarar este viés.
+#
+# Corrigir isso exigiria constituintes históricos de índice datados
+# (point-in-time), que não estão disponíveis nas fontes gratuitas usadas na
+# Fase 1. A lista é versionada aqui para que qualquer resultado passado possa
+# ser reproduzido sobre exatamente o mesmo universo (RNF-01, premissa 1).
+#
+# Setores seguem a nomenclatura GICS. Tickers no formato aceito pelo yfinance.
+
+version: 1
+source: "curadoria manual — large caps americanas por setor GICS"
+
+universe:
+  # Information Technology
+  - ticker: AAPL
+    sector: Information Technology
+  - ticker: MSFT
+    sector: Information Technology
+  - ticker: NVDA
+    sector: Information Technology
+
+  # Communication Services
+  - ticker: GOOGL
+    sector: Communication Services
+  - ticker: META
+    sector: Communication Services
+
+  # Consumer Discretionary
+  - ticker: AMZN
+    sector: Consumer Discretionary
+  - ticker: HD
+    sector: Consumer Discretionary
+
+  # Consumer Staples
+  - ticker: PG
+    sector: Consumer Staples
+  - ticker: KO
+    sector: Consumer Staples
+
+  # Health Care
+  - ticker: JNJ
+    sector: Health Care
+  - ticker: UNH
+    sector: Health Care
+
+  # Financials
+  - ticker: JPM
+    sector: Financials
+  - ticker: BRK-B
+    sector: Financials
+
+  # Energy
+  - ticker: XOM
+    sector: Energy
+  - ticker: CVX
+    sector: Energy
+
+  # Industrials
+  - ticker: CAT
+    sector: Industrials
+  - ticker: UNP
+    sector: Industrials
+
+  # Utilities
+  - ticker: NEE
+    sector: Utilities
+
+  # Real Estate
+  - ticker: AMT
+    sector: Real Estate
+
+  # Materials
+  - ticker: LIN
+    sector: Materials
