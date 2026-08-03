@@ -42,7 +42,14 @@ test-unit: ## Apenas os testes marcados como unit
 	$(RUN) pytest -m unit
 
 test-integration: ## Apenas os testes marcados como integration (exige `make up`)
-	$(RUN) pytest -m integration
+	@# pytest devolve 5 quando não coleta nada. Na Fase 0 ainda não existe
+	@# teste de integração, e um alvo vermelho por ausência seria ruído.
+	@# Remover esta tolerância assim que o primeiro teste de integração entrar.
+	@$(RUN) pytest -m integration; status=$$?; \
+		if [ $$status -eq 5 ]; then \
+			echo "Nenhum teste de integração ainda (Fase 0)."; exit 0; \
+		fi; \
+		exit $$status
 
 # ─── Qualidade ───────────────────────────────────────────────────────────────
 
@@ -58,7 +65,8 @@ typecheck: ## mypy --strict (RNF-05)
 	$(RUN) mypy src tests
 
 audit: ## Vulnerabilidades conhecidas nas dependências instaladas
-	$(RUN) pip-audit
+	@# --skip-editable pula o próprio quantlab, que não está publicado no PyPI.
+	$(RUN) pip-audit --skip-editable
 
 check: lint typecheck test ## Portão local completo — espelha o job "quality" do CI
 

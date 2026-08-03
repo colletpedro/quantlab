@@ -5,6 +5,10 @@
 #
 # Todas as variáveis vêm de .env — copie .env.example antes do primeiro `make up`.
 
+# Fixa o nome do projeto: sem isso o compose usa o nome do diretório, e o volume
+# de dados mudaria de nome se alguém clonasse o repo em outra pasta.
+name: quantlab
+
 services:
   mongo:
     image: mongo:7
