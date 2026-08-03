@@ -1,0 +1,351 @@
+# Fase 1 (MVP) — Design técnico
+
+**Status:** aprovada — gate check 2 concluído
+**Versão:** 0.2
+**Data:** 2026-08-03
+**Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0
+**ADRs vinculantes:** 0001, 0002, 0003
+
+> **Convenção de referência:** critérios de aceitação são citados com prefixo da família de requisito — `ENG-01.4` significa CA-01.4 de RF-ENG-01; `ANA-01.4` significa CA-01.4 de RF-ANA-01. A v0.1 citava CAs sem prefixo e colidia namespaces. Recomenda-se adotar a mesma convenção no requirements na próxima revisão dele.
+
+---
+
+## 1. Princípio organizador
+
+Um requisito pode ser satisfeito de duas formas: por convenção (o código faz a coisa certa porque quem escreveu lembrou) ou por construção (o código não consegue fazer a coisa errada).
+
+O requisito central da fase — a invariante anti-lookahead — é satisfeito **por construção contra acidente**: a estratégia não recebe os dados futuros e o caminho normal de acesso é fechado. Contra código deliberadamente adversarial a garantia não é absoluta (ver 4.1 — Python não oferece encapsulamento forte), e o design declara isso em vez de fingir o contrário. A consequência prática permanece: o teste de ENG-01.2 confirma um desenho, não vigia um descuido.
+
+Onde a construção não é possível, o design nomeia explicitamente qual teste carrega a garantia.
+
+## 2. Arquitetura
+
+```
+                 ┌──────────────┐
+ yfinance ──────▶│  ingestion/  │──────┐
+                 └──────────────┘      │
+                                       ▼
+                              ┌──────────────────────┐
+                              │       storage/       │
+                              │  bars (bruto)        │◀── MongoDB
+                              │  corporate_actions   │
+                              │  quarantined_bars    │
+                              │  ingestion_runs      │
+                              │  backtest_runs       │
+                              └──────────┬───────────┘
+                                         │ PriceSeries (ajustada)
+                                         ▼
+   strategies/ ──Signal──▶  ┌──────────────────┐
+        ▲                   │     engine/      │
+        │  MarketView        │  loop de barras  │
+        └───────────────────│  Broker          │
+                             │  Portfolio       │
+                             └────────┬─────────┘
+                                      │ BacktestResult
+                                      ▼
+                             ┌──────────────────┐
+                             │    analytics/    │──▶ Report ──▶ CLI + PNG
+                             └──────────────────┘
+```
+
+Dependências apontam para dentro. `engine/` não conhece MongoDB nem yfinance; recebe uma `PriceSeries` já materializada. `strategies/` não conhece o engine, só o contrato. Isso é o que permite RNF-03: testes de engine rodam sobre séries construídas à mão, sem banco.
+
+---
+
+## 3. Camada de persistência
+
+### 3.1 Coleção `bars`
+
+```javascript
+{
+  ticker: "AAPL",           // string, uppercase
+  date:   ISODate(...),     // 00:00:00 UTC — ver 3.6
+  open:   185.42,  high: 187.05,  low: 184.90,  close: 186.31,
+  volume: 54321000,         // int
+  source: "yfinance",
+  ingested_at: ISODate(...)
+}
+```
+
+Índice: `{ticker: 1, date: 1}`, **único**. Ele serve três padrões de acesso: consulta por ticker + intervalo (o dominante), consulta por ticker inteiro (pelo prefixo) e a garantia de unicidade que torna o upsert de PER-01.1 correto.
+
+Índice isolado em `date` não é criado: seletividade baixa (20 tickers por data) e nenhuma consulta parte da data sem o ticker.
+
+**Alternativa descartada — `_id` composto** (`_id: {t: ..., d: ...}`). Daria unicidade sem índice adicional. Descartada porque a ordenação de subdocumento em Mongo é por documento inteiro, o que torna consultas de intervalo em `_id.d` corretas mas frágeis a qualquer mudança na ordem dos campos. O ganho de um índice não compensa a armadilha.
+
+**Alternativa descartada — bucketing por mês** (um documento por ticker-mês, com array de barras). É o padrão recomendado para séries temporais em Mongo e reduz overhead de documento. Descartada por volume: 50 mil documentos não justificam a complexidade de leitura parcial e de upsert dentro de array.
+
+### 3.2 Coleção `corporate_actions`
+
+```javascript
+{
+  ticker: "AAPL",
+  date:   ISODate(...),     // data ex
+  kind:   "dividend" | "split",
+  value:  0.24,             // dividendo por ação — presente sse kind == "dividend"
+  ratio:  4.0,              // razão do split  — presente sse kind == "split"
+  ingested_at: ISODate(...)
+}
+```
+
+Índice `{ticker: 1, date: 1, kind: 1}`, único. `kind` entra na chave porque dividendo e split podem cair na mesma data.
+
+**Semântica de escrita: upsert pela chave única.** Se o provedor revisa retroativamente o valor de um dividendo, a chave `{ticker, date, kind}` casa e o documento é **atualizado**, com o valor anterior logado (mesma política de ING-03.2 para barras). Coleção separada de `bars` exatamente porque o ciclo de vida é outro: eventos são revisados retroativamente (ING-02.3) e cobrem o histórico completo, não a janela ingerida.
+
+**Consequência declarada:** revisão retroativa de um evento muda a série ajustada e, portanto, o hash de PER-03.1. Isso é o comportamento desejado — o hash existe para detectar exatamente essa mudança de estado. Hash divergente entre dois runs após uma reingestão é **sinal esperado de revisão de dados**, não bug; o relatório de backtest referencia o `ingestion_run_id`, permitindo rastrear a divergência à sua causa.
+
+### 3.3 Coleção `quarantined_bars`
+
+A v0.1 referenciava quarentena sem desenhá-la. Fica desenhada aqui.
+
+**Regras que disparam quarentena** — as de ING-05.1, avaliadas por `ingestion/validator.py` **antes** de qualquer escrita em `bars`:
+
+- `high < low`
+- `open` ou `close` fora de `[low, high]`
+- qualquer preço ≤ 0
+- `volume < 0`
+
+**Destino:** a barra rejeitada **não entra** em `bars`. O payload bruto vai para a coleção própria:
+
+```javascript
+{
+  ticker: "XYZ",
+  date: ISODate(...),
+  raw: { ... },                    // payload como veio do provedor, intacto
+  reasons: ["close_above_high"],   // toda regra violada, não só a primeira
+  ingestion_run_id: ObjectId(...),
+  quarantined_at: ISODate(...)
+}
+```
+
+**Decisões:** (a) coleção própria, e não flag em `bars` — uma barra inválida dentro de `bars` seria uma bomba esperando um `find` que esqueça o filtro; (b) payload bruto preservado, e não descartado com log — quarentena serve para diagnóstico, e diagnóstico precisa do dado original; (c) sem índice único — o mesmo par `(ticker, date)` pode ser quarentenado em runs diferentes, e o histórico interessa; índice simples `{ticker: 1, date: 1}` para consulta.
+
+Quarentena **não bloqueia** o run (diferente de falha de provedor, ING-04.1): as demais barras do ticker seguem, e o `ingestion_run` registra a contagem. Os avisos não-bloqueantes de ING-05.2 e ING-05.3 (gap de pregões, variação extrema sem split) **não** quarentenam — são registrados como `warnings` no `ingestion_run`, porque a barra em si é plausível; o que é suspeito é o contexto.
+
+### 3.4 Coleção `ingestion_runs`
+
+Um documento por execução: tickers pedidos, janela, contagem de barras inseridas e atualizadas, tickers falhos, contagem de quarentenadas (com referência cruzada via `ingestion_run_id`), `warnings`, timestamps de início e fim. Atende PER-03.1 e serve de trilha de auditoria.
+
+### 3.5 Coleção `backtest_runs`
+
+Documento heterogêneo — a razão declarada de ADR-0001 para escolher Mongo. Guarda: parâmetros da estratégia (formato livre), janela, capital inicial, configuração de custos, métricas, lista de trades, curva de equity, hash da série consumida, `ingestion_run_id` de referência, e versão do código.
+
+### 3.6 Fronteira de timezone — RNF-07
+
+BSON não tem tipo data-sem-hora. Toda data em Mongo é um instante. A conversão é inevitável — o que importa é que aconteça em **um lugar só**.
+
+| Camada | Tipo de data | Responsável pela conversão |
+|---|---|---|
+| yfinance | `pd.Timestamp`, às vezes tz-aware | — |
+| `ingestion/normalizer.py` | converte para `datetime.date` | **fronteira de entrada** |
+| domínio (`engine`, `analytics`, `strategies`) | `datetime.date` sempre | nunca converte |
+| `storage/repository.py` | `date` ⇄ `datetime` 00:00 UTC | **fronteira de saída** |
+
+Regra verificável: `datetime` só aparece em `ingestion/normalizer.py` e `storage/repository.py`. Um teste de arquitetura varre os imports e falha se a regra for violada. **Bloqueante no CI** (decisão Q3 da v0.1, confirmada): aviso não-bloqueante vira ruído e para de ser lido.
+
+### 3.7 Leitura ajustada e materialização — ADR-0003
+
+Assinatura pública do repositório:
+
+```python
+def get_series(
+    ticker: str,
+    start: date | None = None,
+    end: date | None = None,
+    adjusted: bool = True,
+) -> PriceSeries: ...
+```
+
+`PriceSeries` é um value object: dataclass congelada contendo arrays de preço/volume, datas, e metadados (`ticker`, `adjusted`, `hash`, `ingestion_run_id`).
+
+**Sobre imutabilidade — precisão da claim:** `frozen=True` impede reatribuição de atributos, não mutação do conteúdo dos arrays. A imutabilidade **dos dados** vem de outra medida: **na materialização, todos os arrays internos são marcados `flags.writeable = False`**. As duas juntas dão o que a v0.1 chamava vagamente de "imutável": nem os atributos trocam, nem os dados mudam — por qualquer caminho, incluindo via `.base` de views derivadas (ver 4.1).
+
+**Quem paga o custo de CPU, e por quanto tempo:** o ajuste é computado **uma vez por chamada de `get_series`**, e o `PriceSeries` vive enquanto durar o backtest. O engine recebe o objeto materializado e nunca reconsulta o repositório. Uma travessia de ajuste por backtest, não uma por barra. Sem cache em Fase 1 — ADR-0003 registra materialização em Redis como escopo da Fase 2, condicionada a problema de performance real; RNF-04 dá folga.
+
+**Algoritmo do fator.** Eventos carregados sobre o histórico completo do ticker (ING-02.3): um split fora da janela ainda afeta os preços dentro dela.
+
+```
+fator_evento(split, razão r)       = 1/r sobre preços,  r sobre volume
+fator_evento(dividendo d, close C) = (C − d)/C sobre preços,  1 sobre volume
+```
+
+onde `C` é o fechamento **bruto** do pregão anterior à data ex. O fator aplicado à barra em `t` é o produto de todos os fatores de eventos com data **estritamente posterior** a `t` — `cumprod` reverso sobre a série de fatores diários, O(n).
+
+Casos de borda: evento anterior à primeira barra disponível é ignorado (não há o que ajustar); dividendo cuja data ex não tem barra anterior no banco é registrado como aviso e ignorado, porque `C` seria indefinido.
+
+### 3.8 Hash determinístico — PER-03.1
+
+SHA-256 sobre a representação canônica da série ajustada: linhas ordenadas por data, cada campo formatado com **6 casas decimais fixas**, separador fixo, sem localização.
+
+O arredondamento explícito não é cosmético: sem ele, diferenças de última casa entre plataformas produziriam hashes distintos para a mesma série, e a reprodutibilidade que o hash deveria provar seria justamente o que ele quebraria.
+
+---
+
+## 4. Engine — o núcleo
+
+### 4.1 `MarketView` — fechando o caminho normal e declarando o anormal
+
+```python
+class MarketView:
+    """Janela sobre a série, limitada à barra corrente."""
+    @property
+    def i(self) -> int: ...              # índice da barra corrente
+    @property
+    def close(self) -> NDArray: ...      # fatia [0 : i+1], somente leitura
+    # idem open, high, low, volume, dates
+    def last(self, field: str, n: int) -> NDArray: ...
+```
+
+O que a construção garante, e por quais mecanismos:
+
+1. **Fatiamento na origem.** Cada acessor devolve `array[: i+1]`. Fatia de numpy é *view*, não cópia — custo O(1), sem penalidade de performance.
+2. **Arrays-mãe read-only.** Toda view de numpy expõe `.base`, que aponta para o array original completo — incluindo o futuro. Não há como remover esse atributo. O que o design faz é neutralizar a parte perigosa: como a `PriceSeries` marca os **arrays-mãe** com `writeable=False` na materialização (3.7), o caminho via `.base` não permite **mutação** por nenhuma rota. A **leitura** do futuro via `.base` permanece tecnicamente possível.
+3. **Superfície mínima.** `MarketView` não expõe a `PriceSeries`, o array completo nem o índice máximo por sua API. `last(field, n)` com `n > i+1` levanta `InsufficientHistoryError` — nome correto para o que é: histórico insuficiente, não tentativa de lookahead. Com `warmup` declarado isso não deve ocorrer; se ocorrer, o nome do erro aponta a causa certa a quem debugar.
+
+**Claim honesta:** isto é proteção contra **acidente**, não contra **adversário**. Python não tem encapsulamento forte; uma estratégia que escreva `view.close.base` deliberadamente lê o futuro. A postura do design é a mesma já adotada para `writeable=False` na v0.1: aceitar, declarar, e documentar em código — **o teste de ENG-01.3 tenta explicitamente o caminho via `.base`**, verifica que a mutação falha (`ValueError` do numpy) e que a leitura, embora possível, está fora do contrato. A limitação fica gravada onde não se perde: na suíte.
+
+**Alternativa descartada — copiar a fatia a cada barra.** Eliminaria também a leitura via `.base` (a cópia não referencia o array-mãe). Descartada por O(n²) em memória e tempo, para proteger contra um adversário que é o próprio autor do código. Se a Fase 2 introduzir estratégias de terceiros, a decisão deve ser revisitada — está anotado na tabela de riscos.
+
+**Alternativa descartada — DataFrame completo com convenção de só olhar até `i`.** O desenho da maioria dos backtesters de portfólio no GitHub, e a origem da maioria dos lookaheads. Convenção que depende de lembrar não é garantia.
+
+Isto atende ENG-01.3 no caminho de acesso normal. ENG-01.2 (mutação de barras futuras) continua sendo escrito, como confirmação do desenho.
+
+### 4.2 Contrato de estratégia
+
+```python
+class Signal(Enum):
+    ENTER = "enter"
+    EXIT  = "exit"
+
+class Strategy(Protocol):
+    @property
+    def warmup(self) -> int: ...
+    def on_bar(self, view: MarketView) -> Signal | None: ...
+```
+
+A estratégia recebe **apenas** a `MarketView`. Não recebe caixa, posição, histórico de trades nem configuração de custos — ENG-05.2 por construção: não há o que consultar.
+
+A separação é conceitual: a estratégia emite **intenção**; o engine decide **execução e tamanho**. É o que permite trocar o esquema de sizing na Fase 2 sem tocar em nenhuma estratégia.
+
+`warmup` é declarado pela estratégia (para SMA cross, `slow`). O engine não chama `on_bar` antes disso — ENG-06.3 sai de graça, sem cada estratégia reimplementar a checagem.
+
+`ENTER` com posição já aberta é **ignorado e logado** (decisão Q2 da v0.1, confirmada): cruzamento repetido é condição de mercado, não erro de programação. Simetricamente para `EXIT` sem posição.
+
+### 4.3 Ordem de operações dentro da barra
+
+**A parte mais fácil de errar da fase.** Para cada índice `i`:
+
+1. **Executar ordem pendente**, se houver, ao `open[i]`. É aqui que ADR-0002 vira código.
+2. **Marcar a mercado** ao `close[i]` e registrar o ponto da equity curve.
+3. **Consultar a estratégia** com `MarketView(i)`, se `i >= warmup`. Um sinal retornado vira ordem pendente para `i+1`.
+
+A sequência não é arbitrária. Executar antes de marcar garante que a equity de `i` reflita a posição real ao fim de `i`. Consultar a estratégia por último garante que nenhuma decisão de `i` seja executada em `i`. A docstring do loop declara a sequência como invariante; uma inversão em refatoração futura quebra ENG-01.2.
+
+O "próximo pregão disponível" de ENG-01.5 é simplesmente `i+1` no array — a série contém apenas pregões, gaps de calendário estão implícitos. O gap em dias corridos é computado e gravado no trade para auditoria (4.5).
+
+Sinal na última barra: não há `i+1`, a ordem morre pendente e é reportada como tal (ENG-01.4).
+
+### 4.4 `Portfolio` e `Broker`
+
+`Portfolio` modela N posições desde já (decisão D4 do requirements), com N=1 exercitado. Estado: `cash`, `positions: dict[str, Position]`, `trades: list[Trade]`.
+
+`Broker` executa: calcula quantidade inteira máxima resolvendo `q·p + custo(q·p) ≤ caixa` — atenção a não ignorar o custo no cálculo do tamanho, erro que produz caixa negativo. Quantidade zero ⇒ nenhuma ordem, evento logado (ENG-02.3).
+
+Invariantes checadas a cada barra, como erro de programação e não condição de mercado (ENG-04.4): `cash ≥ 0`, `quantity ≥ 0`.
+
+### 4.5 `Trade`
+
+```python
+@dataclass(frozen=True)
+class Trade:
+    ticker: str
+    entry_date: date;  entry_price: float;  entry_decision_date: date
+    exit_date: date | None;  exit_price: float | None
+    quantity: int
+    entry_cost: float;  exit_cost: float
+    entry_gap_days: int;  exit_gap_days: int | None
+```
+
+`entry_decision_date` e `entry_gap_days` tornam o gap de ENG-01.5 auditável: guardando a data da decisão junto da data de execução, o gap é derivável e verificável a posteriori, e não some numa métrica agregada. Uma execução com gap de 4 dias corridos após um feriado longo fica visível no relatório.
+
+### 4.6 Identidade de conciliação — ENG-04.2
+
+Ambiguidade de dupla contagem, resolvida por definição explícita:
+
+```
+pnl_realizado(trade) = (saída − entrada) × quantidade          [BRUTO de custos]
+custo_total          = Σ (entry_cost + exit_cost)
+pnl_nao_realizado    = (último_close − entrada) × quantidade   [posições abertas]
+
+equity_final − equity_inicial ≡ Σ pnl_realizado + pnl_nao_realizado − custo_total
+```
+
+PnL realizado é **bruto**; custos entram uma única vez, no termo próprio. A alternativa (PnL líquido) é igualmente válida, mas convida a subtrair custos duas vezes — e o bug resultante é pequeno o bastante para passar despercebido.
+
+Verificação com `math.isclose(rel_tol=1e-9)`, conforme RNF-08. Nunca igualdade exata.
+
+---
+
+## 5. Analytics
+
+Funções puras sobre a equity curve. Nenhuma toca banco ou I/O; todas testáveis com séries de papel (RNF-03).
+
+```python
+def sharpe(returns: Series, rf: float = 0.0, periods: int = 252) -> float | None
+def max_drawdown(equity: Series) -> DrawdownResult
+def cagr(equity: Series) -> float
+def hit_rate(trades: list[Trade]) -> float | None
+```
+
+Sharpe devolve `None` quando o desvio-padrão é zero (ANA-01.4) — `None` e não `nan`, porque `nan` se propaga silenciosamente por agregações e `None` estoura na hora.
+
+`DrawdownResult` carrega magnitude, data de pico, data de fundo e data de recuperação (ou `None` para não recuperado), conforme ANA-01.3.
+
+### 5.1 Alinhamento do benchmark — ANA-02.2
+
+`first_tradable_index = warmup`. A estratégia só emite sinal a partir de `warmup`, logo só executa a partir de `warmup + 1`.
+
+O benchmark compra ao `open[warmup + 1]`, com os mesmos custos de entrada, e é marcado a mercado até o fim. Estratégia e benchmark compartilham exatamente a mesma janela de equity — sem isso a comparação mede períodos diferentes e não significa nada.
+
+### 5.2 Relatório e a seção fixa de vieses — ANA-03.1
+
+`BacktestReport` é um dataclass renderizado em dois formatos: texto para o CLI e JSON persistido em `backtest_runs`. Contém métricas lado a lado com o benchmark, premissas declaradas (`rf = 0`, custos configurados, tratamento de dividendo via ajuste de preço), e a seção fixa de vieses.
+
+A seção de vieses é **constante literal no código**, não texto montado condicionalmente. Um relatório sem ela é impossível de produzir. Conteúdo integral da constante:
+
+1. **Survivorship bias** — universo fixo de sobreviventes; retornos inflados por construção.
+2. **Sem slippage** — execução integral ao `open`, sem desvio entre preço observado e preço pago.
+3. **Custos simplificados** — modelo fixo + bps; sem spread, sem borrow, sem imposto.
+4. **Sem impacto de mercado** — ordens não movem preço, qualquer tamanho executa.
+5. **Granularidade de posição fictícia** — quantidades inteiras calculadas sobre **preços ajustados**, que não são os preços históricos reais (AAPL pré-split-4:1 aparece a ~1/4 do preço da época). A restrição de ação inteira, portanto, não corresponde à restrição que existia historicamente. Simplificação padrão para total return com dividendo via ajuste; declarada, não escondida.
+6. **Sem correção para múltiplas hipóteses** — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas.
+
+O item 5 é consequência direta de ADR-0003 + premissa 3 do requirements (sem fracionário) e não estava declarado na v0.1 — a distorção existia no desenho, só não estava confessada.
+
+---
+
+## 6. Riscos do design
+
+| Risco | Impacto | Mitigação |
+|---|---|---|
+| Bug no fator de ajuste cumulativo | Alto — corrompe tudo a jusante, de forma plausível | Fixtures de papel para split, dividendo e ambos combinados; PER-02.4 (série sem eventos passa intacta); sanidade cruzada contra `Adj Close` durante o desenvolvimento |
+| Leitura do futuro via `view.<campo>.base` | Baixo em Fase 1 (autor == usuário) | Proteção é contra acidente, não adversário — aceito e declarado em 4.1; teste de ENG-01.3 documenta o caminho; mutação via `.base` bloqueada por arrays-mãe read-only. **Revisitar se a Fase 2 aceitar estratégias de terceiros** — aí a cópia da fatia volta à mesa |
+| Cálculo de quantidade ignorando custo ⇒ caixa negativo | Médio | ENG-04.4 checada a cada barra |
+| `datetime` vazando para o domínio | Médio — reaparece em comparação de datas | Teste de arquitetura sobre imports (3.6), bloqueante no CI |
+| Ordem de operações na barra invertida em refatoração | Alto — reintroduz lookahead | ENG-01.2 quebra; docstring do loop declara a sequência como invariante |
+| Barra inválida escapando da quarentena para `bars` | Médio | Validação em `ingestion/validator.py` é o único caminho de escrita em `bars`; teste de integração grava payload inválido e verifica destino |
+
+## 7. Decisões fechadas nesta versão
+
+| # | Questão (v0.1) | Decisão |
+|---|---|---|
+| Q1 | `PriceSeries`: DataFrame ou arrays? | Arrays numpy crus na `PriceSeries` e no engine; DataFrame apenas nas fronteiras (I/O e analytics). O laço quente não paga overhead de pandas |
+| Q2 | `ENTER` com posição aberta | Ignorar e logar (4.2). Simétrico para `EXIT` sem posição |
+| Q3 | Teste de arquitetura: bloqueante ou aviso? | Bloqueante no CI (3.6) |
+
+## 8. Histórico
+
+| Versão | Data | Mudança |
+|---|---|---|
+| 0.1 | 2026-08-03 | Rascunho inicial |
+| 0.2 | 2026-08-03 | Review incorporado: (1) claim "sem escapatória" do `MarketView` corrigida — `.base` do numpy documentado, arrays-mãe marcados read-only na materialização, teste de ENG-01.3 passa a exercitar o caminho de fuga, risco adicionado à tabela; (2) distorção de quantidade inteira sobre preço ajustado adicionada à seção fixa de vieses (item 5), junto com slippage que também faltava; (3) quarentena desenhada — coleção `quarantined_bars`, regras, destino, módulo responsável (3.3); (4) referências de CA prefixadas por família (ENG-/ANA-/ING-/PER-) eliminando colisões de namespace; (5) semântica de upsert de `corporate_actions` declarada + hash divergente após revisão retroativa explicitado como sinal esperado (3.2); menores: `LookaheadError` → `InsufficientHistoryError` para histórico insuficiente, imutabilidade da `PriceSeries` precisada (frozen + writeable=False). Q1–Q3 fechadas |
