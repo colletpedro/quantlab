@@ -246,9 +246,11 @@ Tudo abaixo depende do gate de design da Fase 1 e **não deve ser começado** an
 
 **Pendências menores anotadas durante o trabalho**
 
-- Trocar o ecossistema do dependabot de `pip` para `uv` (ver 3.3).
-- Remover a tolerância a exit 5 em `make test-integration` (ver 3.3).
-- Decidir se `Settings.mongo_uri` deve ter credencial no default (ver 3.2).
+- ~~Trocar o ecossistema do dependabot de `pip` para `uv`~~ — feito no fechamento, §6.
+- Remover a tolerância a exit 5 em `make test-integration` quando o primeiro teste de
+  integração entrar (ver 3.3). Ainda pendente.
+- ~~Decidir se `Settings.mongo_uri` deve ter credencial no default~~ — resolvido no
+  fechamento, §6: o campo deixou de ter default.
 - `make install` não instala os hooks do git. É um comando à parte
   (`uv run pre-commit install`), documentado no CONTRIBUTING. Se você preferir que
   `install` faça as duas coisas, é uma linha.
@@ -286,3 +288,152 @@ omissão:
 
 Depois do design aprovado vem `tasks.md` (gate 3) e só então a primeira linha de
 implementação.
+
+---
+
+## Fase 0 — fechamento
+
+**Data:** 2026-08-03 (mesmo dia, sessão de fechamento)
+
+A seção 2 acima validou o ambiente por comando isolado, no host. Esta seção valida o
+que só se prova rodando de verdade: CI em runner real, Mongo subindo e persistindo, e
+três achados de correção que a inspeção não pegou.
+
+### CI — resultado real, não inspeção
+
+Não havia remote. Criado `github.com/colletpedro/quantlab`, **privado**, com
+`gh repo create --source=. --remote=origin`, e dado push de `main`.
+
+| Run | Trigger | Resultado | Duração (job `Lint, tipos e testes`) |
+|---|---|---|---|
+| [30829987942](https://github.com/colletpedro/quantlab/actions/runs/30829987942) | push inicial | ✅ verde | 20s |
+| [30830495163](https://github.com/colletpedro/quantlab/actions/runs/30830495163) | push (mongo_uri + testes) | ✅ verde | 25s |
+| [30830713040](https://github.com/colletpedro/quantlab/actions/runs/30830713040) | push (dependabot uv) | ✅ verde | 21s |
+
+**Cache de dependências:** no primeiro push, os dois jobs deram `No GitHub Actions
+cache found` — esperado, era o primeiro run de todos. No segundo push, ainda miss:
+o commit tinha adicionado `pytest-randomly` e mudado `uv.lock`, e a chave do cache é
+um hash do lock (`cache-dependency-glob: uv.lock`), então o hash mudou. Miss legítimo,
+não bug. No terceiro push — `uv.lock` inalterado desde o segundo — os logs mostraram
+`Cache restored successfully` nos dois jobs, confirmando que o cache funciona quando
+deveria. Também confirmado: jobs paralelos no mesmo run não veem o cache um do outro
+(o save só acontece no post-step, depois que o job termina) — por isso o primeiro run
+deu miss nos dois jobs mesmo processando em paralelo.
+
+**Nenhuma falha específica de Linux apareceu** — nem versão de action, nem path
+case-sensitive, nem permissão de token. A única observação foi um aviso (não erro) do
+próprio GitHub: `Node.js 20 is deprecated... astral-sh/setup-uv@v6` sendo forçado a
+rodar em Node 24. Não bloqueia nada hoje; describe [a
+descontinuação](https://github.blog/changelog/2025-09-19-deprecation-of-node-20-on-github-actions-runners/)
+de runners Node 20, e algumas actions do workflow (`checkout`, `upload-artifact`,
+`setup-uv`) já têm versões novas esperando revisão — ver a seção de PRs abertas abaixo.
+
+**Efeito colateral não pedido:** assim que o repositório foi criado com
+`.github/dependabot.yml` versionado, o Dependabot abriu PRs sozinho. Cinco estão
+abertas hoje, todas com CI verde:
+
+| PR | O quê |
+|---|---|
+| [#1](https://github.com/colletpedro/quantlab/pull/1) | `astral-sh/setup-uv` 6 → 7 |
+| [#2](https://github.com/colletpedro/quantlab/pull/2) | `actions/checkout` 5 → 7 |
+| [#3](https://github.com/colletpedro/quantlab/pull/3) | `actions/upload-artifact` 4 → 7 |
+| [#4](https://github.com/colletpedro/quantlab/pull/4) | grupo dev-dependencies, 9 pacotes (sob o ecossistema `pip` antigo) |
+| [#5](https://github.com/colletpedro/quantlab/pull/5) | grupo runtime-dependencies, 10 pacotes (sob o ecossistema `pip` antigo) |
+
+Não fechei nem dei merge em nenhuma — mexer em PR é ação visível para terceiros e não
+foi pedida. #4 e #5 foram abertas sob o ecossistema `pip`, que a seção 6 abaixo trocou
+por `uv`; elas provavelmente ficam órfãs quando o Dependabot reavaliar sob a config
+nova. Sua decisão: fechar manualmente, ou deixar o Dependabot substituir sozinho.
+
+### Mongo — o que foi exercitado
+
+Sequência completa, contra o container real:
+
+1. `cp .env.example .env`
+2. `make up` — subiu, esperou o healthcheck, reportou `healthy` em poucos segundos
+   (`docker compose ps` confirmou: `Up ... (healthy)`)
+3. Escrita e leitura usando **exatamente** a `QUANTLAB_MONGO_URI` do `.env`
+   (`mongodb://quantlab:quantlab@localhost:27017/?authSource=admin`), via `mongosh`
+   dentro do container, numa coleção descartável (`quantlab_smoke_test.scratch`) —
+   provou que a credencial configurada no compose é a mesma que autentica
+   de fato, não só que o compose sobe.
+4. `make down` — removeu o container, preservou o volume nomeado (`docker volume ls`
+   confirmou `quantlab_mongo_data` ainda existindo depois do down).
+5. `make up` de novo — o compose reutilizou o volume (não recriou), voltou a ficar
+   healthy.
+6. Reli o mesmo documento pela mesma URI — **presente, idêntico**. Prova o volume
+   nomeado, não só o container.
+7. `db.dropDatabase()` na coleção de teste, `make down`. Ambiente limpo.
+
+Nada falhou nesta etapa. A única coisa que a exercitação expôs — não uma falha do
+Mongo, mas do código que fala com ele — foi o item 3 abaixo.
+
+### `Settings.mongo_uri` — por que virou obrigatório
+
+O HANDOFF original (§3.2) já tinha sinalizado o risco sem resolvê-lo: o default
+`mongodb://localhost:27017` não carrega credencial. Qualquer outro MongoDB sem
+autenticação rodando na 27017 da mesma máquina — de outro projeto, por exemplo —
+seria aceito da mesma forma. O app conectaria, leria ou gravaria no banco errado, e
+nada indicaria isso: nem erro, nem log, nem exceção.
+
+Resolvido: `mongo_uri` não tem mais default. `Settings.__init__` intercepta o
+`pydantic.ValidationError` de campo ausente e relança como `ConfigError`, com
+`cp .env.example .env` na própria mensagem — a correção acionável que a regra de
+exceções do CLAUDE.md pede.
+
+Ao mexer nisso, apareceu um segundo problema, fora da lista original: `clean_env`
+(fixture de `tests/conftest.py`) limpava as variáveis `QUANTLAB_*` do processo, mas
+não o `lru_cache` de `get_settings()`. O primeiro teste da suíte que chamasse
+`get_settings()` congelaria os valores para todos os testes seguintes, e o resultado
+passaria a depender de qual teste rodou primeiro — exatamente o tipo de
+não-determinismo que RNF-01 proíbe. Corrigido: `clean_env` agora chama
+`get_settings.cache_clear()` antes e depois de cada teste. Um par de testes
+(`test_get_settings_sees_this_tests_own_mongo_uri_a`/`_b` em
+`tests/unit/test_config.py`) prova o isolamento, definindo valores diferentes da
+mesma variável e conferindo que cada um só enxerga o seu.
+
+Adicionado `pytest-randomly` como dependência de dev para confirmar isso de verdade:
+suíte rodada em ordem fixa (`-p no:randomly`) e em ordem aleatória com várias seeds
+(`1`, `42`, `999`, mais uma automática) — mesmo resultado em todas, 5 testes passando.
+
+O `test_smoke.py` também precisou de ajuste: o callback do CLI chama
+`get_settings()`, que agora exige `mongo_uri`. O teste passou a setar
+`QUANTLAB_MONGO_URI` via `monkeypatch.setenv`, em vez de depender de um `.env` no
+diretório — o `.env` local existe na minha máquina (criado no passo do Mongo acima),
+mas não existiria no CI, e o teste não pode passar só localmente por acidente de
+ambiente.
+
+`README.md` e `CONTRIBUTING.md` não precisaram de mudança: os dois já listavam
+`cp .env.example .env` como primeiro passo obrigatório, não como sugestão — a mudança
+de comportamento já estava coberta pela instrução existente.
+
+### Dependabot — conclusão
+
+Verificado antes de mexer, como pedido. Fontes:
+
+- [GitHub Changelog — "Dependabot version updates now support uv in general
+  availability"](https://github.blog/changelog/2025-03-13-dependabot-version-updates-now-support-uv-in-general-availability/)
+  (2025-03-13): GA, não beta.
+- [Documentação oficial do
+  `astral-sh/uv`](https://docs.astral.sh/uv/guides/integration/dependabot/) sobre
+  integração com Dependabot, com o formato de configuração.
+- Página de referência do GitHub sobre ecossistemas suportados: `uv` está listado
+  como valor de `package-ecosystem` de primeira classe, com suporte a
+  `dependency-type` (usado nos grupos `dev-dependencies`/`runtime-dependencies` já
+  configurados) equivalente ao de `pip`.
+
+Conclusão: suporte estável e confirmado. Troquei `package-ecosystem: "pip"` por
+`package-ecosystem: "uv"` em `.github/dependabot.yml`. Validado de duas formas depois
+do push: a run de "Dependabot Updates" sob o ecossistema `uv` apareceu automaticamente
+e completou com sucesso (nenhuma PR nova foi aberta — as dependências já estavam nas
+versões que ele sugeriria); e o YAML foi validado localmente com `yaml.safe_load`
+antes do commit.
+
+### Algo que apareceu e não estava na lista
+
+Nada além do que já foi descrito acima (o cache de `get_settings()`, e o efeito
+colateral das PRs automáticas do Dependabot). Os oito comandos da verificação final
+original (a–h) mais os quatro extras pedidos nesta rodada (`test-unit`,
+`test-integration`, `audit`, `docker compose config`) foram todos reexecutados depois
+de cada mudança e terminaram verdes — sequência completa registrada por último logo
+antes do push final.
