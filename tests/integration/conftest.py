@@ -14,6 +14,7 @@ import pytest
 
 from quantlab.config import Settings, get_settings
 from quantlab.storage.client import MongoDatabase, create_client
+from quantlab.storage.schema import ensure_schema
 
 #: Banco descartável. Nome fixo (RNF-01) e distinto do de produção.
 INTEGRATION_DB_NAME = "quantlab_integration_test"
@@ -35,7 +36,7 @@ def integration_settings() -> Settings:
 
 @pytest.fixture
 def mongo_db(integration_settings: Settings) -> Iterator[MongoDatabase]:
-    """Banco limpo por teste.
+    """Banco limpo por teste, com coleções e índices já criados.
 
     Dropar antes *e* depois: antes porque um teste anterior que morreu no meio
     não deve contaminar este; depois para não deixar resíduo na máquina.
@@ -43,7 +44,9 @@ def mongo_db(integration_settings: Settings) -> Iterator[MongoDatabase]:
     client = create_client(integration_settings)
     try:
         client.drop_database(INTEGRATION_DB_NAME)
-        yield client[INTEGRATION_DB_NAME]
+        database = client[INTEGRATION_DB_NAME]
+        ensure_schema(database)
+        yield database
         client.drop_database(INTEGRATION_DB_NAME)
     finally:
         client.close()
