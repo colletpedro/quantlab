@@ -635,3 +635,244 @@ Dois avisos para quem pegar:
 
 Antes de B1, vale decidir 4.1 e 4.2 na v0.3 do design: as duas afetam código que o
 Bloco B vai escrever, e corrigir a spec depois do código é o que CLAUDE.md §1 proíbe.
+
+---
+
+## Bloco B — ingestão
+
+**Data:** 2026-08-03
+**Origem:** `fase-1-tasks.md` v0.1, Bloco B, tarefas B1 a B6, mais Parte 0 (design v0.3)
+**Escopo:** `ingestion/` e o CLI de B6. `engine/`, `strategies/` e `analytics/`
+continuam vazios — são dos Blocos C a E.
+
+### 0. Design v0.3 — as 8 ambiguidades do Bloco A, decididas
+
+Commit próprio (`c76c41d`), antes de qualquer código do Bloco B, como CLAUDE.md §1
+exige. As oito decisões do enunciado foram aplicadas literalmente às seções que a
+ambiguidade original ocupava (§3.1, §3.4/§3.5, §3.6, §3.7 ×4, §3.8). Uma delas exigiu
+mudança de código no mesmo commit: `PriceSeries.ingestion_run_id` existia como campo
+morto (nunca preenchido, nunca lido) e foi removido — o código não podia continuar
+contradizendo a spec por um campo sem uso.
+
+Durante B4, uma nona decisão apareceu — o índice de `ingestion_runs` (§3.4), que a
+v0.3 tinha deixado explicitamente adiado "para quando B4 definir o padrão de acesso".
+Virou v0.4 (`375bf5a`), no mesmo commit que passou a escrever na coleção, como a
+própria v0.3 instruía.
+
+### 1. O que foi implementado, por tarefa
+
+Um commit por tarefa, na ordem B1 → B6, mais os commits de infraestrutura que cada
+tarefa expôs como necessários.
+
+| Tarefa | Entrega | Arquivos |
+|---|---|---|
+| **B1** | `MarketDataProvider` (Protocol), `ResilientProvider` (retry+backoff+ING-04.2 por composição), `YFinanceProvider` (fino, sem resiliência própria) | `ingestion/provider.py`, `resilient_provider.py`, `yfinance_provider.py` |
+| **B2** | `normalize_timestamp`/`normalize_prices`/`normalize_corporate_actions` — fronteira de entrada | `ingestion/normalizer.py` |
+| **B3** | `validate_bars` — função pura, ING-05.1 bloqueante (10 razões) + ING-05.2/05.3 aviso | `ingestion/validator.py` |
+| **B4** | `run_ingestion` — laço por ticker, `IngestionRepository` (Protocol), `ingestion_runs` | `ingestion/orchestrator.py`, `storage/repository.py` (novos métodos), `storage/schema.py` (índice) |
+| **B5** | Teste de arquitetura projeto-inteiro, formulação v0.3 | `tests/unit/test_architecture_date_isolation.py` (substitui o recorte de storage de A3) |
+| **B6** | `python -m quantlab ingest`, universo default | `cli.py`, `universe.py` |
+
+Pontos onde o enunciado é específico e o mecanismo foi implementado como pedido:
+
+- **B1** — `auto_adjust=False` (ADR-0003); resposta vazia de preços é `DataError`
+  **sem retry** (não é falha transitória); corporate actions vazias **não** são falha
+  (ausência de provento é legítima); retry com backoff exponencial (1×, 2×, 4×...).
+  Protocolo + `FakeProvider` — nenhum teste, unitário ou de integração, toca rede.
+- **B2** — único ponto de conversão `pd.Timestamp → date` da ingestão; ticker
+  canonicalizado para maiúsculas na fronteira.
+- **B3** — dez razões de CA-05.1, avaliadas de forma independente (não em cadeia de
+  `elif`); ING-05.2 com `np.busday_count`; ING-05.3 suspensa só por split, não por
+  dividendo.
+- **B4** — `ingestion_runs` aberto **antes** de processar qualquer ticker, para que o
+  `run_id` exista a tempo de ser gravado em cada `QuarantinedBar` (referência cruzada
+  de design §3.3); falha de um ticker não impede os demais.
+- **B5** — bloqueante no CI; verificado localmente (não commitado) que
+  `datetime.now()` num módulo de domínio derruba o teste.
+- **B6** — sem `--tickers`, usa `config/universe.yml` (CA-01.1); exit ≠ 0 quando
+  qualquer ticker falha (ING-04.1); `ensure_schema` roda no início, então o comando
+  funciona contra um Mongo que nunca viu quantlab.
+
+### 2. Resultado da verificação e do CI
+
+**Local — tudo verde, sequência completa após o último commit:**
+
+| Comando | Resultado |
+|---|---|
+| `make install` | exit 0 |
+| `make lint` | exit 0 |
+| `make typecheck` | exit 0 — `mypy --strict` |
+| `make test` | exit 0 — 177 unitários |
+| `make test-integration` | exit 0 — 54 contra Mongo real |
+| `make check` | exit 0 |
+| `make audit` | exit 0 — nenhuma vulnerabilidade |
+| `pre-commit run --all-files` | exit 0 |
+| `python -m quantlab version` | exit 0 |
+
+**Estabilidade de ordem confirmada à força bruta:** `make test-integration` rodado 5
+vezes seguidas com `pytest-randomly` (ordem diferente a cada vez) — 54/54 em todas.
+Isso não era garantido de graça: a primeira rodada expôs um bug real (seção 3 abaixo).
+
+**CI — [run 30860993103](https://github.com/colletpedro/quantlab/actions/runs/30860993103), os três jobs verdes:**
+
+| Job | Resultado |
+|---|---|
+| Lint, tipos e testes | ✅ (offline, RNF-06) |
+| Testes de integração | ✅ `collected 231 items / 177 deselected / 54 selected` → `54 passed` |
+| Auditoria de dependências | ✅ |
+
+**B5 verificado, não commitado:** introduzi `datetime.now()` em
+`storage/adjustment.py` (módulo de domínio, fora da fronteira) — o teste de
+arquitetura falhou apontando exatamente o arquivo e o nome importado; restaurado
+byte a byte depois (`diff` confirmou).
+
+### 3. Um bug real de cross-test, encontrado e corrigido na fonte
+
+**Não foi um problema de fixture — foi um bug de biblioteca acionado pela primeira
+vez que o projeto chamou `configure_logging()` mais de uma vez no mesmo processo.**
+
+`tests/integration/test_cli_ingest.py` usa `CliRunner` para invocar o comando `ingest`
+de verdade, o que roda o callback `main()` do Typer e chama `configure_logging()`
+de novo (a primeira chamada acontece na importação de `quantlab.cli`, a segunda
+dentro do teste). `configure_logging()` usava `cache_logger_on_first_use=True`.
+
+Isso não é cache de configuração global — é `BoundLoggerLazyProxy.bind()`
+sobrescrevendo `.bind` **na própria instância** do proxy, na primeira chamada de log,
+permanentemente. Um logger de módulo como `_log = get_logger(__name__)` em
+`storage/repository.py` — criado uma vez na importação, reusado pela vida inteira do
+processo — fica preso, depois da primeira chamada seguinte a uma reconfiguração, na
+config daquele instante. **Nenhuma chamada futura a `structlog.configure()` ou
+`structlog.reset_defaults()` desfaz isso**, porque não é o config global que está
+sendo consultado — é um método sobrescrito na instância.
+
+Sintoma: testes de A4/A6 que dependem da fixture `log_events`
+(`structlog.testing.capture_logs()`) passavam isolados, mas falhavam de forma
+dependente de ordem sempre que rodavam depois de `test_cli_ingest.py` — confirmado
+rodando `make test-integration` repetidas vezes com ordem aleatória.
+
+**Corrigido na fonte** (`src/quantlab/logging.py`): `cache_logger_on_first_use=False`.
+quantlab é CLI/batch, não serviço de alto throughput — o ganho de performance do
+cache não compensava esta classe de bug, que afetaria qualquer código futuro que
+chamasse o CLI programaticamente mais de uma vez no mesmo processo, não só os testes.
+A fixture de restauração em `test_cli_ingest.py` ficou como defesa em profundidade
+(ela sozinha, sem a correção na fonte, **não bastava** — confirmado durante o
+diagnóstico).
+
+### 4. Decisões que tomei por conta própria — revise
+
+**4.1 `IngestionRepository` e `MarketDataProvider` como `Protocol`, não classes
+concretas.** O orquestrador e a CLI recebem `MongoRepository`/`YFinanceProvider` só em
+produção; nos testes, `FakeRepository`/`FakeProvider` implementam a mesma forma sem
+herdar de nada. Sem isso, testar "um ticker ruim no meio da lista não impede os
+outros" exigiria Mongo mesmo no unitário. Não estava pedido explicitamente, mas é o
+que torna B4 e B6 testáveis sem infra pesada.
+
+**4.2 `_build_provider()` isolado em `cli.py`.** Único ponto de acesso a
+`YFinanceProvider`/rede no comando `ingest`; testes de integração fazem
+`monkeypatch.setattr(cli_module, "_build_provider", ...)` para trocar por
+`FakeProvider` e exercitar o comando real (`CliRunner`, Mongo real, código de saída)
+sem tocar `yfinance`. Sem esse ponto único, não haveria como testar a CLI ponta a
+ponta sem rede.
+
+**4.3 `run_ingest()` separado do comando Typer `ingest()`.** A lógica de RF-CLI-01
+(parse de data, resolução de ticker, chamada ao orquestrador) é uma função só, sem
+Typer nem Mongo — testável direto com fakes. `ingest()` só faz parsing de CLI e
+conecta dependências reais. Mesmo padrão de `IngestionRepository`.
+
+**4.4 `ensure_schema()` dentro do comando `ingest`, não como passo manual separado.**
+RF-CLI-01 não menciona setup de schema. Sem chamar aqui, o comando falharia contra
+Mongo limpo com erro de coleção inexistente, em vez de simplesmente funcionar — decidi
+que "funciona contra Mongo real" implicitamente inclui "mesmo que seja a primeira
+vez". Testado explicitamente (`test_ingest_command_creates_schema_on_a_fresh_database`).
+
+**4.5 `--from`/`--to` obrigatórios em `ingest`, sem default.** RF-CLI-01 não declara
+default de janela para ingestão (D5 do requirements é o default de janela do
+**backtest**, RF-CLI-02, não deste comando). Preferi exigir explicitamente a inventar
+um default que a spec não pediu.
+
+**4.6 Dividendo/split de magnitude zero descartados silenciosamente em
+`normalize_corporate_actions`.** yfinance ocasionalmente inclui zero residual em datas
+sem evento nas séries `.dividends`/`.splits`. Sem o filtro, `CorporateAction`
+levantaria `DataError` do construtor (A5) para um "evento" que não é evento nenhum.
+Não está no design; acho a decisão óbvia o bastante para não ter sido ambiguidade,
+mas registro para revisão.
+
+**4.7 `pythonpath = ["."]` e `__init__.py` em `tests/`.** Necessário para
+`FakeRepository`/`FakeProvider` serem compartilháveis entre `tests/unit/` e
+`tests/integration/` via `from tests.support import ...`. O `__init__.py` veio depois,
+quando dois arquivos de nome igual (`test_orchestrator.py`) em diretórios irmãos
+colidiram no import sem pacote — os dois achados estão em commits próprios
+(`f45c782`, `035e6f5`).
+
+**4.8 `cache_logger_on_first_use=False`.** Já detalhado na seção 3. É mudança de
+comportamento de produção motivada por um bug descoberto em teste, não um ajuste "só
+para os testes passarem" — o raciocínio (CLI/batch, não hot path) está no comentário
+do código.
+
+### 5. Execução real contra yfinance
+
+Fora da suíte, como pedido. Comando:
+
+```
+python -m quantlab ingest --tickers AAPL,MSFT --from 2024-01-02 --to 2024-01-10
+```
+
+Contra o Mongo local (`docker compose`), rede de verdade, sem `FakeProvider`.
+
+**Resultado:** exit 0. `succeeded=['AAPL', 'MSFT']`, `failed=[]`, `bars_inserted=14`
+(7 pregões × 2 tickers, a janela pedida), `quarantined_count=0`, `warning_count=0`.
+`corporate_actions`: 195 eventos coletados sobre o **histórico completo** dos dois
+tickers (181 dividendos + 14 splits, remontando a 1987) — confirma ING-02.3 na
+prática, não só em teste. `ingestion_runs` gravou um documento com `tickers`,
+`window_start`/`window_end`, `started_at`/`finished_at` e as contagens finais.
+
+**Sanidade cruzada (recomendada por ADR-0003):** comparei a série ajustada própria
+contra o `Adj Close` do yfinance para a mesma janela de AAPL. Divergência sistemática,
+pequena mas consistente — sempre nossa série abaixo da de referência, em ~0,2%–0,25%
+em todas as 7 barras:
+
+| Data | quantlab (ajustado) | yfinance `Adj Close` | diferença |
+|---|---|---|---|
+| 2024-01-02 | 183.1131 | 183.5622 | -0,24% |
+| 2024-01-03 | 181.7421 | 182.1877 | -0,24% |
+| 2024-01-04 | 179.4339 | 179.8739 | -0,24% |
+| 2024-01-05 | 178.7138 | 179.1521 | -0,24% |
+| 2024-01-08 | 183.0342 | 183.4831 | -0,24% |
+| 2024-01-09 | 182.6199 | 183.0678 | -0,24% |
+| 2024-01-10 | 183.6557 | 184.1060 | -0,24% |
+
+ADR-0003 distingue "divergência sistemática indica bug" de "divergência pequena é
+esperada por diferença de convenção de arredondamento". Uma diferença **constante em
+todas as barras** parece mais estruturada que ruído de arredondamento — o formato
+(mesma % em toda a série) é consistente com um fator de ajuste a mais ou a menos
+compondo o produto todo, não com erro por barra. Hipótese mais provável: o `Adj
+Close` que o yfinance devolve na mesma chamada de `history()` é calculado a partir de
+um snapshot de dividendos que pode não coincidir exatamente com o que
+`.dividends` devolve momentos depois (cache interno do yfinance, ou o próprio
+provedor upstream revisando dado entre as duas chamadas) — não necessariamente um bug
+do quantlab. **Não investiguei a fundo dentro do escopo desta tarefa** — é uma
+verificação de sanidade de desenvolvimento, não um critério de aceitação (nenhuma CA
+exige bater com o `Adj Close` do provedor; os CAs de PER-02 são cobertos pelas
+fixtures de papel de A7, calculadas à mão). Fica registrado para quem revisar decidir
+se vale investigar antes do Bloco C consumir `get_series`.
+
+**Limpeza:** as 14 barras, os 195 eventos corporativos e o documento de
+`ingestion_runs` foram removidos do banco de desenvolvimento (`quantlab`) logo após a
+inspeção, confirmado por contagem zero nas três coleções.
+
+### 6. Próximo passo
+
+**Bloco C — engine**, que consome `PriceSeries` (Bloco A) e é testável inteiramente
+com séries de papel, sem banco — a ordem de `tasks.md` é C1 (`MarketView`) → C2
+(protocolo `Strategy`) → C3 (`Trade`/`Position`/`Portfolio`) → C4 (`Broker`) → C5
+(laço de barras) → C6 (conciliação).
+
+Dois avisos para quem pegar:
+
+- **C1 e C5 são as tarefas de maior risco da fase** (junto com A7, já feita) — é onde
+  a invariante anti-lookahead (ENG-01.2) vive ou morre. Vale reler design §4.1 e §4.3
+  inteiros antes de escrever qualquer linha, não só a assinatura de `MarketView`.
+- **A divergência da seção 5 vale uma decisão antes de C1**, não durante: se o Bloco C
+  vai comparar resultados contra alguma referência externa em algum momento (não é
+  requisito da Fase 1, mas pode aparecer em teste exploratório), a causa dessa
+  diferença de ~0,24% precisa estar entendida, não só registrada.
