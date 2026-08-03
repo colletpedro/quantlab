@@ -54,6 +54,11 @@ class Settings(BaseSettings):
         default=0.0,
         description="Taxa livre de risco anual usada no Sharpe (premissa 7).",
     )
+    universe_path: str = Field(
+        default="config/universe.yml",
+        description="Caminho do universo default de tickers, usado por "
+        "`ingest` quando --tickers não é passado (RF-CLI-01 CA-01.1).",
+    )
 
     def __init__(self, **data: Any) -> None:
         try:
