@@ -58,7 +58,11 @@ packages = ["src/quantlab"]
 line-length = 100
 target-version = "py312"
 src = ["src", "tests"]
-extend-exclude = [".venv"]
+# `specs/` fica fora do formatador: esta versão do ruff reescreve blocos
+# ```python dentro de Markdown, e as specs são fonte da verdade — ADRs são
+# declarados imutáveis em CLAUDE.md §2. Documento normativo não é reformatado
+# por ferramenta.
+extend-exclude = [".venv", "specs"]
 
 [tool.ruff.lint]
 select = [
