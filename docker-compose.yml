@@ -1,0 +1,31 @@
+# Ambiente local do quantlab.
+#
+# Fase 0 sobe apenas o MongoDB (ADR-0001). Redis é escopo da Fase 2 e não
+# aparece aqui de propósito: não há problema de performance a resolver ainda.
+#
+# Todas as variáveis vêm de .env — copie .env.example antes do primeiro `make up`.
+
+services:
+  mongo:
+    image: mongo:7
+    container_name: quantlab-mongo
+    restart: unless-stopped
+    ports:
+      - "${MONGO_PORT:-27017}:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-quantlab}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-quantlab}
+      MONGO_INITDB_DATABASE: ${QUANTLAB_MONGO_DB:-quantlab}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      # `make up` usa --wait e só retorna quando este teste passa.
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  mongo_data:
+    name: quantlab_mongo_data
