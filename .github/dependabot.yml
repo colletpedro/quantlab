@@ -1,7 +1,10 @@
 version: 2
 
 updates:
-  - package-ecosystem: "pip"
+  # "uv" é ecossistema nativo do Dependabot desde GA em 2025-03: entende
+  # pyproject.toml + uv.lock diretamente, em vez de tratar uv como pip.
+  # https://github.blog/changelog/2025-03-13-dependabot-version-updates-now-support-uv-in-general-availability/
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "monthly"
