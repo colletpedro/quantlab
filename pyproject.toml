@@ -93,6 +93,12 @@ warn_unreachable = true
 show_error_codes = true
 pretty = true
 mypy_path = "src"
+# Sem isto, `tests/conftest.py` e `tests/integration/conftest.py` colidem no
+# mesmo nome de módulo ("conftest") e o mypy para antes de checar qualquer
+# coisa. Com bases explícitas, cada um vira `tests.conftest` e
+# `tests.integration.conftest`.
+explicit_package_bases = true
+namespace_packages = true
 
 [tool.pydantic-mypy]
 init_typed = true
