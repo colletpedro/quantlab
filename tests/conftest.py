@@ -11,6 +11,8 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+import structlog
+from structlog.typing import EventDict
 
 from quantlab.config import Settings, get_settings
 
@@ -47,6 +49,19 @@ def clean_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[pytest.MonkeyPatch]:
     get_settings.cache_clear()
     yield monkeypatch
     get_settings.cache_clear()
+
+
+@pytest.fixture
+def log_events() -> Iterator[list[EventDict]]:
+    """Eventos emitidos por structlog durante o teste, como dicionários.
+
+    `caplog` do pytest não serve aqui: ele engancha no `logging` do stdlib, e o
+    projeto só liga structlog ao stdlib quando `configure_logging()` roda — o
+    que uma biblioteca não faz por conta própria. `capture_logs` intercepta na
+    própria cadeia do structlog e funciona independente de configuração.
+    """
+    with structlog.testing.capture_logs() as events:
+        yield events
 
 
 @pytest.fixture
