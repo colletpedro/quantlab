@@ -121,6 +121,12 @@ imutáveis: não edite nem apague o antigo. Use
 - Marque todo teste com `@pytest.mark.unit` ou `@pytest.mark.integration`. A suíte
   default roda **offline** (RNF-06); integração exige `make up`.
 - Teste de comportamento observável, não de detalhe interno.
+- **A derivação do valor esperado de uma fixture de papel vive no próprio teste, como
+  comentário — nunca só no handoff, nunca implícita.** Não basta o número estar certo;
+  quem revisar precisa auditar a conta sem refazê-la à parte. Três fixtures desta fase
+  discordaram da implementação na primeira tentativa — nas três o código estava certo e
+  o erro era da conta manual — e nas três a auditoria só foi possível porque a derivação
+  já estava escrita ali, comparável linha a linha contra o valor esperado no `assert`.
 
 ### Commits
 
