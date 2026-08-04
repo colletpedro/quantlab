@@ -1,16 +1,13 @@
 # STATE — mapa do projeto
 
-Este arquivo não existia antes desta sessão (2026-08-04) apesar de o HANDOFF
-anterior referenciá-lo como leitura obrigatória. Criado agora, do zero,
-refletindo o estado no fim do Bloco D + E. Mantenha-o atualizado a cada
-sessão — desatualizado vale menos que ausente.
+Mantenha-o atualizado a cada sessão — desatualizado vale menos que ausente.
 
 ## Onde estamos
 
-**Fase 1 (MVP): Blocos A, B, C, D e E1-E3 implementados.** Falta o Bloco F
-(fechamento): CLI `backtest` + persistência (F1), gráfico (F2), cobertura e
-benchmark de performance com código real (F3), README + resultado honesto
-(F4).
+**Fase 1 (MVP) concluída.** Todos os blocos A-F implementados, testados, e um
+resultado honesto rodado contra dado de mercado real e comprometido em
+[`results/`](../results/). Definition of Done da fase (requirements.md §8)
+integralmente atendido.
 
 | Bloco | Escopo | Estado |
 |---|---|---|
@@ -19,104 +16,121 @@ benchmark de performance com código real (F3), README + resultado honesto
 | C | `engine/` — `MarketView`, `Strategy`, `Portfolio`, `Broker`, laço de barras | ✅ |
 | D | `strategies/` — SMA cross (D1) | ✅ |
 | E | `analytics/` — métricas (E1), benchmark (E2), relatório (E3) | ✅ |
-| F | CLI `backtest`, gráfico, cobertura/perf, README | ⬜ próximo |
+| F | CLI `backtest` + persistência (F1), gráfico (F2), RNF-04 + cobertura (F3), README + resultado honesto (F4) | ✅ |
 
-CI: 3 jobs verdes (lint+tipos+testes, integração, auditoria de dependências)
-em todo push a `main`. Último run verificado:
-[30876286773](https://github.com/colletpedro/quantlab/actions/runs/30876286773).
+CI: 3 jobs verdes em todo push a `main`. Último run verificado:
+[30881248393](https://github.com/colletpedro/quantlab/actions/runs/30881248393).
 
-## Números atuais
+**Próximo:** Fase 2 (não iniciada) — custos realistas, portfólio multi-ativo,
+walk-forward, analytics de risco, Redis, API, infra. Nenhuma spec de Fase 2
+escrita ainda; `specs/README.md` tem o roadmap de alto nível.
 
-- 323 testes totais: 266 unitários (Bloco C) → **310 unitários** depois de D+E,
-  57 de integração.
-- Cobertura com `make test` (unitários apenas, offline): **97.22%** total.
-  - `engine/`: 92-100% por arquivo, nenhum abaixo de 90%.
-  - `analytics/`: `metrics.py` 100%, `benchmark.py` 100%, `report.py` 99%.
-  - RNF-02 (piso de 80% em `engine/` e `analytics/`) deixou de ser trivial
-    pela primeira vez em `analytics/` nesta sessão — folga confortável.
+## Números finais da Fase 1
+
+- **367 testes**: 333 unitários (offline), 60 de integração (`make up`).
+- Cobertura com `make test` (unitários, offline): **97.09%** total.
+  - `engine/`: 92-100% por arquivo.
+  - `analytics/`: `metrics.py` e `benchmark.py` 100%, `report.py` 99%,
+    `plot.py` 96%. Todos folgados acima do piso de 80% de RNF-02.
+- **RNF-04 medido, não presumido:** `get_series` + `run_backtest` +
+  `buy_and_hold` + `BacktestReport.build()` sobre 2.912 barras de AAPL
+  (~11.5 anos, 2015-01-01 até 2026-07-31) — **mediana 0.051s** de 5 execuções,
+  bem abaixo do limite de 5s. Medido isolando o cômputo (sem I/O de
+  ingestão nem renderização de gráfico), que é o que a leitura de histórico
+  completo de ADR-0004 mais impactaria.
+- **Ingestão real do universo completo** (20 tickers, `config/universe.yml`),
+  2015-01-01 até a última barra disponível: 55.328 barras inseridas, 0
+  tickers falhos, 0 quarentenas no run final (1 quarentena por ticker — o
+  pregão do dia corrente, ainda em formação — no run anterior à correção do
+  bug de preço não finito, ver abaixo).
 
 ## Invariantes que não são sugestões (ver CLAUDE.md e ADRs)
 
-- **ADR-0002** — execução no `open` do pregão seguinte. Provado por
-  `test_mutating_future_bars_does_not_change_trades` (ENG-01.2).
+- **ADR-0002** — execução no `open` do pregão seguinte.
 - **ADR-0003** — preço bruto persistido, ajuste em tempo de leitura.
-- **ADR-0004** — ajuste materializado sobre o **histórico completo**, depois
-  fatiado. Provado por independência de janela
-  (`test_two_windows_agree_value_by_value_on_shared_bars`,
-  `test_adjusted_values_do_not_depend_on_the_requested_window`). Errata
-  datada ao fim do ADR corrige os nomes de teste que a tabela original citava
-  errado — corpo do ADR não foi tocado (imutabilidade).
-- **ADR-0001** — MongoDB, índice composto `(ticker, date)`.
+- **ADR-0004** — ajuste materializado sobre o histórico completo, depois
+  fatiado. Errata datada ao fim do ADR corrige nomes de teste (não o corpo).
+- **ADR-0001** — MongoDB, índice composto `(ticker, date)`. `backtest_runs`
+  ganhou índice `{ticker:1, "strategy.name":1, created_at:-1}` em F1.
 
-## O que cada bloco novo entregou
+## Bug real encontrado e corrigido nesta sessão
 
-**D1 — SMA cross** (`src/quantlab/strategies/sma_cross.py`). `warmup = slow`
-sai de graça do contrato de C2. Validação `fast < slow` na instanciação
-(`EngineError`). Fixture de papel com os dois cruzamentos calculados à mão,
-incluindo o caso de borda em que o cruzamento de entrada acontece exatamente
-na primeira barra elegível (`i = warmup`). Teste ponta a ponta confirma que o
-engine roda a estratégia sem alteração nenhuma (ENG-05.1) — se tivesse
-exigido, seria sinal de contrato incompleto em C2.
+**Preço não finito (`NaN`) escapava da validação (ING-05.1).** As regras de
+quarentena são comparações de desigualdade (`high < low`, fora de
+`[low, high]`, `preço ≤ 0`), e `NaN` não satisfaz nenhuma delas nem sua
+negação (IEEE 754) — uma barra com `close = nan` passava como válida.
+Encontrado rodando a ingestão real de F4: o yfinance devolveu `close = nan`
+para o pregão do dia corrente, ainda em formação no momento da consulta.
+O sintoma era `retorno acumulado`/`CAGR` = `nan` no relatório sempre que a
+posição (estratégia ou benchmark) estava aberta na última barra.
 
-**E1 — métricas** (`src/quantlab/analytics/metrics.py`). Funções puras sobre
-`pd.Series`: `sharpe` (`None` nunca `nan` com volatilidade zero ou <2
-observações), `max_drawdown` (pico **corrente**, não o do início nem o do
-último valor local — `DrawdownResult` com as três datas), `cagr` (dias
-corridos entre a primeira e a última data do índice, não contagem de barras),
-`hit_rate` (só trades fechados, `None` sem nenhum). Amostra insuficiente
-(ANA-01.5) não vive aqui — é responsabilidade do relatório (E3), porque as
-funções de métrica precisam continuar puras.
+Corrigido em `ingestion/validator.py` (`math.isfinite` em toda comparação de
+preço), spec atualizada **antes** do código no mesmo commit (requirements
+v1.1, design v0.8 — CLAUDE.md exige isso quando os dois mudam juntos). As
+20 barras já gravadas antes da correção foram removidas manualmente do banco
+(não há caminho automático: `upsert_bars` só grava `valid_bars`, não some
+com uma barra que era válida e passou a ser quarentenada) e a ingestão foi
+re-executada, confirmando a quarentena correta de todos os 20 casos.
 
-**E2 — benchmark** (`src/quantlab/analytics/benchmark.py`). `buy_and_hold`
-reaproveita `BacktestResult`/`EquityPoint` do engine em vez de um tipo
-paralelo. Compra ao `open[warmup + 1]`, mesmos custos de entrada. Teste
-explícito prova que a janela de equity do benchmark é, barra a barra, o
-sufixo `[warmup+1:]` de uma estratégia com o mesmo `warmup`.
+## O que Bloco F entregou
 
-**E3 — relatório** (`src/quantlab/analytics/report.py`). `BacktestReport`
-com `to_dict()`/`to_json()`/`to_text()`. `BIAS_DISCLOSURE` é tupla literal
-com os seis itens de design §5.2 — nenhum caminho de `build()` a omite.
-Também cobre, porque o relatório é onde convergem: aviso de custo zerado
-(ENG-03.2), aviso de amostra insuficiente (ANA-01.5), tratamento de
-dividendo declarado (ENG-04.3), proveniência hash+ingestão (PER-03.1).
+**F1 — CLI `backtest`** (`cli.py::backtest`, `cli.py::run_backtest_flow`).
+`--strategy/--ticker/--from/--to/--fast/--slow`, janela default D5
+(2015-01-01 até a última barra). Ticker sem dado ingerido propaga
+`DataError` de `build_price_series`; CLI captura, imprime mensagem acionável,
+sai com código 1 (CA-02.2). Persiste em `backtest_runs` via
+`MongoRepository.save_backtest_run`, que carimba `created_at` — `datetime`
+continua restrito a `repository.py`/`ingestion/normalizer.py` (design §3.6),
+então o CLI nunca toca a classe. Índice definido no mesmo commit (design
+v0.7), adiado desde a v0.3.
 
-## Verificação por mutação (obrigatória em E1 e E2 nesta sessão)
+**F2 — gráfico** (`analytics/plot.py::plot_backtest`). Equity de estratégia
+e benchmark no painel superior com marcações ▲/▼ de entrada e saída, drawdown
+no inferior. Backend `Agg` (sem display). Salvo em arquivo.
 
-| Módulo | Mutação | Testes que caem |
+**F3 — RNF-04 + cobertura.** Ver "Números finais" acima.
+
+**F4 — resultado honesto.** Ver [`results/`](../results/) e a seção
+"Resultados" do [README](../README.md). SMA cross 20/50 fixo, sem otimização,
+em todos os 20 tickers: **a estratégia perde para o buy-and-hold em CAGR em
+19 dos 20** — resultado esperado da literatura para seguimento de tendência
+em mega caps americanas num mercado de alta prolongada (2015-2026), não
+falha do engine. META é a única exceção, por evitar parte de uma queda de
+77% em 2021-2022, não por "acertar melhor" o mercado.
+
+## Verificação por mutação desta sessão
+
+| Alvo | Mutação | Testes que caem |
 |---|---|---|
-| E1 sharpe | anualizar por √12 em vez de √252 | 3 |
-| E1 max_drawdown | medir do início da série em vez do pico corrente | 3 |
-| E1 max_drawdown | `>=` → `>` no limiar de recuperação (achado próprio) | 1 (isolado de propósito) |
-| E2 benchmark | comprar na barra 0 em vez de `warmup + 1` | 5 de 7 |
+| D1 `SmaCross.on_bar` | sinalizar por nível (`fast>slow`) em vez de na transição | 2 |
+| D1 `SmaCross.on_bar` | inverter ENTER/EXIT | 3 |
+| D1 `SmaCross.on_bar` | comparar SMAs em `i` e `i` em vez de `i` e `i-1` | 3 |
+| D1 `SmaCross.warmup` | `warmup = fast` em vez de `slow` | 1 (só o teste de propriedade — ver nota) |
 
-Todas restauradas byte a byte, confirmado com `diff`. Nenhuma mutação ficou
-sem teste que a derrubasse — diferente do que aconteceu no Bloco C (M1, ordem
-2-3 do laço), que é liberdade genuína e está documentada lá.
+A mutação de `warmup` expôs um teste com dente fraco: os testes de
+cruzamento não notavam a diferença porque a fixture (`_CLOSES` plano nas três
+primeiras barras) faz uma chamada prematura de `on_bar` produzir
+`prev_diff == curr_diff == 0`, que não passa nas comparações estritas —
+um empate mascarava o warmup errado atrás de "nenhum sinal", que também é o
+resultado correto na maioria das barras. Adicionado
+`test_engine_never_calls_on_bar_before_slow_bars_of_true_history`, que trava
+o contrato pelo lado que a coincidência aritmética não protege (quais
+índices `run_backtest` efetivamente consultou). Com o teste novo, a mesma
+mutação derruba 2 testes. Ver [HANDOFF.md](../HANDOFF.md) para a tabela de
+E1/E2 (sessão anterior) e a tabela completa desta.
 
-## Pendências — ambiguidades de spec para a v0.6 (não bloqueiam D/E)
+## Pendências
 
-Registradas em HANDOFF.md §6 do Bloco C, avaliadas nesta sessão: nenhuma
-bloqueia código já escrito ou a escrever em D/E, porque todas são sobre
-decisões *já tomadas* que a documentação ainda não reflete com precisão.
+Nenhuma ambiguidade de spec aberta. As quatro do Bloco C (HANDOFF §6) foram
+todas fechadas: uma por errata do ADR-0004 (sessão anterior), três por v0.6
+do design (esta sessão — todas descritivas, nenhuma exigiu escolher entre
+comportamentos, código já implementava a única opção documentada).
 
-1. **Design §4.3 sugere ordem em três níveis; só duas restrições existem**
-   (1-antes-de-2, 1-antes-de-3; a ordem 2-3 é livre). Recomendação: reescrever
-   §4.3 para declarar isso explicitamente.
-2. **ADR-0004 nomeava testes que não existem** — corrigido nesta sessão via
-   errata datada no próprio ADR (commit `1109c7a`). Sem pendência.
-3. **Design §4.5 não listava `exit_decision_date`** no struct de `Trade`. Já
-   implementado por simetria com `entry_decision_date`. Recomendação:
-   atualizar o struct do design.
-4. **Design §4.4 não definia o destino de `EXIT` sem posição** no nível do
-   laço. Implementado como *consumida* (não fica pendente pra próxima barra,
-   porque isso seria lookahead por outro caminho). Recomendação: documentar
-   essa escolha em §4.4.
-
-## Próximo passo
-
-**Bloco F — fechamento.** F1 (CLI `backtest` + persistência em
-`backtest_runs`) depende só do que já existe: `run_backtest`, `buy_and_hold`,
-`BacktestReport.build()`. F2 (gráfico) consome a mesma tripla. F3 vai medir
-RNF-04 (10 anos em <5s) pela primeira vez com o pipeline completo, incluindo
-a leitura de histórico completo que ADR-0004 introduziu — é o gatilho
-concreto de revisitação que o próprio ADR já previu, não suposição.
+**Para a Fase 2, quando começar:** nenhuma spec escrita ainda. Ideias que já
+apareceram ao longo da Fase 1 e vale revisitar então — não implementar agora:
+cache de ajuste em Redis (ADR-0003 já deixa isso escopado, condicionado a
+RNF-04 virar problema real — não virou), otimização de leitura de histórico
+completo com injeção de mapa `data → close` se a leitura de `bars` virar
+gargalo medido (ADR-0004 "Revisitar quando"), fallback de provedor de dados
+pago caso a qualidade do yfinance grátis continue sendo um risco (o bug de
+`NaN` desta sessão é evidência concreta desse risco, não hipotética).

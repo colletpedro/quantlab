@@ -1370,3 +1370,229 @@ histórico completo que ADR-0004 introduziu — o gatilho de revisitação que o
 já previu. F4 fecha a Fase 1 com um resultado honesto, incluindo se a SMA cross perder
 para o buy-and-hold — CLAUDE.md §"Honestidade de resultado" é explícito que perder é um
 resultado válido a reportar, não algo a maquiar.
+
+## Bloco F — fechamento da Fase 1
+
+**Data:** 2026-08-04
+**Origem:** retomada de sessão. Estado inicial verificado limpo, nove passos locais
+verdes antes de escrever qualquer código (incluindo `make up`, exigido pela primeira vez
+nesta retomada porque F4 precisa de Mongo real).
+**Escopo:** convenção de fixture auditável (CLAUDE.md), v0.6 do design (três das quatro
+ambiguidades do Bloco C), retrocheque de mutação em D1, F1-F4 completos, um bug real de
+validação encontrado e corrigido rodando F4.
+
+### 1. O que foi entregue, por parte
+
+| Parte | Entrega | Commit |
+|---|---|---|
+| CLAUDE.md | Convenção de derivação auditável em fixture de papel | `af3b26e` |
+| Design v0.6 | Fecha 3 ambiguidades do Bloco C (§4.2, §4.3, §4.5) | `e165ab7` |
+| D1 mutação | Retrocheque de mutação em `SmaCross`, teste novo para o warmup | `c03768e` |
+| F1+F2 | CLI `backtest`, persistência, índice de `backtest_runs`, gráfico | `f552676` |
+| Bug fix | Preço não finito (`NaN`) escapava de ING-05.1 | `d05ebd4` |
+| F4 | Ingestão real, backtest 20/50 fixo em 20 tickers, README, `results/` | `fa6d73f` |
+| — | `docs/STATE.md` + esta seção | (este commit) |
+
+### 2. Convenção nova no CLAUDE.md
+
+Acrescentada a regra: a derivação do valor esperado de uma fixture de papel vive **no
+próprio teste**, como comentário — nunca só no handoff, nunca implícita. Três fixtures
+desta fase discordaram da implementação na primeira tentativa (o teste de custo de
+entrada em C4, o Sharpe com `rf≠0` e o `max_drawdown` de duas quedas, ambos em E1); nas
+três o código estava certo e o erro era da conta manual, e a auditoria só foi possível
+porque a derivação já estava escrita ali. As três já seguiam essa prática por
+coincidência de estilo — a convenção fica declarada para não depender de lembrança na
+próxima fixture. Nenhuma mudança de código foi necessária nas três fixtures: já
+carregavam a derivação (comentário em C4, docstring nas duas de E1).
+
+### 3. v0.6 do design — três das quatro ambiguidades fechadas
+
+Reavaliadas as quatro ambiguidades do Bloco C §6 (ver seção correspondente acima).
+Classificação: as três primeiras eram puramente descritivas (a spec passa a descrever o
+que o código já faz, sem escolher entre alternativas) — nenhuma exigiu decisão nova.
+
+1. **§4.3 reescrita** — a ordem do laço não é uma cadeia total de três passos, só
+   1-antes-de-2 e 1-antes-de-3 são restrições reais; a ordem entre 2 e 3 é livre
+   (ENG-05.2) e travada por teste dedicado desde o Bloco C, não presumida.
+2. **§4.5 — `exit_decision_date`** adicionado ao struct de `Trade` documentado, por
+   simetria com `entry_decision_date`. Já implementado desde o Bloco C.
+3. **§4.2 — `EXIT` sem posição consome a ordem pendente**, não a retém para a barra
+   seguinte. Adicionado como Q4 na tabela de decisões (7), no mesmo formato de Q1-Q3.
+
+A quarta (nomes de teste do ADR-0004) já tinha sido fechada por errata no próprio ADR
+na sessão anterior — sem pendência aqui.
+
+Nenhuma das quatro chegou a exigir parar e reportar: todas eram sobre documentação
+atrasada em relação a decisões já tomadas e testadas, não sobre escolher entre
+comportamentos possíveis daqui pra frente.
+
+### 4. Retrocheque de mutação em D1
+
+D1 não tinha recebido verificação por mutação no Bloco D original, apesar de ser a
+única estratégia da fase — todo resultado final de F4 depende dela.
+
+| Mutação | Testes que caem |
+|---|---|
+| Sinalizar por nível (`fast>slow`) em vez de na transição | 2 |
+| Inverter ENTER/EXIT | 3 |
+| Comparar SMAs em `i` e `i` em vez de `i` e `i-1` | 3 |
+| `warmup = fast` em vez de `slow` | 1 (só o teste de propriedade) |
+
+A quarta mutação achou um teste com dente fraco, não uma mutação livre de verdade (ao
+contrário do M1 do Bloco C, que era liberdade genuína de desenho). Nenhum dos testes de
+cruzamento notava a diferença: a fixture (`_CLOSES` plano nas três primeiras barras) faz
+uma chamada prematura de `on_bar` em `i=fast` produzir `prev_diff == curr_diff == 0`, que
+não passa nas comparações estritas (`>0`/`<0`) — um empate mascara o warmup errado atrás
+de "nenhum sinal", que é também o resultado correto na maioria das barras. Adicionado
+`test_engine_never_calls_on_bar_before_slow_bars_of_true_history`: em vez de chamar
+`on_bar` direto, roda `run_backtest` de ponta a ponta com uma estratégia-espiã que
+registra todo índice consultado, e trava `min(índices) == slow`. Com o teste novo, a
+mesma mutação derruba 2 testes. Todas as quatro restauradas byte a byte, confirmado com
+`diff`.
+
+### 5. F1 — CLI `backtest` e persistência
+
+`--strategy/--ticker/--from/--to/--fast/--slow`, janela default D5 (2015-01-01 até a
+última barra disponível — `--to` sem valor deixa `get_series` sem tampa superior).
+Ticker sem dado ingerido propaga `DataError` de `build_price_series`; CLI captura,
+imprime mensagem acionável e sai com código 1 (CA-02.2) — verificado com fake e também
+manualmente contra Mongo real.
+
+Persistência em `backtest_runs` via `MongoRepository.save_backtest_run`. Decisão de
+desenho: o documento é montado inteiramente pelo CLI (que conhece `BacktestReport`), e o
+repositório só grava e carimba `created_at` — `datetime`/`UTC` continuam restritos a
+`repository.py` e `ingestion/normalizer.py` (design §3.6), e o teste de arquitetura
+(`test_only_the_two_boundary_modules_handle_instants`) pegou a primeira tentativa, que
+carimbava `created_at` no CLI.
+
+Índice de `backtest_runs`, adiado desde a v0.3, definido neste commit:
+`{ticker:1, "strategy.name":1, created_at:-1}` — mesmo padrão de `ingestion_runs` (B4).
+Documentado em design v0.7 no mesmo commit, que também corrige uma referência esquecida:
+`ingestion_run_id` estava listado como campo do documento de `backtest_runs` desde a
+v0.1, mas foi removido de `PriceSeries` já na v0.3 sem que esta lista fosse atualizada.
+
+### 6. F2 — gráfico
+
+`analytics/plot.py::plot_backtest` — dois painéis (`gridspec_kw={"height_ratios":[2,1]}`):
+equity de estratégia e benchmark com marcações ▲ (entrada) / ▼ (saída) no superior,
+drawdown da estratégia no inferior. Backend `Agg` fixado antes de importar `pyplot`
+— o CLI roda sem display. Duplica duas linhas de `metrics.max_drawdown` (cummax) em vez
+de importar de lá: a função de métricas devolve o resumo escalar, não a série completa
+que o painel precisa desenhar.
+
+Teste de estrutura verifica dimensões do PNG salvo (`figsize`×`dpi`) e mais de uma cor
+de pixel — não dá para inspecionar `fig.axes` depois de `plot_backtest` fechar a figura
+internamente.
+
+### 7. F3 — RNF-04 medido
+
+Medição isolada do cômputo (sem I/O de ingestão nem renderização de gráfico, que RNF-04
+não cobre): `get_series` + `run_backtest` + `buy_and_hold` + `BacktestReport.build()`
+sobre 2.912 barras de AAPL (~11.5 anos, 2015-01-01 a 2026-07-31), 5 execuções.
+**Mediana: 0.051s.** Bem abaixo do limite de 5s — a leitura de histórico completo que
+ADR-0004 introduziu não é gargalo neste volume, como o próprio ADR previa ("RNF-04 dá
+folga"). Nenhuma ação de revisitação necessária.
+
+Cobertura com código real de F1-F4 incluído: `engine/` 92-100% por arquivo,
+`analytics/` 96-100% por arquivo (`plot.py` novo, 96%) — ambos folgados acima do piso de
+80% de RNF-02.
+
+### 8. F4 — o bug real, e o resultado honesto
+
+**O bug, encontrado rodando a ingestão real do universo completo.** Depois de ingerir os
+20 tickers de 2015-01-01 até 2026-08-03 pela primeira vez, o backtest de vários tickers
+saiu com `retorno acumulado`/`CAGR` = `nan` — não um número ruim, um número inválido.
+Diagnóstico: `close = nan` na última barra ingerida (AAPL e os outros 19, todos na mesma
+data, 2026-08-03 — o pregão do dia corrente, ainda em formação no momento da consulta ao
+yfinance). As regras de quarentena de ING-05.1 são comparações de desigualdade
+(`high < low`, fora de `[low, high]`, `preço ≤ 0`), e `NaN` não satisfaz nenhuma delas
+nem sua negação (IEEE 754) — a barra passava como válida e corrompia qualquer posição
+ainda aberta na última barra (o benchmark, que nunca vende, corrompia **sempre**).
+
+Corrigido em `ingestion/validator.py` com `math.isfinite` em toda comparação de preço.
+Spec corrigida **antes** do código no mesmo commit — CLAUDE.md manda dizer quando os
+dois mudam juntos: requirements v1.1 (CA-05.1) e design v0.8 (§3.3) passam a listar
+preço não finito entre as razões de quarentena bloqueante. As 20 barras já gravadas antes
+da correção foram removidas manualmente (`upsert_bars` só grava `valid_bars` — não há
+caminho automático para "isto era válido e agora não é", então uma barra ruim já gravada
+fica até alguém limpar), e a ingestão foi re-executada, confirmando quarentena correta
+nos 20 casos. Fixtures de papel novas em `test_validator.py` (`NaN`/infinito em cada um
+dos quatro campos de preço, mais um caso que confirma que `non_finite_price` não engole
+`volume_negative`) travam o comportamento.
+
+**O resultado.** Universo completo ingerido de verdade (55.328 barras, 0 falhas, 0
+quarentenas no run final). SMA cross com `fast=20, slow=50` fixos — escolhidos uma vez,
+antes de rodar, nunca ajustados — em todos os 20 tickers, sem seleção de ticker
+favorável, sem recorte de janela. **A estratégia perde para o buy-and-hold em CAGR em 19
+dos 20 tickers.** É o resultado esperado da literatura de seguimento de tendência num
+mercado de alta prolongada (mega caps americanas, 2015-2026, incluindo a recuperação em
+V pós-2020): a SMA cross paga custo de oportunidade por ficar fora da posição em toda
+reversão, e paga de novo em custos de transação (27-36 trades por ticker, contra 1 do
+buy-and-hold). META é a única exceção, e por um motivo identificável, não por a
+estratégia ter "acertado o mercado": evitou parte de uma queda de 76.7% em 2021-2022
+(era do metaverso) que o buy-and-hold sofreu inteira.
+
+Os 40 artefatos (20 JSON + 20 PNG) estão comprometidos em `results/`, exatamente como os
+comandos produziram — nenhum editado à mão. `.gitignore` ganhou negação explícita para
+`results/` (o padrão geral `*.png`/`*.pdf` continua valendo para todo o resto do
+projeto). README reescrito por completo: estava preso na Fase 0.
+
+### 9. Verificação e CI
+
+**Local — nove passos, todos verdes**, ao início (antes de qualquer código) e ao final:
+`make up`, `install`, `lint`, `typecheck`, `test`, `test-integration`, `check`, `audit`,
+`pre-commit run --all-files`.
+
+- **367 testes**: 333 unitários (era 311 no fim do Bloco D+E — 22 novos entre a
+  correção de warmup, F1/F2 e o bug fix de validação) + 60 de integração (era 57 — 3
+  novos para `backtest_runs`).
+- Cobertura total: **97.09%**. Nenhum arquivo de `engine/` ou `analytics/` abaixo de
+  92%.
+
+**CI — [run 30881248393](https://github.com/colletpedro/quantlab/actions/runs/30881248393)**,
+os três jobs verdes.
+
+### 10. Decisões que tomei por conta própria — revise
+
+**10.1 Documento de `backtest_runs` montado inteiramente no CLI, não em `storage/` nem
+`analytics/`.** É o único lugar que conhece tanto `BacktestReport` quanto o formato
+Mongo; fazer `storage/` conhecer `BacktestReport` inverteria a direção de dependência do
+design §2.
+
+**10.2 `save_backtest_run` carimba `created_at`, em vez de receber o timestamp pronto.**
+Forçado pelo teste de arquitetura (§3.6) — a primeira versão carimbava no CLI e quebrou.
+Deixar o repositório carimbar é também mais correto: "quando foi persistido" é uma
+propriedade da escrita, não da montagem do documento.
+
+**10.3 Barras corrompidas por `NaN` removidas manualmente, não por um método novo de
+repositório.** É limpeza pontual de um estado que só existiu por causa do bug — criar
+`delete_bars` ou similar seria infraestrutura permanente para um problema que não deveria
+se repetir agora que a validação está corrigida. Se aparecer um segundo caso, vale
+reconsiderar.
+
+**10.4 `_blocking_reasons` pula as comparações de intervalo/sinal quando o preço não é
+finito, em vez de reportar todas as razões que ainda "disparariam" tecnicamente.** Elas
+não disparariam mesmo — é exatamente o bug — então rodá-las sobre um preço `NaN` não
+acrescenta informação, só ruído. `volume_negative` continua sendo checado
+independentemente, porque volume não é preço.
+
+### 11. Ambiguidades de spec — nenhuma pendente
+
+As quatro do Bloco C estão todas fechadas (seção 3 acima + errata do ADR-0004 na sessão
+anterior). Nenhuma ambiguidade nova foi encontrada nesta sessão — o único achado foi o
+bug de validação, já corrigido com spec e código no mesmo commit.
+
+### 12. O que a Fase 2 herda
+
+- Cache de ajuste em Redis: ADR-0003 já deixa escopado, condicionado a RNF-04 virar
+  problema real. Medido nesta sessão (0.051s) — não virou. Sem ação.
+- Otimização de leitura de histórico completo (alternativa (A) descartada em ADR-0004):
+  revisitar se a leitura de `bars` virar gargalo medido, ou se multi-ativo em execução
+  multiplicar o custo pelo número de papéis do portfólio.
+- Fallback de provedor de dados pago: o bug de `NaN` desta sessão é evidência concreta
+  de que dado gratuito tem qualidade inferior a institucional — não elimina o risco,
+  só reduz a superfície (a validação pega o que a comparação captura; não pega tudo que
+  um provedor ruim pode devolver).
+- Position sizing, portfólio multi-ativo (N>1), walk-forward com correção estatística
+  para múltiplas hipóteses, calendário de pregão dedicado — todos escopo já reconhecido
+  e adiado desde o requirements da Fase 1, não descobertos agora.
