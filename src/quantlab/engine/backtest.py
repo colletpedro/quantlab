@@ -141,20 +141,27 @@ def run_backtest(
       3. **Consultar a estratégia** com ``MarketView(i)``, se ``i >= warmup``.
          Um sinal retornado vira ordem pendente para ``i + 1``.
 
-    A sequência **não é arbitrária**, e cada passo está onde está por uma
-    razão que a inversão quebra:
+    **Quais ordens carregam peso, medido por mutação e não suposto:**
 
-    - **Executar antes de marcar** garante que a equity de `i` reflita a
-      posição real ao fim de `i`. Marcar antes deixaria a equity um dia
-      atrasada em toda barra com execução.
-    - **Consultar por último** garante que nenhuma decisão de `i` seja
-      executada em `i`. É literalmente ADR-0002: consultar antes de executar
-      permitiria a ordem da barra corrente ser preenchida na barra corrente,
-      ao preço que a decisão já conhece.
+    - **Executar antes de marcar** (1 antes de 2) garante que a equity de `i`
+      reflita a posição real ao fim de `i`. Marcar antes deixaria a equity um
+      dia atrasada em toda barra com execução. Inverter derruba 3 testes.
+    - **Executar antes de consultar** (1 antes de 3) garante que nenhuma
+      decisão de `i` seja executada em `i`. É literalmente ADR-0002. Executar
+      no mesmo índice da decisão derruba 6 testes.
+    - **A ordem entre 2 e 3 é livre.** Consultar a estratégia não tem efeito
+      colateral sobre a carteira — só devolve um sinal, que vira ordem
+      pendente para `i + 1`. É consequência de ENG-05.2, e a mutação que
+      inverte 2 e 3 não derruba teste nenhum, de propósito. A numeração acima
+      é a ordem em que o código lê melhor, não uma restrição em três níveis.
+      `test_the_equity_of_a_bar_does_not_depend_on_the_signal_emitted_on_it`
+      trava a premissa: se alguém der efeito colateral a `on_bar`, aquele
+      teste quebra e a liberdade some.
 
-    Uma inversão aqui não estoura nada — produz um backtest melhor e falso.
-    O que quebra é o teste de ENG-01.2 (mutação de barras futuras), em
-    `tests/unit/test_backtest.py`, que é o critério de aceitação da fase.
+    Uma inversão das duas primeiras não estoura nada — produz um backtest
+    melhor e falso. O que quebra é o teste de ENG-01.2 (mutação de barras
+    futuras), em `tests/unit/test_backtest.py`, o critério de aceitação da
+    fase.
     ────────────────────────────────────────────────────────────────────────
 
     O "próximo pregão disponível" de ENG-01.5 é simplesmente ``i + 1`` no

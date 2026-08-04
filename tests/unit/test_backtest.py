@@ -304,6 +304,48 @@ def test_equity_is_cash_plus_position_at_the_close_of_every_bar() -> None:
 
 
 @pytest.mark.unit
+def test_the_equity_of_a_bar_does_not_depend_on_the_signal_emitted_on_it() -> None:
+    """Consultar a estratégia não move a carteira — e é isso que torna livre
+    a ordem entre os passos 2 e 3 do laço.
+
+    Descoberto por mutação: inverter os passos 2 e 3 (consultar antes de
+    marcar) **não derruba teste nenhum**, porque `on_bar` não tem efeito
+    colateral sobre o portfolio — só devolve um sinal, que vira ordem
+    pendente para a barra seguinte. É consequência de ENG-05.2: a estratégia
+    não alcança caixa, posição nem trades.
+
+    A ordem que É carregadora de peso é `executar antes de marcar` (passos 1
+    e 2) e `executar antes de consultar` (passos 1 e 3) — as duas com
+    mutação que derruba teste.
+
+    Este teste existe para que a premissa deixe de ser implícita: se alguém
+    algum dia der efeito colateral a `on_bar`, ele quebra aqui, e a pessoa
+    descobre que a ordem 2/3 passou a importar antes de descobrir por um
+    número errado no relatório.
+    """
+    opens = [10.0, 10.0, 10.0]
+    closes = [10.0, 20.0, 30.0]
+
+    silent = run_backtest(_series(opens, closes), NeverTrades(), initial_cash=100.0, costs=_FREE)
+    # Sinal na ÚLTIMA barra: nunca executa (ENG-01.4), então a única
+    # diferença possível seria um efeito colateral da consulta.
+    signalling = run_backtest(
+        _series(opens, closes),
+        ScriptedStrategy(script={2: Signal.ENTER}),
+        initial_cash=100.0,
+        costs=_FREE,
+    )
+
+    assert signalling.pending_order is not None
+    assert [point.equity for point in silent.equity_curve] == pytest.approx(
+        [point.equity for point in signalling.equity_curve]
+    )
+    assert [point.cash for point in silent.equity_curve] == pytest.approx(
+        [point.cash for point in signalling.equity_curve]
+    )
+
+
+@pytest.mark.unit
 def test_equity_reflects_the_execution_of_the_same_bar() -> None:
     """Executar ANTES de marcar: a equity de `i` já reflete a posição de `i`.
 
