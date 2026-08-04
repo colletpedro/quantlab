@@ -235,6 +235,93 @@ def test_missing_ticker_fails_with_an_actionable_message(mongo_db: MongoDatabase
 
 
 @pytest.mark.integration
+def test_adjusted_values_do_not_depend_on_the_requested_window(
+    mongo_db: MongoDatabase,
+) -> None:
+    """ADR-0004 — o invariante de independência de janela, contra Mongo real.
+
+    Este é o teste de regressão do bug de A7. Antes de ADR-0004 ele falhava:
+    `get_series` passava ao cálculo do fator só as barras da janela, e o `C`
+    de um evento posterior ao fim dela virava o último fechamento da janela.
+
+    Montagem: dividendo em 05/01, cuja barra anterior é 04/01 (close 120.0).
+    A janela [02/01, 03/01] termina ANTES dessa barra.
+        C correto  = 120.0  ->  fator = (120.0 - 1.20)/120.0 = 0.99
+        C da v0.4  = 110.0 (fechamento de 03/01, fim da janela)
+                     ->  fator = (110.0 - 1.20)/110.0 = 0.98909...
+    Diferença de ~0,09% na primeira barra — pequena, sistemática, e
+    exatamente do formato que a sanidade cruzada de AAPL expôs.
+    """
+    repository = _repository(mongo_db)
+    repository.upsert_corporate_actions(
+        [
+            CorporateAction(
+                ticker="AAPL",
+                date=date(2024, 1, 5),
+                kind=CorporateActionKind.DIVIDEND,
+                value=1.20,
+            )
+        ]
+    )
+
+    wide = repository.get_series("AAPL")
+    narrow = repository.get_series("AAPL", start=date(2024, 1, 2), end=date(2024, 1, 3))
+
+    wide_by_date = {d: float(c) for d, c in zip(wide.dates, wide.close, strict=True)}
+
+    assert len(narrow) == 2
+    for bar_date, value in zip(narrow.dates, narrow.close, strict=True):
+        assert float(value) == pytest.approx(wide_by_date[bar_date], rel=1e-15), bar_date
+
+    # 100.0 * 0.99 = 99.0 — o C correto vem de 04/01, fora da janela pedida.
+    assert list(narrow.close) == pytest.approx([99.0, 108.9])
+
+    # O valor que a v0.4 produzia, deixado explícito para o contraste.
+    stale = 100.0 * (110.0 - 1.20) / 110.0
+    assert stale == pytest.approx(98.9090909091)
+    assert float(narrow.close[0]) != pytest.approx(stale)
+
+
+@pytest.mark.integration
+def test_narrow_window_hash_matches_an_equivalent_slice_of_a_wide_read(
+    mongo_db: MongoDatabase,
+) -> None:
+    """PER-03.1 depois de ADR-0004 — o hash deixa de depender da consulta.
+
+    Antes, duas leituras que compartilhavam barras produziam hashes distintos
+    para elas, o que atacava PER-03.1 no ponto exato em que ele existe para
+    dar garantia de reprodutibilidade.
+    """
+    repository = _repository(mongo_db)
+    repository.upsert_corporate_actions(
+        [
+            CorporateAction(
+                ticker="AAPL",
+                date=date(2024, 1, 5),
+                kind=CorporateActionKind.DIVIDEND,
+                value=1.20,
+            )
+        ]
+    )
+
+    first = repository.get_series("AAPL", start=date(2024, 1, 2), end=date(2024, 1, 3))
+    second = repository.get_series("AAPL", start=date(2024, 1, 2), end=date(2024, 1, 3))
+
+    assert first.hash == second.hash
+
+
+@pytest.mark.integration
+def test_window_outside_the_history_fails_with_an_actionable_message(
+    mongo_db: MongoDatabase,
+) -> None:
+    """Ticker ingerido, janela vazia: a mensagem precisa distinguir os dois casos."""
+    repository = _repository(mongo_db)
+
+    with pytest.raises(DataError, match="janela"):
+        repository.get_series("AAPL", start=date(2030, 1, 1), end=date(2030, 12, 31))
+
+
+@pytest.mark.integration
 def test_series_arrays_are_read_only_end_to_end(mongo_db: MongoDatabase) -> None:
     """A garantia de §3.7 vale para a série que o repositório realmente devolve."""
     series = _repository(mongo_db).get_series("AAPL")

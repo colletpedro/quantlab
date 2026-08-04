@@ -25,7 +25,7 @@ produto para trás, em O(n). Sem laço aninhado por barra e evento.
 from bisect import bisect_left
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 
 import numpy as np
 from numpy.typing import NDArray
@@ -37,6 +37,11 @@ from quantlab.storage.models import CorporateAction, CorporateActionKind
 __all__ = ["AdjustmentFactors", "adjustment_factors"]
 
 _log = get_logger(__name__)
+
+#: Vão máximo, em dias úteis, entre a barra que fornece `C` e a data ex antes
+#: de o ajuste virar suspeito (design v0.5 §3.7). Mesmo limiar de ING-05.2 —
+#: se um vão desse tamanho não é gap de calendário, é dado faltando.
+_MAX_GAP_BUSINESS_DAYS = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +83,28 @@ def adjustment_factors(
     # multiplicação de float não é associativa. Processar sempre na mesma
     # ordem é o que garante resultado bit a bit idêntico entre execuções
     # (RNF-01), independentemente de como a lista chegou.
+    last_bar_date = bar_dates[-1]
+
     for event in sorted(events, key=lambda item: (item.date, item.kind.value)):
+        if event.date > last_bar_date:
+            # Ponta direita do histórico (design v0.5 §3.7, ADR-0004). Não há
+            # `C` honesto: o fechamento anterior à data ex é uma barra que
+            # ainda não foi ingerida. Usar a última disponível como substituto
+            # É o bug que ADR-0004 corrige, só que na ponta direita.
+            #
+            # Descartar não distorce retorno: um evento posterior a TODAS as
+            # barras multiplica a série inteira pelo mesmo fator, então a
+            # variação percentual entre quaisquer duas barras não muda —
+            # muda só o nível absoluto, cuja distorção já é o viés 5 de §5.2.
+            _log.warning(
+                "storage.event_after_last_bar",
+                ticker=event.ticker,
+                date=event.date.isoformat(),
+                kind=event.kind.value,
+                last_bar_date=last_bar_date.isoformat(),
+            )
+            continue
+
         # Primeiro índice cuja data é >= a do evento. `anchor - 1` é, então, a
         # última barra estritamente anterior a ele — o ponto onde o fator
         # entra para que o cumprod reverso o propague para trás.
@@ -104,6 +130,12 @@ def adjustment_factors(
             price_contribution[last_bar_before] *= 1.0 / ratio
             volume_contribution[last_bar_before] *= ratio
         else:
+            # `C` é o fechamento bruto da barra imediatamente anterior à data
+            # ex NO HISTÓRICO COMPLETO (design v0.5 §3.7). Com o histórico
+            # inteiro em mãos, essa barra *é* o pregão anterior — não é
+            # preciso calendário de pregão para desambiguar "mercado fechado"
+            # de "não ingerimos".
+            _warn_if_gap_is_large(event, bar_dates[last_bar_before])
             previous_close = float(raw_close[last_bar_before])
             price_contribution[last_bar_before] *= _dividend_factor(event, previous_close)
 
@@ -113,6 +145,30 @@ def adjustment_factors(
     price = np.ascontiguousarray(np.cumprod(price_contribution[::-1])[::-1])
     volume = np.ascontiguousarray(np.cumprod(volume_contribution[::-1])[::-1])
     return AdjustmentFactors(price=price, volume=volume)
+
+
+def _warn_if_gap_is_large(event: CorporateAction, previous_bar: date) -> None:
+    """Aviso não-bloqueante quando a barra que dá `C` está longe da data ex.
+
+    Só para dividendo: o fator de um split é `1/r` qualquer que seja a barra
+    âncora, então um vão grande não torna o número suspeito. Para dividendo o
+    `C` entra na conta, e um vão de mais de uma semana útil significa que a
+    barra usada provavelmente não é o pregão anterior de verdade.
+
+    Duplica `_business_day_gap` de `ingestion/validator.py` de propósito:
+    `storage/` não pode importar de `ingestion/` sem inverter a direção das
+    dependências (design §2) e criar ciclo — `ingestion` já importa
+    `storage.models`.
+    """
+    gap = int(np.busday_count(previous_bar + timedelta(days=1), event.date))
+    if gap > _MAX_GAP_BUSINESS_DAYS:
+        _log.warning(
+            "storage.large_gap_before_ex_date",
+            ticker=event.ticker,
+            date=event.date.isoformat(),
+            previous_bar_date=previous_bar.isoformat(),
+            gap_business_days=gap,
+        )
 
 
 def _require_ratio(event: CorporateAction) -> float:

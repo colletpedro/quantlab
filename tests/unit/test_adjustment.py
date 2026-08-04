@@ -209,17 +209,139 @@ def test_dividend_and_split_on_the_same_ex_date_both_apply() -> None:
 
 
 @pytest.mark.unit
-def test_event_after_the_whole_window_still_adjusts_every_bar() -> None:
-    """ING-02.3 — split posterior à janela afeta todas as barras dentro dela.
+def test_event_after_the_last_bar_is_discarded_with_a_warning(
+    log_events: list[EventDict],
+) -> None:
+    """Design v0.5 §3.7 (ADR-0004) — data ex depois do último pregão: descarte.
 
-    Todas as quatro barras são estritamente anteriores a 01/06, logo todas
-    recebem 0.5. É por isto que os eventos são lidos sobre o histórico
-    completo e não sobre a janela pedida.
+    Substitui `test_event_after_the_whole_window_still_adjusts_every_bar`, que
+    encodava a regra da v0.4 (aplicar o fator usando o último fechamento
+    disponível como `C`). Essa regra ERA o bug: na ponta direita, "último
+    fechamento disponível" não é o fechamento anterior à data ex, é só o
+    último que por acaso existe.
+
+    Duas razões para descartar, ambas em §3.7: não há `C` honesto, e o fator
+    de um evento posterior a TODAS as barras é reescalonamento uniforme —
+    neutro em retorno, mexe só no nível absoluto.
+
+    Vale para os dois tipos, split inclusive: aqui o split de 01/06 morre.
     """
     factors = adjustment_factors(_S1_DATES, _S1_CLOSES, [_split(1, 2.0, month=6)])
 
-    assert list(factors.price) == pytest.approx([0.5, 0.5, 0.5, 0.5])
-    assert list(factors.volume) == pytest.approx([2.0, 2.0, 2.0, 2.0])
+    assert list(factors.price) == pytest.approx([1.0, 1.0, 1.0, 1.0])
+    assert list(factors.volume) == pytest.approx([1.0, 1.0, 1.0, 1.0])
+
+    discarded = [event for event in log_events if event["event"] == "storage.event_after_last_bar"]
+    assert len(discarded) == 1
+    assert discarded[0]["ticker"] == "TEST"
+    assert discarded[0]["date"] == "2024-06-01"
+
+
+@pytest.mark.unit
+def test_dividend_after_the_last_bar_is_also_discarded(
+    log_events: list[EventDict],
+) -> None:
+    """O caso que produziu o bug de verdade: dividendo na ponta direita.
+
+    Sem o descarte, `C` viraria o fechamento da última barra (65.0 em `_S1`),
+    que não tem relação nenhuma com o preço na data ex. É exatamente o que a
+    v0.4 fazia com os 10 dividendos de AAPL, usando `C = 186.19` para
+    dividendos de fevereiro/2024 a maio/2026.
+    """
+    factors = adjustment_factors(_S1_DATES, _S1_CLOSES, [_dividend(1, 0.50, month=6)])
+
+    assert list(factors.price) == pytest.approx([1.0, 1.0, 1.0, 1.0])
+
+    discarded = [event for event in log_events if event["event"] == "storage.event_after_last_bar"]
+    assert len(discarded) == 1
+
+
+# ─── ADR-0004: o `C` vem do histórico completo ───────────────────────────────
+
+#: Histórico COMPLETO de cinco pregões. O dividendo cai em 08/01, cuja barra
+#: anterior (05/01, close 200.00) está no histórico — mas ficaria de fora de
+#: uma janela que terminasse em 04/01. É a diferença entre os dois cenários
+#: que o bug de A7 explorava.
+_ADR4_DATES = [
+    date(2024, 1, 2),
+    date(2024, 1, 3),
+    date(2024, 1, 4),
+    date(2024, 1, 5),
+    date(2024, 1, 8),
+]
+_ADR4_CLOSES = _closes(100.0, 110.0, 120.0, 200.0, 210.0)
+
+
+@pytest.mark.unit
+def test_dividend_after_the_window_uses_the_true_previous_close() -> None:
+    """ADR-0004 — com o histórico completo, `C` é o fechamento de D-1 de verdade.
+
+    Dividendo d = 2.00 com data ex 08/01.
+    C = fechamento bruto de 05/01 = 200.00  (a barra imediatamente anterior)
+    fator = (200.00 - 2.00)/200.00 = 198.00/200.00 = 0.99
+
+    Barras estritamente anteriores a 08/01 são as quatro primeiras:
+        100.0 * 0.99 =  99.00
+        110.0 * 0.99 = 108.90
+        120.0 * 0.99 = 118.80
+        200.0 * 0.99 = 198.00
+    08/01 não é anterior a si mesma: fica em 210.00.
+
+    O contraste com o cenário truncado está em
+    `test_truncated_history_would_use_a_stale_close` — 0.99 contra 0.98333.
+    """
+    factors = adjustment_factors(_ADR4_DATES, _ADR4_CLOSES, [_dividend(8, 2.00)])
+
+    assert list(factors.price) == pytest.approx([0.99, 0.99, 0.99, 0.99, 1.0])
+    assert list(_ADR4_CLOSES * factors.price) == pytest.approx([99.0, 108.9, 118.8, 198.0, 210.0])
+
+
+@pytest.mark.unit
+def test_truncated_history_would_use_a_stale_close(log_events: list[EventDict]) -> None:
+    """O buraco exato que deixou o bug de A7 passar, agora fechado.
+
+    Truncar o histórico em 04/01 é o que a v0.4 fazia ao passar só as barras
+    da janela pedida. O dividendo de 08/01 passa a ser posterior à última
+    barra, e antes de ADR-0004 o código usava `C = 120.00` (o fechamento de
+    04/01), produzindo fator (120-2)/120 = 0.983333 — o valor errado.
+
+    Depois de ADR-0004 o evento é descartado com aviso em vez de usar um `C`
+    inventado. Nenhuma das duas respostas é "a série ajustada correta" para
+    essa janela: a resposta correta é não truncar, e é isso que `get_series`
+    passa a garantir. Este teste trava o mecanismo — o `C` velho não volta
+    por refatoração.
+    """
+    truncated_dates = _ADR4_DATES[:3]
+    truncated_closes = _ADR4_CLOSES[:3]
+
+    factors = adjustment_factors(truncated_dates, truncated_closes, [_dividend(8, 2.00)])
+
+    stale_factor = (120.0 - 2.00) / 120.0
+    assert stale_factor == pytest.approx(0.9833333333)
+    assert list(factors.price) != pytest.approx([stale_factor] * 3)
+    assert list(factors.price) == pytest.approx([1.0, 1.0, 1.0])
+
+    assert [e for e in log_events if e["event"] == "storage.event_after_last_bar"]
+
+
+@pytest.mark.unit
+def test_large_gap_between_the_previous_bar_and_the_ex_date_warns() -> None:
+    """Design v0.5 §3.7 — vão acima de 5 dias úteis vira aviso não-bloqueante.
+
+    Com o histórico completo, "barra imediatamente anterior" É o pregão
+    anterior — a menos que falte dado. Um vão grande não é ambiguidade de
+    calendário, é sinal de buraco no histórico, e o número resultante merece
+    desconfiança de quem o ler. O ajuste ainda é aplicado: o aviso não
+    bloqueia.
+    """
+    dates = [date(2024, 1, 2), date(2024, 1, 22), date(2024, 1, 23)]
+    closes = _closes(100.0, 100.0, 100.0)
+
+    # Dividendo em 22/01, barra anterior em 02/01: 13 dias úteis de vão.
+    factors = adjustment_factors(dates, closes, [_dividend(22, 1.00)])
+
+    # O ajuste acontece mesmo assim — (100-1)/100 = 0.99 na barra anterior.
+    assert list(factors.price) == pytest.approx([0.99, 1.0, 1.0])
 
 
 @pytest.mark.unit
@@ -358,12 +480,20 @@ def _brute_force_price_factors(
 
     "O fator da barra em t é o produto dos fatores de todos os eventos com data
     estritamente posterior a t." Literalmente isso, um laço por barra.
+
+    Inclui a borda de ADR-0004: evento com data ex posterior à última barra do
+    histórico não entra em produto nenhum. Sem essa linha, a referência burra
+    encodaria a regra da v0.4 e o cross-check passaria a confirmar o bug em vez
+    de pegá-lo.
     """
+    last_bar = dates[-1] if dates else None
     factors: list[float] = []
-    for index, bar_date in enumerate(dates):
+    for bar_date in dates:
         product = 1.0
         for event in events:
             if event.date <= bar_date:
+                continue
+            if last_bar is not None and event.date > last_bar:
                 continue
             if event.kind is CorporateActionKind.SPLIT:
                 assert event.ratio is not None
@@ -375,7 +505,6 @@ def _brute_force_price_factors(
                     continue
                 product *= (previous - event.value) / previous
         factors.append(product)
-        del index
     return factors
 
 

@@ -12,19 +12,15 @@ Do lado de fora deste arquivo, data é sempre ``datetime.date``.
 from collections.abc import Iterable, Sequence
 from datetime import UTC, date, datetime
 
-import numpy as np
 from bson import ObjectId
-from numpy.typing import NDArray
 from pymongo import UpdateOne
 
 from quantlab.exceptions import DataError
 from quantlab.logging import get_logger
-from quantlab.storage.adjustment import adjustment_factors
 from quantlab.storage.client import MongoDatabase, MongoDocument
-from quantlab.storage.hashing import series_hash
 from quantlab.storage.models import Bar, CorporateAction, CorporateActionKind, QuarantinedBar
 from quantlab.storage.schema import BARS, CORPORATE_ACTIONS, INGESTION_RUNS, QUARANTINED_BARS
-from quantlab.storage.series import PriceSeries
+from quantlab.storage.series import PriceSeries, build_price_series
 
 __all__ = [
     "MongoRepository",
@@ -423,56 +419,29 @@ class MongoRepository:
     ) -> PriceSeries:
         """Materializa a série do ticker, ajustada por proventos por default.
 
-        O ajuste é computado **uma vez por chamada** (design §3.7): o
-        `PriceSeries` devolvido vive enquanto durar o backtest e o engine nunca
-        reconsulta o repositório. Uma travessia de ajuste por backtest, não uma
-        por barra.
+        **ADR-0004 — barras e eventos têm o mesmo escopo: o histórico
+        completo.** Este método lê *todas* as barras do ticker, não as da
+        janela, e delega a materialização a `build_price_series`, que ajusta
+        sobre o histórico inteiro e só então recorta `[start, end]`.
 
-        Os eventos são lidos sobre o **histórico completo** do ticker, nunca
-        sobre `[start, end]` (ING-02.3, ADR-0003). Um split fora da janela
-        ainda afeta os preços dentro dela; filtrar aqui produziria uma série
-        ajustada só no meio — errada de um jeito que passa despercebido.
+        A v0.4 lia os eventos completos mas as barras filtradas pela janela, e
+        essa assimetria era o bug: o `C` de um dividendo posterior ao fim da
+        janela virava silenciosamente o último fechamento dela, fazendo o
+        valor ajustado de uma barra depender da consulta — e com ele o hash de
+        PER-03.1.
+
+        O ajuste continua sendo computado **uma vez por chamada**, e o
+        `PriceSeries` vive enquanto durar o backtest: uma travessia por
+        backtest, não uma por barra. O custo de ler o histórico inteiro para
+        devolver uma janela curta é assumido por ADR-0004 e irrelevante no
+        volume que ADR-0001 dimensiona.
         """
-        bars = self.get_bars(ticker, start, end)
-        self.require_bars(ticker, bars)
-
-        dates = [bar.date for bar in bars]
-        open_ = _column(bars, "open")
-        high = _column(bars, "high")
-        low = _column(bars, "low")
-        close = _column(bars, "close")
-        volume = _column(bars, "volume")
-
-        if adjusted:
-            factors = adjustment_factors(dates, close, self.get_corporate_actions(ticker))
-            open_ = open_ * factors.price
-            high = high * factors.price
-            low = low * factors.price
-            close = close * factors.price
-            volume = volume * factors.volume
-
-        date_array: NDArray[np.object_] = np.empty(len(dates), dtype=object)
-        date_array[:] = dates
-
-        return PriceSeries(
-            ticker=ticker,
-            dates=date_array,
-            open=open_,
-            high=high,
-            low=low,
-            close=close,
-            volume=volume,
+        return build_price_series(
+            ticker,
+            self.get_bars(ticker),
+            self.get_corporate_actions(ticker),
+            start=start,
+            end=end,
             adjusted=adjusted,
-            hash=series_hash(dates, open_, high, low, close, volume),
             last_ingested_at=self.last_ingested_at(ticker, start, end),
         )
-
-
-def _column(bars: Sequence[Bar], field: str) -> NDArray[np.float64]:
-    """Extrai um campo das barras como array novo de float64.
-
-    Array novo, e não view: o `PriceSeries` marca o que recebe como somente
-    leitura, e congelar por acidente um array de quem chamou seria efeito
-    colateral surpreendente.
-    """
-    return np.array([getattr(bar, field) for bar in bars], dtype=np.float64)
