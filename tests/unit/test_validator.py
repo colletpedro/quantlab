@@ -112,6 +112,51 @@ def test_negative_volume_is_quarantined() -> None:
     assert result.quarantined_bars[0].reasons == ("volume_negative",)
 
 
+_NON_FINITE_BARS = {
+    "open": lambda value: _bar(2, open_=value),
+    "high": lambda value: _bar(2, high=value),
+    "low": lambda value: _bar(2, low=value),
+    "close": lambda value: _bar(2, close=value),
+}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["open", "high", "low", "close"])
+def test_nan_price_is_quarantined(field: str) -> None:
+    """v1.1 CA-05.1 — `NaN` não aciona nenhuma comparação de desigualdade.
+
+    Antes desta regra, `close=nan` (ou qualquer outro preço) não violava
+    `high < low`, `fora de [low, high]` nem `preço <= 0` — todas essas
+    comparações devolvem `False` para `nan`, então a barra passava como
+    válida. É o bug real que a ingestão de F4 expôs contra o yfinance.
+    """
+    bar = _NON_FINITE_BARS[field](float("nan"))
+    result = validate_bars([bar], [])
+
+    assert result.valid_bars == []
+    assert result.quarantined_bars[0].reasons == ("non_finite_price",)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["open", "high", "low", "close"])
+def test_infinite_price_is_quarantined(field: str) -> None:
+    bar = _NON_FINITE_BARS[field](float("inf"))
+    result = validate_bars([bar], [])
+
+    assert result.valid_bars == []
+    assert result.quarantined_bars[0].reasons == ("non_finite_price",)
+
+
+@pytest.mark.unit
+def test_nan_price_and_negative_volume_report_both_reasons() -> None:
+    """`non_finite_price` não engole outras razões independentes — só as de
+    intervalo/sinal de preço, que seriam redundantes com ela."""
+    bar = replace(_bar(2), close=float("nan"), volume=-1)
+    result = validate_bars([bar], [])
+
+    assert set(result.quarantined_bars[0].reasons) == {"non_finite_price", "volume_negative"}
+
+
 @pytest.mark.unit
 def test_all_violated_rules_are_reported_not_just_the_first() -> None:
     """O ponto central de design §3.3: nenhuma regra é reportada isoladamente

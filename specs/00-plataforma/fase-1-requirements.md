@@ -1,8 +1,8 @@
 # Fase 1 (MVP) — Requisitos
 
 **Status:** aprovada — gate check 1 concluído
-**Versão:** 1.0
-**Data:** 2026-08-03
+**Versão:** 1.1
+**Data:** 2026-08-04
 **Próximo gate:** `specs/00-plataforma/fase-1-design.md` (não iniciado)
 
 > **Nota de organização:** a Fase 1 é uma fatia vertical que atravessa cinco módulos. Escrever cinco `requirements.md` isolados agora fragmentaria um critério de aceitação que é, na prática, único ("o backtest roda ponta a ponta e não mente"). Este documento é a fonte da verdade da fase. A partir da Fase 2, cada módulo ganha spec própria e as seções RF-ING / RF-PER / RF-ENG / RF-ANA / RF-CLI migram para os `requirements.md` correspondentes.
@@ -84,7 +84,7 @@ Falha de rede ou erro do provedor não pode deixar o banco em estado parcial sil
 **RF-ING-05 — Validação de qualidade**
 O sistema deve detectar e reportar anomalias antes de gravar.
 
-- **CA-05.1** — *Dado* uma barra onde `high < low`, ou `open`/`close` fora do intervalo `[low, high]`, ou preço ≤ 0, ou volume < 0, *quando* a validação executa, *então* a barra é rejeitada e registrada em log de quarentena.
+- **CA-05.1** — *Dado* uma barra onde `high < low`, ou `open`/`close` fora do intervalo `[low, high]`, ou preço ≤ 0, ou preço não finito (`NaN`/infinito), ou volume < 0, *quando* a validação executa, *então* a barra é rejeitada e registrada em log de quarentena.
 - **CA-05.2** — *Dado* um gap de pregões maior que 5 dias úteis dentro da janela, *quando* a validação executa, *então* um aviso é emitido (não bloqueante).
 - **CA-05.3** — *Dado* uma variação de fechamento a fechamento superior a 50% em valor absoluto sem split registrado na data, *quando* a validação executa, *então* um aviso é emitido (não bloqueante), por indicar provável evento corporativo não capturado.
 
@@ -248,5 +248,6 @@ python -m quantlab backtest --strategy sma_cross --ticker AAPL --from 2015-01-01
 
 | Versão | Data | Mudança |
 |---|---|---|
+| 1.1 | 2026-08-04 | CA-05.1 (RF-ING-05) passa a listar preço não finito (`NaN`/infinito) entre as razões de quarentena bloqueante. Bug encontrado rodando F4 com dado real: `high < low`, `open`/`close` fora de `[low, high]` e `preço ≤ 0` são todos comparações de desigualdade, e `NaN` não satisfaz nenhuma — nem sua negação —, então uma barra com `close = nan` (o pregão do dia corrente, ainda em formação no momento da consulta ao yfinance) passava por todas as regras como válida. Só um dado real e recente expõe esse caso; a suíte de RNF-03 usa fixtures de papel, que não incluem `NaN` por não ter motivo óbvio para incluir. |
 | 0.1 | 2026-08-02 | Rascunho inicial com Q1–Q5 em aberto |
 | 1.0 | 2026-08-03 | Q1–Q5 fechadas como D1–D5. Adicionados CA-01.3 (timezone), CA-02.3 (eventos retroativos), CA-04.2 (resposta vazia), CA-05.3 (variação sem split), CA-02.4 (série sem eventos), CA-01.4/01.5 (sinal na última barra, gap de pregões), CA-02.4 (posição aberta no fim), CA-04.4 (invariantes de sinal), CA-05.2 (isolamento da estratégia), CA-06.4 (validação f<s), CA-01.4/01.5 analytics (Sharpe indefinido, amostra pequena), CA-02.2 (alinhamento do benchmark), RNF-07 e RNF-08. |

@@ -1,7 +1,7 @@
 # Fase 1 (MVP) — Design técnico
 
 **Status:** aprovada — gate check 2 concluído
-**Versão:** 0.7
+**Versão:** 0.8
 **Data:** 2026-08-04
 **Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0
 **ADRs vinculantes:** 0001, 0002, 0003, 0004
@@ -102,12 +102,15 @@ Dependências apontam para dentro. `engine/` não conhece MongoDB nem yfinance; 
 
 A v0.1 referenciava quarentena sem desenhá-la. Fica desenhada aqui.
 
-**Regras que disparam quarentena** — as de ING-05.1, avaliadas por `ingestion/validator.py` **antes** de qualquer escrita em `bars`:
+**Regras que disparam quarentena** — as de ING-05.1 (v1.1 do requirements), avaliadas por `ingestion/validator.py` **antes** de qualquer escrita em `bars`:
 
 - `high < low`
 - `open` ou `close` fora de `[low, high]`
 - qualquer preço ≤ 0
+- **qualquer preço não finito — `NaN` ou infinito (v0.8)**
 - `volume < 0`
+
+**O preço não finito (v0.8) — por que precisou de regra própria.** As quatro regras acima são comparações de desigualdade, e `NaN` não satisfaz nenhuma delas nem sua negação (IEEE 754: toda comparação com `NaN` é `False`). Uma barra com `close = nan` não aciona `close ≤ 0` nem `close fora de [low, high]` — ela atravessa a validação inteira como se fosse válida. Encontrado rodando F4 com dado real: o yfinance devolveu `close = nan` para o pregão do dia corrente, ainda em formação no momento da consulta. Fixtures de papel (RNF-03) não incluem `NaN` por não ter motivo óbvio para incluir — só dado real e recente expôs o caso.
 
 **Destino:** a barra rejeitada **não entra** em `bars`. O payload bruto vai para a coleção própria:
 
@@ -408,6 +411,7 @@ O item 5 é consequência direta de ADR-0003 + premissa 3 do requirements (sem f
 
 | Versão | Data | Mudança |
 |---|---|---|
+| 0.8 | 2026-08-04 | §3.3 — preço não finito (`NaN`/infinito) adicionado às regras de quarentena bloqueante de ING-05.1, em par com a mesma correção no requirements (v1.1). Bug real, não hipotético: exposto rodando F4 contra dado do yfinance, onde o pregão do dia corrente (ainda em formação no momento da consulta) veio com `close = nan`, e as comparações de desigualdade existentes deixavam passar — `NaN` não satisfaz nenhuma delas. |
 | 0.7 | 2026-08-04 | F1 (Bloco F) define o índice de `backtest_runs` que a v0.3 tinha adiado: `{ticker: 1, "strategy.name": 1, created_at: -1}` (3.5), mesmo padrão que `ingestion_runs` recebeu em B4. Aproveitado para corrigir `ingestion_run_id` — listado como campo do documento desde a v0.1, mas removido de `PriceSeries` já na v0.3 (3.7) sem que esta lista fosse atualizada; PER-03.1 continua atendido por `series_hash` + `last_ingested_at`. |
 | 0.6 | 2026-08-04 | Fecha três das quatro ambiguidades registradas em HANDOFF §"Correção de A7 + Bloco C" (a quarta, nomes de teste do ADR-0004, já fora corrigida por errata no próprio ADR). Todas as três são precisão de documentação sobre decisões já tomadas e testadas no Bloco C — nenhuma muda comportamento. (1) §4.3 reescrita: a sequência de três passos do laço não é uma cadeia total — só 1-antes-de-2 e 1-antes-de-3 são restrições reais; a ordem entre 2 e 3 é livre (ENG-05.2) e travada por teste dedicado, não presumida; (2) §4.5 — `exit_decision_date` adicionado ao struct de `Trade`, por simetria com `entry_decision_date`, já implementado desde o Bloco C; (3) §4.2 — precisão sobre Q2: `EXIT` sem posição não só é "ignorado e logado", a ordem pendente correspondente é **consumida**, não retida para a barra seguinte — reter reintroduziria lookahead pela fila. Q4 adicionada à tabela de decisões (7) para ficar no mesmo formato de Q1-Q3. |
 | 0.1 | 2026-08-03 | Rascunho inicial |

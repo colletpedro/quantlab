@@ -18,6 +18,7 @@ Três famílias de regra:
   corporativo não capturado. Também não quarentena.
 """
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -115,23 +116,34 @@ def _blocking_reasons(bar: Bar) -> list[str]:
     qual campo especificamente veio errado do provedor.
     """
     reasons: list[str] = []
-    if bar.high < bar.low:
+    prices_finite = all(math.isfinite(price) for price in (bar.open, bar.high, bar.low, bar.close))
+    if not prices_finite:
+        # `nan` não é `>`, `<` nem `<=` nada — toda comparação com `nan`
+        # devolve `False` (IEEE 754), então uma barra com preço `nan` passava
+        # ilesa por todas as regras de intervalo/sinal abaixo antes desta
+        # checagem. Encontrado rodando F4 com dado real: o yfinance devolveu
+        # `close = nan` para o pregão do dia corrente, ainda em formação no
+        # momento da consulta, e a barra foi gravada como válida
+        # silenciosamente. As comparações de preço abaixo são puladas quando
+        # isto dispara — teriam o mesmo problema e não acrescentam nada.
+        reasons.append("non_finite_price")
+    if prices_finite and bar.high < bar.low:
         reasons.append("high_below_low")
-    if bar.open > bar.high:
+    if prices_finite and bar.open > bar.high:
         reasons.append("open_above_high")
-    if bar.open < bar.low:
+    if prices_finite and bar.open < bar.low:
         reasons.append("open_below_low")
-    if bar.close > bar.high:
+    if prices_finite and bar.close > bar.high:
         reasons.append("close_above_high")
-    if bar.close < bar.low:
+    if prices_finite and bar.close < bar.low:
         reasons.append("close_below_low")
-    if bar.open <= 0:
+    if prices_finite and bar.open <= 0:
         reasons.append("open_not_positive")
-    if bar.high <= 0:
+    if prices_finite and bar.high <= 0:
         reasons.append("high_not_positive")
-    if bar.low <= 0:
+    if prices_finite and bar.low <= 0:
         reasons.append("low_not_positive")
-    if bar.close <= 0:
+    if prices_finite and bar.close <= 0:
         reasons.append("close_not_positive")
     if bar.volume < 0:
         reasons.append("volume_negative")
