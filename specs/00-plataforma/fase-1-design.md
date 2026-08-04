@@ -1,7 +1,7 @@
 # Fase 1 (MVP) — Design técnico
 
 **Status:** aprovada — gate check 2 concluído
-**Versão:** 0.5
+**Versão:** 0.6
 **Data:** 2026-08-04
 **Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0
 **ADRs vinculantes:** 0001, 0002, 0003, 0004
@@ -285,6 +285,8 @@ A separação é conceitual: a estratégia emite **intenção**; o engine decide
 
 `ENTER` com posição já aberta é **ignorado e logado** (decisão Q2 da v0.1, confirmada): cruzamento repetido é condição de mercado, não erro de programação. Simetricamente para `EXIT` sem posição.
 
+**`EXIT` sem posição consome a ordem pendente, não a deixa para a barra seguinte (v0.6 — precisão sobre Q2).** "Ignorado e logado" já dizia o que acontece com o sinal; o que a v0.1 não precisava porque não existia laço ainda é o que acontece com a *ordem pendente* que carregava esse sinal. A implementação do Bloco C limpa `state.pending` no mesmo passo em que decide ignorar, em vez de deixá-la para ser tentada de novo em `i+1`. Deixá-la pendente reintroduziria lookahead por um caminho indireto: a ordem seria executada, mais tarde, a um preço que a decisão original não conhecia — o mesmo problema que ADR-0002 existe para prevenir, só que via a fila em vez de via a barra.
+
 ### 4.3 Ordem de operações dentro da barra
 
 **A parte mais fácil de errar da fase.** Para cada índice `i`:
@@ -293,7 +295,7 @@ A separação é conceitual: a estratégia emite **intenção**; o engine decide
 2. **Marcar a mercado** ao `close[i]` e registrar o ponto da equity curve.
 3. **Consultar a estratégia** com `MarketView(i)`, se `i >= warmup`. Um sinal retornado vira ordem pendente para `i+1`.
 
-A sequência não é arbitrária. Executar antes de marcar garante que a equity de `i` reflita a posição real ao fim de `i`. Consultar a estratégia por último garante que nenhuma decisão de `i` seja executada em `i`. A docstring do loop declara a sequência como invariante; uma inversão em refatoração futura quebra ENG-01.2.
+A sequência não é arbitrária, mas não é uma cadeia total de três elos — é duas restrições independentes (v0.6, precisão sobre a redação original). **1 antes de 2**: executar antes de marcar garante que a equity de `i` reflita a posição real ao fim de `i`; inverter atrasaria a equity em um dia em toda barra com execução, e derruba testes de ENG-01.2. **1 antes de 3**: executar antes de consultar garante que nenhuma decisão de `i` seja executada em `i` — é ADR-0002 em código; executar no mesmo índice da decisão também derruba ENG-01.2. **A ordem entre 2 e 3 é livre**: consultar a estratégia não tem efeito colateral sobre a carteira (ENG-05.2 — ela só devolve um sinal, que vira ordem pendente para `i+1`), então marcar antes ou depois de consultar produz o mesmo resultado. A numeração 1-2-3 acima é a ordem em que o laço lê melhor, não uma cadeia de três restrições — um leitor que a tome ao pé da letra concluiria, errado, que inverter 2 e 3 também é violação. A premissa de que a consulta não tem efeito colateral é ela própria travada por teste (`test_the_equity_of_a_bar_does_not_depend_on_the_signal_emitted_on_it`), não presumida. A docstring do loop declara a sequência como invariante; uma inversão que viole 1-antes-de-2 ou 1-antes-de-3 em refatoração futura quebra ENG-01.2.
 
 O "próximo pregão disponível" de ENG-01.5 é simplesmente `i+1` no array — a série contém apenas pregões, gaps de calendário estão implícitos. O gap em dias corridos é computado e gravado no trade para auditoria (4.5).
 
@@ -314,11 +316,13 @@ Invariantes checadas a cada barra, como erro de programação e não condição 
 class Trade:
     ticker: str
     entry_date: date;  entry_price: float;  entry_decision_date: date
-    exit_date: date | None;  exit_price: float | None
+    exit_date: date | None;  exit_price: float | None;  exit_decision_date: date | None
     quantity: int
     entry_cost: float;  exit_cost: float
     entry_gap_days: int;  exit_gap_days: int | None
 ```
+
+**`exit_decision_date` (v0.6 — struct completado por simetria).** A v0.5 e anteriores listavam `exit_gap_days` sem a data de decisão que o origina, embora `entry_gap_days` viesse acompanhada de `entry_decision_date`. A saída precisa da mesma auditabilidade que a entrada — derivar a data de decisão a partir só do gap reconstruiria informação que o backtest já tinha calculado, e a implementação do Bloco C já carrega o campo.
 
 `entry_decision_date` e `entry_gap_days` tornam o gap de ENG-01.5 auditável: guardando a data da decisão junto da data de execução, o gap é derivável e verificável a posteriori, e não some numa métrica agregada. Uma execução com gap de 4 dias corridos após um feriado longo fica visível no relatório.
 
@@ -396,11 +400,13 @@ O item 5 é consequência direta de ADR-0003 + premissa 3 do requirements (sem f
 | Q1 | `PriceSeries`: DataFrame ou arrays? | Arrays numpy crus na `PriceSeries` e no engine; DataFrame apenas nas fronteiras (I/O e analytics). O laço quente não paga overhead de pandas |
 | Q2 | `ENTER` com posição aberta | Ignorar e logar (4.2). Simétrico para `EXIT` sem posição |
 | Q3 | Teste de arquitetura: bloqueante ou aviso? | Bloqueante no CI (3.6) |
+| Q4 | `EXIT` sem posição: ordem pendente consumida ou retida para a próxima barra? | Consumida (4.2, 4.3) — retê-la reintroduziria lookahead pela fila em vez de pela barra |
 
 ## 8. Histórico
 
 | Versão | Data | Mudança |
 |---|---|---|
+| 0.6 | 2026-08-04 | Fecha três das quatro ambiguidades registradas em HANDOFF §"Correção de A7 + Bloco C" (a quarta, nomes de teste do ADR-0004, já fora corrigida por errata no próprio ADR). Todas as três são precisão de documentação sobre decisões já tomadas e testadas no Bloco C — nenhuma muda comportamento. (1) §4.3 reescrita: a sequência de três passos do laço não é uma cadeia total — só 1-antes-de-2 e 1-antes-de-3 são restrições reais; a ordem entre 2 e 3 é livre (ENG-05.2) e travada por teste dedicado, não presumida; (2) §4.5 — `exit_decision_date` adicionado ao struct de `Trade`, por simetria com `entry_decision_date`, já implementado desde o Bloco C; (3) §4.2 — precisão sobre Q2: `EXIT` sem posição não só é "ignorado e logado", a ordem pendente correspondente é **consumida**, não retida para a barra seguinte — reter reintroduziria lookahead pela fila. Q4 adicionada à tabela de decisões (7) para ficar no mesmo formato de Q1-Q3. |
 | 0.1 | 2026-08-03 | Rascunho inicial |
 | 0.2 | 2026-08-03 | Review incorporado: (1) claim "sem escapatória" do `MarketView` corrigida — `.base` do numpy documentado, arrays-mãe marcados read-only na materialização, teste de ENG-01.3 passa a exercitar o caminho de fuga, risco adicionado à tabela; (2) distorção de quantidade inteira sobre preço ajustado adicionada à seção fixa de vieses (item 5), junto com slippage que também faltava; (3) quarentena desenhada — coleção `quarantined_bars`, regras, destino, módulo responsável (3.3); (4) referências de CA prefixadas por família (ENG-/ANA-/ING-/PER-) eliminando colisões de namespace; (5) semântica de upsert de `corporate_actions` declarada + hash divergente após revisão retroativa explicitado como sinal esperado (3.2); menores: `LookaheadError` → `InsufficientHistoryError` para histórico insuficiente, imutabilidade da `PriceSeries` precisada (frozen + writeable=False). Q1–Q3 fechadas |
 | 0.3 | 2026-08-03 | Ambiguidades encontradas na implementação do Bloco A (HANDOFF §"Bloco A — storage", seção 4), resolvidas: (1) regra da fronteira de timezone (3.6) reescrita — proíbe a classe `datetime` e o aparato de fuso fora de `ingestion/normalizer.py`/`storage/repository.py`, não o módulo inteiro, que proibiria o próprio `datetime.date` que o design exige no domínio; (2) `ingestion_run_id` removido dos metadados da `PriceSeries` (3.7) — o documento de `bars` nunca carregou o campo, e uma série materializada pode atravessar N ingestões, então não existe um valor singular correto; PER-03.1 continua atendido por `last_ingested_at` + hash; (3) índices de `ingestion_runs` e `backtest_runs` (3.4, 3.5) explicitamente adiados para quando B4 e F1 definirem o padrão de acesso, em vez de ficarem como lacuna silenciosa; (4) campos do hash enumerados — data ISO-8601 + OHLCV, ticker e `adjusted` de fora (3.8); zero negativo normalizado antes de formatar; (5) as duas bordas de ajuste que se sobrepunham (3.7) resolvidas por especificidade: split sem barra anterior é silencioso, dividendo sem barra anterior é aviso + descarte; (6) dividendo ≥ fechamento bruto anterior definido como `DataError` (3.7) — fator nulo ou negativo seria corrupção silenciosa; (7) `dates` da `PriceSeries` especificado como array de `datetime.date`, nunca `datetime64` (3.7); (8) semântica de escrita de `bars` (3.1) escrita explicitamente — upsert pela chave única com log de revisão, simétrica ao que §3.2 já dizia de `corporate_actions`. A implementação do Bloco A já seguia sete das oito decisões (o gate estava code-first nesses pontos); a exceção foi o campo `ingestion_run_id` da `PriceSeries` (item 2), que existia na classe sem ser usado em lugar nenhum e foi removido no mesmo commit desta revisão, para o código não ficar contradizendo a spec por um campo morto. |
