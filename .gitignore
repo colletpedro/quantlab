@@ -52,11 +52,16 @@ dmypy.json
 !.env.example
 
 # ---- Artefatos gerados pelo projeto ----
-# Gráficos e relatórios de backtest são saída, não fonte.
+# Gráficos e relatórios de backtest são saída, não fonte — exceto os
+# artefatos do resultado final da Fase 1 (F4), commitados de propósito em
+# results/ para que o número reportado no README seja auditável, não só
+# afirmado.
 output/
 reports/
 *.png
 *.pdf
+!/results/
+!/results/**
 
 # ---- Editores e SO ----
 .idea/

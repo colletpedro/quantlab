@@ -5,8 +5,9 @@ existente com a mesma especificação é no-op no Mongo, e a criação de coleç
 é guardada por consulta prévia.
 
 **Nenhum índice não especificado é criado.** `backtest_runs` (design §3.5)
-ainda não declara índice; fica sem, até F1 definir o padrão de leitura de
-resultados. `ingestion_runs` (§3.4) ganhou índice no Bloco B — ver abaixo.
+ganhou índice no Bloco F (F1), no mesmo commit que passou a gravar na
+coleção — mesmo padrão que `ingestion_runs` seguiu no Bloco B (B4). Ver
+abaixo.
 """
 
 from pymongo import ASCENDING, DESCENDING, IndexModel
@@ -81,12 +82,26 @@ _INGESTION_RUNS_INDEXES = (
     IndexModel([("tickers", ASCENDING), ("started_at", DESCENDING)], name="tickers_started_at"),
 )
 
+#: design v0.7 §3.5 — padrão de acesso definido por F1: "quais foram os runs
+#: passados deste ticker com esta estratégia, do mais recente para o mais
+#: antigo" — é a consulta que RF-PER-03 (reprodutibilidade) pede para
+#: localizar o estado de dados que existia quando um backtest específico
+#: rodou. `strategy.name` entra na chave composta porque um ticker pode
+#: acumular runs de estratégias diferentes, e misturá-las na mesma busca não
+#: serve a pergunta "quando eu rodei sma_cross em AAPL pela última vez".
+_BACKTEST_RUNS_INDEXES = (
+    IndexModel(
+        [("ticker", ASCENDING), ("strategy.name", ASCENDING), ("created_at", DESCENDING)],
+        name="ticker_strategy_created_at",
+    ),
+)
+
 _INDEXES: dict[str, tuple[IndexModel, ...]] = {
     BARS: _BARS_INDEXES,
     CORPORATE_ACTIONS: _CORPORATE_ACTIONS_INDEXES,
     QUARANTINED_BARS: _QUARANTINED_BARS_INDEXES,
     INGESTION_RUNS: _INGESTION_RUNS_INDEXES,
-    BACKTEST_RUNS: (),
+    BACKTEST_RUNS: _BACKTEST_RUNS_INDEXES,
 }
 
 

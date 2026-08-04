@@ -1,7 +1,7 @@
 # Fase 1 (MVP) — Design técnico
 
 **Status:** aprovada — gate check 2 concluído
-**Versão:** 0.6
+**Versão:** 0.7
 **Data:** 2026-08-04
 **Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0
 **ADRs vinculantes:** 0001, 0002, 0003, 0004
@@ -134,9 +134,11 @@ Um documento por execução: tickers pedidos, janela, contagem de barras inserid
 
 ### 3.5 Coleção `backtest_runs`
 
-Documento heterogêneo — a razão declarada de ADR-0001 para escolher Mongo. Guarda: parâmetros da estratégia (formato livre), janela, capital inicial, configuração de custos, métricas, lista de trades, curva de equity, hash da série consumida, `ingestion_run_id` de referência, e versão do código.
+Documento heterogêneo — a razão declarada de ADR-0001 para escolher Mongo. Guarda: parâmetros da estratégia (formato livre), janela, capital inicial, configuração de custos, métricas, lista de trades, curva de equity, hash da série consumida, e versão do código.
 
-**Índice (v0.3):** mesma lacuna e mesma razão que §3.4. Fica para F1 (CLI `backtest`), quando o padrão de leitura de resultados existir.
+**`ingestion_run_id` (v0.7 — removido desta lista).** A v0.1-v0.6 listavam "`ingestion_run_id` de referência" aqui, mas a v0.3 já tinha removido esse campo de `PriceSeries` (3.7) — uma série materializada pode atravessar N ingestões, então não existe um valor singular correto para referenciar. Esta lista de `backtest_runs` nunca foi corrigida para refletir isso; PER-03.1 continua atendido por `series_hash` + `last_ingested_at`, os dois campos que `PriceSeries` de fato carrega.
+
+**Índice (v0.7 — definido por F1).** `{ticker: 1, "strategy.name": 1, created_at: -1}`, nome `ticker_strategy_created_at`. Padrão de acesso: "os runs passados deste ticker com esta estratégia, do mais recente ao mais antigo" — a consulta que RF-PER-03 pede para localizar o estado de dados que existia quando um backtest específico rodou. `strategy.name` entra na chave composta porque um ticker acumula runs de estratégias diferentes ao longo do tempo, e misturá-las não serve a essa pergunta. Mesmo padrão de `{tickers: 1, started_at: -1}` que `ingestion_runs` recebeu em B4 (3.4).
 
 ### 3.6 Fronteira de timezone — RNF-07
 
@@ -406,6 +408,7 @@ O item 5 é consequência direta de ADR-0003 + premissa 3 do requirements (sem f
 
 | Versão | Data | Mudança |
 |---|---|---|
+| 0.7 | 2026-08-04 | F1 (Bloco F) define o índice de `backtest_runs` que a v0.3 tinha adiado: `{ticker: 1, "strategy.name": 1, created_at: -1}` (3.5), mesmo padrão que `ingestion_runs` recebeu em B4. Aproveitado para corrigir `ingestion_run_id` — listado como campo do documento desde a v0.1, mas removido de `PriceSeries` já na v0.3 (3.7) sem que esta lista fosse atualizada; PER-03.1 continua atendido por `series_hash` + `last_ingested_at`. |
 | 0.6 | 2026-08-04 | Fecha três das quatro ambiguidades registradas em HANDOFF §"Correção de A7 + Bloco C" (a quarta, nomes de teste do ADR-0004, já fora corrigida por errata no próprio ADR). Todas as três são precisão de documentação sobre decisões já tomadas e testadas no Bloco C — nenhuma muda comportamento. (1) §4.3 reescrita: a sequência de três passos do laço não é uma cadeia total — só 1-antes-de-2 e 1-antes-de-3 são restrições reais; a ordem entre 2 e 3 é livre (ENG-05.2) e travada por teste dedicado, não presumida; (2) §4.5 — `exit_decision_date` adicionado ao struct de `Trade`, por simetria com `entry_decision_date`, já implementado desde o Bloco C; (3) §4.2 — precisão sobre Q2: `EXIT` sem posição não só é "ignorado e logado", a ordem pendente correspondente é **consumida**, não retida para a barra seguinte — reter reintroduziria lookahead pela fila. Q4 adicionada à tabela de decisões (7) para ficar no mesmo formato de Q1-Q3. |
 | 0.1 | 2026-08-03 | Rascunho inicial |
 | 0.2 | 2026-08-03 | Review incorporado: (1) claim "sem escapatória" do `MarketView` corrigida — `.base` do numpy documentado, arrays-mãe marcados read-only na materialização, teste de ENG-01.3 passa a exercitar o caminho de fuga, risco adicionado à tabela; (2) distorção de quantidade inteira sobre preço ajustado adicionada à seção fixa de vieses (item 5), junto com slippage que também faltava; (3) quarentena desenhada — coleção `quarantined_bars`, regras, destino, módulo responsável (3.3); (4) referências de CA prefixadas por família (ENG-/ANA-/ING-/PER-) eliminando colisões de namespace; (5) semântica de upsert de `corporate_actions` declarada + hash divergente após revisão retroativa explicitado como sinal esperado (3.2); menores: `LookaheadError` → `InsufficientHistoryError` para histórico insuficiente, imutabilidade da `PriceSeries` precisada (frozen + writeable=False). Q1–Q3 fechadas |

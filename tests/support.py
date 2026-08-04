@@ -9,14 +9,22 @@ precisar de `__init__.py`.
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 
 import pandas as pd
 
+from quantlab.exceptions import DataError
 from quantlab.ingestion.provider import RawCorporateActions
 from quantlab.storage.models import Bar, CorporateAction, QuarantinedBar
 from quantlab.storage.repository import WriteReport
+from quantlab.storage.series import PriceSeries
 
-__all__ = ["FakeProvider", "FakeRepository", "empty_corporate_actions"]
+__all__ = [
+    "FakeBacktestRepository",
+    "FakeProvider",
+    "FakeRepository",
+    "empty_corporate_actions",
+]
 
 
 def empty_corporate_actions() -> RawCorporateActions:
@@ -123,3 +131,34 @@ class FakeRepository:
                 "warnings": list(warnings),
             }
         )
+
+
+@dataclass
+class FakeBacktestRepository:
+    """`cli.BacktestRepository` de teste: série programada, gravação em memória.
+
+    Mesmo padrão estrutural de `FakeRepository` para `IngestionRepository` —
+    implementa a forma que `cli.BacktestRepository` declara, sem herdar dela
+    nem tocar Mongo.
+    """
+
+    series_by_ticker: dict[str, PriceSeries] = field(default_factory=dict)
+    saved_runs: list[dict[str, Any]] = field(default_factory=list)
+    next_run_id: str = "run-1"
+
+    def get_series(
+        self, ticker: str, start: date | None = None, end: date | None = None
+    ) -> PriceSeries:
+        if ticker not in self.series_by_ticker:
+            # Mesma exceção que `build_price_series` levanta para ticker sem
+            # barra nenhuma — o que `cli.run_backtest_flow` precisa propagar
+            # para CA-02.2.
+            raise DataError(
+                f"Nenhuma barra encontrada para {ticker}. Rode a ingestão para {ticker} "
+                "antes do backtest."
+            )
+        return self.series_by_ticker[ticker]
+
+    def save_backtest_run(self, document: dict[str, Any]) -> str:
+        self.saved_runs.append(document)
+        return self.next_run_id

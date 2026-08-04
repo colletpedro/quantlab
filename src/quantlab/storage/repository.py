@@ -19,7 +19,13 @@ from quantlab.exceptions import DataError
 from quantlab.logging import get_logger
 from quantlab.storage.client import MongoDatabase, MongoDocument
 from quantlab.storage.models import Bar, CorporateAction, CorporateActionKind, QuarantinedBar
-from quantlab.storage.schema import BARS, CORPORATE_ACTIONS, INGESTION_RUNS, QUARANTINED_BARS
+from quantlab.storage.schema import (
+    BACKTEST_RUNS,
+    BARS,
+    CORPORATE_ACTIONS,
+    INGESTION_RUNS,
+    QUARANTINED_BARS,
+)
 from quantlab.storage.series import PriceSeries, build_price_series
 
 __all__ = [
@@ -321,6 +327,22 @@ class MongoRepository:
                 }
             },
         )
+
+    def save_backtest_run(self, document: MongoDocument) -> str:
+        """Grava um run em `backtest_runs` — design §3.5, F1.
+
+        Sem upsert: cada execução de `backtest` é um registro novo, não uma
+        atualização de um anterior — RF-PER-03 quer poder reproduzir *um*
+        backtest passado específico, o que exige manter todos, não só o mais
+        recente. O documento em si é montado por quem chama (CLI); este
+        método só grava e carimba `created_at`, para não fazer `storage/`
+        conhecer o formato de `BacktestReport` nem o CLI tocar `datetime` —
+        a classe fica restrita a este arquivo e a `ingestion/normalizer.py`
+        (design §3.6).
+        """
+        stamped: MongoDocument = {**document, "created_at": datetime.now(tz=UTC)}
+        result = self._db[BACKTEST_RUNS].insert_one(stamped)
+        return str(result.inserted_id)
 
     # ── leitura ──────────────────────────────────────────────────────────
 
