@@ -72,3 +72,27 @@ O ajuste é computado sobre o **histórico completo de barras do ticker**, e só
 ## Revisitar quando
 
 Quando a leitura do histórico completo virar gargalo medido — não suposto. O gatilho concreto: um backtest que viole RNF-04 (10 anos de barras diárias em menos de 5 segundos) com o tempo dominado pela leitura de `bars`, ou a Fase 2 introduzir multi-ativo em execução, onde o custo se multiplica pelo número de papéis do portfólio. Nesse ponto a alternativa (A) volta à mesa com a pureza preservada por injeção de um mapa `data → close`, e o cache em Redis que ADR-0003 já deixou anotado para a Fase 2 passa a ter um problema real para resolver.
+
+## Errata (2026-08-04)
+
+A linha do invariante de independência de janela, na tabela "Invariantes que o código
+precisa respeitar", nomeia um teste unitário que não existe com esse nome:
+`tests/unit/test_adjustment.py::test_factors_do_not_depend_on_the_requested_window`.
+
+O invariante acabou onde ele é de fato observável. No nível de `adjustment_factors()`
+ele não é enunciável — a função é pura e nunca vê uma janela, só recebe as barras que
+lhe são passadas; não há "janela pedida" para comparar contra. Os testes que de fato
+provam o invariante, escritos no Bloco C, são:
+
+- `tests/unit/test_series_builder.py::test_two_windows_agree_value_by_value_on_shared_bars`
+  (papel, no nível do builder `build_price_series`, onde a janela existe)
+- `tests/integration/test_repository_series.py::test_adjusted_values_do_not_depend_on_the_requested_window`
+  (Mongo real) — este nome já estava correto na tabela original
+
+As demais duas linhas da tabela já nomeiam testes que existem e verificam o descrito:
+`test_dividend_after_the_window_uses_the_true_previous_close` e
+`test_event_after_the_last_bar_is_discarded_with_a_warning`, ambos em
+`tests/unit/test_adjustment.py`.
+
+Esta é correção factual de nomenclatura, não mudança de decisão — o corpo do ADR acima
+permanece inalterado.
