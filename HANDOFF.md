@@ -1132,3 +1132,241 @@ Depois, **Bloco E** (analytics) e **Bloco F** (fechamento). Dois avisos:
   ADR-0004 acrescentou uma leitura de histórico completo por `get_series`, e o gatilho
   de revisitação que o próprio ADR declara é exatamente esse: gargalo *medido*, não
   suposto. F3 é onde a medição acontece.
+
+## Blocos D e E — estratégia e analytics
+
+**Data:** 2026-08-04
+**Origem:** retomada de sessão depois de esgotar contexto. Estado inicial verificado
+limpo (`git status`), nove passos locais verdes antes de escrever qualquer código.
+**Escopo:** errata do ADR-0004, D1 (SMA cross), E1-E3 (analytics). `analytics/` deixa
+de estar vazio; Bloco F (CLI `backtest`, gráfico, cobertura/perf, README) continua.
+
+**Nota sobre `docs/STATE.md`:** o prompt de retomada desta sessão mandava lê-lo antes
+de tudo. O arquivo não existia — nunca tinha sido commitado, apesar de HANDOFF.md
+anteriores não terem sinalizado isso. Reportado ao usuário como discrepância antes de
+prosseguir; criado do zero ao fim desta sessão com o estado atual.
+
+### 1. O que foi entregue, por parte
+
+| Parte | Entrega | Commit |
+|---|---|---|
+| Errata | ADR-0004 — corrige nomes de teste na tabela de invariantes, sem tocar o corpo | `1109c7a` |
+| D1 | SMA cross (`strategies/sma_cross.py`), ENG-06.1 a ENG-06.4 | `d50556a` |
+| E1 | Métricas puras (`analytics/metrics.py`), ANA-01.1 a ANA-01.5 | `0310c8e` |
+| E2 | Benchmark buy-and-hold (`analytics/benchmark.py`), ANA-02.1/02.2 | `827c478` |
+| E3 | `BacktestReport` (`analytics/report.py`), ANA-03.1 | `3c7adef` |
+
+### 2. Errata do ADR-0004
+
+A tabela "Invariantes que o código precisa respeitar" citava
+`tests/unit/test_adjustment.py::test_factors_do_not_depend_on_the_requested_window`, que
+não existe com esse nome. O invariante de independência de janela não é enunciável no
+nível de `adjustment_factors()` — a função é pura e nunca vê uma janela, só recebe as
+barras que lhe são passadas. Os testes reais que provam o invariante são
+`test_two_windows_agree_value_by_value_on_shared_bars` (`test_series_builder.py`, no
+nível do builder, onde a janela existe de fato) e
+`test_adjusted_values_do_not_depend_on_the_requested_window` (integração, já correto na
+tabela original). Correção via seção "Errata" datada ao **fim** do ADR — corpo intocado,
+sem ADR-0005, porque é correção factual de nomenclatura, não mudança de decisão.
+
+### 3. D1 — SMA cross
+
+`warmup = slow` sai de graça do contrato de C2: o engine não chama `on_bar` antes disso
+(ENG-06.3). Validação `fast < slow` levanta `EngineError` na instanciação (ENG-06.4).
+Cruzamento para cima → `ENTER`, para baixo → `EXIT`, calculados comparando a SMA da barra
+corrente contra a da barra anterior — na primeira chamada possível (`i = warmup`), o
+`view.close` já tem `slow + 1` observações, suficiente para as duas janelas sem tocar
+`last()` (que não expressa deslocamento).
+
+Fixture de papel única (`fast=2, slow=3`, sete barras) com os dois cruzamentos calculados
+à mão, incluindo o caso de borda em que o cruzamento de entrada acontece exatamente na
+primeira barra elegível — não por acaso, para testar exatamente a fronteira do warmup.
+Teste ponta a ponta via `run_backtest` confirma ENG-05.1: **o engine não precisou de
+nenhuma alteração** para rodar D1. Se tivesse precisado, seria sinal de que o protocolo
+de C2 estava incompleto — a instrução da sessão foi parar e olhar nesse caso, e não foi
+necessário.
+
+### 4. E1 — Métricas
+
+Funções puras sobre `pd.Series` (`analytics/metrics.py`), decisão de usar pandas como
+tipo de fronteira em `analytics/` conforme Q1 do design ("DataFrame apenas nas
+fronteiras — I/O e analytics").
+
+- `sharpe(returns, rf=0.0, periods=252)` — `None`, nunca `nan`, com desvio-padrão zero
+  ou menos de duas observações. `nan` se propaga em silêncio por agregação a jusante;
+  `None` estoura no primeiro uso aritmético.
+- `max_drawdown(equity)` — pico é o **corrente** (`cummax`), não o primeiro valor da
+  série nem o último valor local antes da queda. `DrawdownResult` com magnitude, data de
+  pico, de fundo e de recuperação (`None` se não recuperado).
+- `cagr(equity)` — usa dias corridos entre a primeira e a última data do índice, não
+  contagem de barras (pregões têm gaps de fim de semana e feriado). `0.0` sem tempo
+  decorrido.
+- `hit_rate(trades)` — só trades **fechados**; `None` sem nenhum fechado, não `0.0`.
+
+Fixtures de papel com resultado calculado à mão. Duas das fixturas originais que escrevi
+tinham erro de aritmética minha, não bug do código — pego pelo próprio teste, corrigido
+antes de prosseguir (ver §7.2 abaixo, honestidade de erro próprio como o Bloco C já
+tinha registrado no seu §5.8).
+
+Amostra insuficiente (ANA-01.5) **não** vive em `metrics.py`: essas funções emitiriam um
+aviso (log ou similar), o que quebraria a pureza que RNF-03 exige para testar com séries
+de papel. Fica em E3, que é quem tem para quem avisar.
+
+### 5. E2 — Benchmark
+
+`buy_and_hold(series, warmup, initial_cash, costs)` reaproveita `BacktestResult` e
+`EquityPoint` do engine em vez de um tipo paralelo: é um backtest de uma estratégia só
+(compra e segura), e E1, E3 e `reconciles()` do próprio engine já sabem ler essa forma —
+decisão própria, registrada aqui porque design não especifica o tipo de retorno.
+
+Compra ao `open[warmup + 1]`, mesmos custos de entrada, `decision_date` = barra de
+`warmup` (simetria com ADR-0002: "decidido" em `warmup`, "executado" em `warmup + 1`).
+
+Teste que mais importa: `test_shares_the_exact_equity_window_with_a_strategy_of_the_same_warmup`
+prova que a janela de equity do benchmark é, barra a barra, o sufixo
+`equity_curve[warmup + 1:]` de uma estratégia com o mesmo `warmup` rodando sobre a mesma
+série — não uma janela parecida, a mesma. É a garantia que ANA-02.2 pede.
+
+### 6. E3 — Relatório
+
+`BacktestReport.build(strategy=..., benchmark=..., rf=0.0)` — construído via classmethod,
+não `__init__` posicional direto, porque montar os dois `MetricsSummary` errados seria
+fácil de fazer sem essa fronteira.
+
+`BIAS_DISCLOSURE` é `tuple[str, ...]` module-level com os seis itens de design §5.2 —
+constante literal, nenhum caminho de `build()` a omite. Teste dedicado confirma
+`len(BIAS_DISCLOSURE) == 6` e que os seis aparecem em `to_text()` e `to_dict()["biases"]`
+em todo relatório construído, inclusive um com avisos condicionais ativos (para provar
+que os avisos não deslocam nem truncam a seção fixa).
+
+O relatório também é onde convergem obrigações de outras RFs que só fazem sentido uma
+vez que existe relatório: aviso de custo zerado (`CostModel.is_zero`, ENG-03.2),
+tratamento de dividendo declarado como "ajuste de preço, sem crédito em caixa"
+(ENG-04.3), proveniência de hash + timestamp de ingestão (PER-03.1). Nenhuma dessas é
+scope creep — design §5.2 já lista "premissas declaradas (rf, custos, dividendo)" como
+conteúdo do relatório; só ainda não existia relatório nenhum para carregá-las.
+
+`to_dict()`/`to_json()`/`to_text()` renderizam o mesmo conteúdo em dois formatos, como o
+design pede. `to_json()` é `json.dumps(to_dict())`; nenhum teste de round-trip falhou.
+
+### 7. Verificação por mutação — E1 e E2, obrigatória
+
+| Módulo | Mutação | Testes que caem |
+|---|---|---|
+| E1 `sharpe` | anualizar por √12 em vez de √252 | 3 |
+| E1 `max_drawdown` | medir do início da série em vez do pico corrente (`cummax`) | 3 |
+| E1 `max_drawdown` | `>=` → `>` no limiar de recuperação (mutação própria, não pedida) | 1 |
+| E2 `buy_and_hold` | comprar na barra 0 em vez de `warmup + 1` | 5 de 7 |
+
+Todas as quatro restauradas byte a byte, confirmado com `diff` depois de cada uma —
+nenhuma mutação ficou sem teste que a derrubasse. Diferente do Bloco C (M1, ordem 2-3 do
+laço), que achou uma liberdade genuína de desenho, aqui as quatro mutações pedidas e a
+acrescentada por conta própria (o limiar de recuperação de drawdown) tinham teste.
+
+#### 7.1 A mutação acrescentada e por quê
+
+A instrução mandava, no mínimo, quatro mutações. Ao escrever `max_drawdown`, notei que a
+condição de recuperação (`equity >= pico anterior`) tinha uma fronteira testável que
+nenhuma das quatro mutações pedidas cobria: `>=` contra `>`. Escrevi
+`test_max_drawdown_recovery_is_exactly_on_the_bar_that_reaches_the_peak` de propósito
+para isolar essa fronteira (recuperação por igualdade exata, não por ultrapassagem) e
+confirmei que ela — e só ela — cai com a mutação. Um teste com dente, não um teste que
+passaria de qualquer forma.
+
+#### 7.2 Dois erros meus, corrigidos, registrados por serem instrutivos
+
+Duas das fixtures de E1 que escrevi primeiro falharam contra a própria implementação —
+não porque o código estava errado, mas porque minha aritmética manual estava.
+
+(a) `test_sharpe_with_nonzero_risk_free_rate_shifts_the_mean`: previ que subtrair `rf`
+constante de ambos os retornos preservaria a razão média/desvio-padrão (porque o
+desvio-padrão realmente não muda ao subtrair uma constante — isso eu acertei). O erro foi
+não recalcular a **média** deslocada: ela caiu de 0.02 para 0.01, o desvio ficou igual
+(0.02/√2), e o Sharpe caiu pela metade (√126 em vez de √504). Conferi a álgebra de novo
+antes de mudar qualquer coisa e corrigi o valor esperado no teste, não a implementação.
+
+(b) `test_max_drawdown_picks_the_deepest_of_two_drops`: assumi que o pico "resetaria"
+para o último valor local (100) depois de uma recuperação parcial, dando uma segunda
+queda de -40% até 60. Mas o pico usado é o **corrente** (`cummax`), que não desce nunca —
+continuava 120 (o máximo já visto), então a queda até 60 é -50%, não -40%. É exatamente o
+comportamento que ANA-01.3 pede ("maior queda... pico-a-vale", pico corrente, não pico
+local) e que a mutação de `max_drawdown` — medir do início — existe para vigiar pelo lado
+oposto. Corrigi o teste, documentei a diferença na docstring da fixture, porque é
+precisamente a distinção que a fixture deveria estar testando.
+
+### 8. Verificação e CI
+
+**Local — nove passos, todos verdes**, executados antes de qualquer código (Parte 0) e
+de novo ao final: `make up`, `install`, `lint`, `typecheck`, `test`, `test-integration`,
+`check`, `audit`, `pre-commit run --all-files`.
+
+- 367 testes coletados: **310 unitários** (era 266 no fim do Bloco C — 44 novos entre
+  D1 e E1-E3) + 57 de integração, inalterados.
+- Cobertura total (unitários, offline): **97.22%**. `analytics/`: `metrics.py` 100%,
+  `benchmark.py` 100%, `report.py` 99% (uma ramificação de `to_text()` não coberta,
+  1 linha). É a primeira vez que o piso de 80% de RNF-02 deixa de ser trivialmente
+  satisfeito em `analytics/`, e ficou com folga confortável.
+- `engine/` sem mudança de código nesta sessão, cobertura idêntica ao Bloco C (95-100%
+  por arquivo).
+
+**CI — [run 30876286773](https://github.com/colletpedro/quantlab/actions/runs/30876286773)**,
+os três jobs verdes (lint+tipos+testes, integração, auditoria de dependências).
+
+### 9. Decisões que tomei por conta própria — revise
+
+**9.1 `buy_and_hold` devolve `BacktestResult`, não um tipo próprio de benchmark.** Design
+não especifica o tipo. Reaproveitar evita duplicar `reconciles()`, `realized_pnl` etc., e
+deixa E1/E3 tratarem estratégia e benchmark de forma uniforme. Custo: `BacktestResult` tem
+campos que não fazem sentido para um benchmark (`pending_order` sempre `None`).
+
+**9.2 `decision_date` do benchmark é a barra de `warmup`, não `warmup + 1`.** Simetria
+com ADR-0002 — "decidido" uma barra antes de "executado" — mas o design não fala nisso
+para o benchmark. Efeito prático: `entry_gap_days` do trade do benchmark sai preenchido
+de forma consistente com o resto do sistema, em vez de zero.
+
+**9.3 Amostra insuficiente e aviso de custo zero moram no relatório (E3), não nas
+métricas (E1).** Design §5 diz que as funções de métrica são puras, sem I/O; um aviso é
+uma forma de I/O (ou pelo menos de efeito observável), então a checagem se move para
+onde há alguém a quem avisar. Não está errado dividir assim, mas é uma leitura de "onde
+mora a responsabilidade" que o design não decide explicitamente.
+
+**9.4 `BacktestReport` usa `classmethod build()` em vez de `__init__` direto.** Os campos
+de `MetricsSummary` são derivados, não dados brutos — um `__init__` posicional convidaria
+a montar um relatório com metade dos campos calculados errado ou inconsistente entre si.
+
+**9.5 `×` (sinal de multiplicação Unicode) trocado por `x` ASCII nas docstrings de
+`metrics.py`.** `ruff` (regra `RUF002`) rejeita caractere ambíguo em docstring. O próprio
+CLAUDE.md usa `×` na descrição da fórmula do Sharpe, mas isso é markdown, não código
+lintado.
+
+### 10. Ambiguidades de spec — reavaliadas, nenhuma bloqueou D/E
+
+As quatro ambiguidades do Bloco C §6 foram lidas e avaliadas antes de começar D1: nenhuma
+bloqueava código a escrever, porque todas eram sobre documentação não refletir decisões
+*já tomadas*, não sobre decisões pendentes que afetassem D ou E.
+
+1. **Design §4.3, ordem em três níveis vs. duas restrições reais.** Sem mudança nesta
+   sessão — recomendação inalterada: reescrever §4.3 para não sugerir uma restrição entre
+   os passos 2 e 3 que não existe.
+2. **ADR-0004, nomes de teste errados na tabela.** **Resolvida nesta sessão** — errata
+   datada, commit `1109c7a`.
+3. **Design §4.5, `exit_decision_date` ausente do struct de `Trade` documentado.** Sem
+   mudança — já implementado, só falta o design refletir.
+4. **Design §4.4, destino de `EXIT` sem posição no nível do laço.** Sem mudança — já
+   implementado como consumida, só falta o design declarar essa escolha.
+
+Nenhuma delas afeta `strategies/` ou `analytics/`: são todas sobre `engine/`, já
+implementado e testado no Bloco C. Recomendação geral: as quatro entram juntas numa v0.6
+do design quando o Bloco F terminar, em vez de uma revisão por ambiguidade.
+
+### 11. Próximo passo
+
+**Bloco F — fechamento.** F1 (CLI `backtest` + persistência em `backtest_runs`) é onde
+`run_backtest`, `buy_and_hold` e `BacktestReport.build()` se conectam pela primeira vez
+num caminho de ponta a ponta de verdade — vale rodar contra dado real (AAPL, via
+`make up` + ingestão) antes de declarar F1 pronto, não só fixture de papel. F2 (gráfico)
+consome a mesma tripla. F3 é a primeira medição real de RNF-04 com o custo de leitura de
+histórico completo que ADR-0004 introduziu — o gatilho de revisitação que o próprio ADR
+já previu. F4 fecha a Fase 1 com um resultado honesto, incluindo se a SMA cross perder
+para o buy-and-hold — CLAUDE.md §"Honestidade de resultado" é explícito que perder é um
+resultado válido a reportar, não algo a maquiar.
