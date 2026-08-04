@@ -1,0 +1,50 @@
+{
+  "ticker": "JNJ",
+  "strategy": {
+    "cumulative_return": 0.4152483194440941,
+    "cagr": 0.030457739777086656,
+    "sharpe": 0.2955469033112661,
+    "max_drawdown": {
+      "magnitude": 0.3115416250573964,
+      "peak_date": "2018-12-13",
+      "trough_date": "2025-06-20",
+      "recovery_date": "2026-01-14"
+    },
+    "num_trades": 36,
+    "hit_rate": 0.42857142857142855
+  },
+  "benchmark": {
+    "cumulative_return": 2.4992250248614347,
+    "cagr": 0.11493631770367041,
+    "sharpe": 0.6866891943974991,
+    "max_drawdown": {
+      "magnitude": 0.27365517330308,
+      "peak_date": "2020-02-05",
+      "trough_date": "2020-03-23",
+      "recovery_date": "2020-04-23"
+    },
+    "num_trades": 1,
+    "hit_rate": null
+  },
+  "assumptions": {
+    "risk_free_rate": 0.0,
+    "costs": {
+      "fixed": 1.0,
+      "rate": 0.0001
+    },
+    "dividend_treatment": "ajuste de preço na série (ADR-0003) — sem crédito em caixa"
+  },
+  "warnings": [],
+  "biases": [
+    "Survivorship bias — universo fixo de sobreviventes; retornos inflados por construção.",
+    "Sem slippage — execução integral ao open, sem desvio entre preço observado e preço pago.",
+    "Custos simplificados — modelo fixo + bps; sem spread, sem borrow, sem imposto.",
+    "Sem impacto de mercado — ordens não movem preço, qualquer tamanho executa.",
+    "Granularidade de posição fictícia — quantidades inteiras calculadas sobre preços ajustados, que não são os preços históricos reais (AAPL pré-split-4:1 aparece a ~1/4 do preço da época). A restrição de ação inteira, portanto, não corresponde à restrição que existia historicamente.",
+    "Sem correção para múltiplas hipóteses — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas."
+  ],
+  "provenance": {
+    "series_hash": "5c834d0beb65291fa49dd5c774be0e2246438ca538b20b9ce86d3557b8cb04fb",
+    "last_ingested_at": "2026-08-04T05:31:31.676000+00:00"
+  }
+}

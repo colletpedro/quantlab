@@ -5,26 +5,20 @@ Plataforma de backtesting de estratégias sistemáticas sobre ações americanas
 O objetivo do projeto **não** é encontrar uma estratégia lucrativa. É construir um
 instrumento de medição confiável — um backtester correto por construção quanto a
 lookahead bias. Uma estratégia que perde dinheiro num engine correto é um resultado
-válido e será reportada como tal.
+válido e é reportada como tal. É exatamente o que a seção [Resultados](#resultados)
+abaixo faz.
 
 ---
 
-## Estado atual — Fase 0 (fundação)
+## Estado atual — Fase 1 concluída (MVP)
 
-Este repositório contém **apenas o esqueleto**: pacote, configuração, ambiente, CI e
-templates de processo. Os subpacotes de domínio (`ingestion/`, `storage/`, `engine/`,
-`strategies/`, `analytics/`) estão **vazios de propósito**.
-
-O projeto é spec-driven: nenhuma linha de implementação é escrita antes da spec
-correspondente passar pelo gate de design. Os requisitos da Fase 1 estão aprovados
-([`specs/00-plataforma/fase-1-requirements.md`](specs/00-plataforma/fase-1-requirements.md)),
-mas o design ainda não. Enquanto isso não acontecer, os módulos permanecem vazios.
+Ingestão real → MongoDB → backtest SMA cross → métricas → benchmark → relatório →
+gráfico, ponta a ponta, com um resultado honesto rodado contra dado de mercado real.
 
 | Fase | Escopo | Estado |
 |---|---|---|
-| 0 | Fundação: repo, docker-compose, CI mínimo | **este commit** |
-| 1 | MVP: ingestão → Mongo → backtest SMA → métricas → gráfico | requisitos aprovados, design não iniciado |
-| 2+ | Custos, portfólio, walk-forward, analytics de risco, API, infra, RAG | — |
+| 1 | MVP: ingestão → Mongo → backtest SMA → métricas → gráfico | ✅ concluída |
+| 2+ | Custos realistas, portfólio multi-ativo, walk-forward, analytics de risco, API, infra, RAG | — |
 
 O roadmap completo está em [`specs/README.md`](specs/README.md).
 
@@ -43,31 +37,95 @@ O roadmap completo está em [`specs/README.md`](specs/README.md).
 | Gráficos | `matplotlib` | — |
 | Qualidade | `ruff`, `mypy --strict`, `pytest`, `pre-commit` | RNF-05 |
 
+## Arquitetura
+
+```
+                 ┌──────────────┐
+ yfinance ──────▶│  ingestion/  │──────┐
+                 └──────────────┘      │
+                                        ▼
+                              ┌───────────────────────┐
+                              │        storage/        │
+                              │  bars (bruto)           │◀── MongoDB
+                              │  corporate_actions       │
+                              │  quarantined_bars         │
+                              │  ingestion_runs             │
+                              │  backtest_runs                │
+                              └──────────┬─────────────────────┘
+                                         │ PriceSeries (ajustada)
+                                         ▼
+   strategies/ ──Signal──▶  ┌──────────────────┐
+        ▲                   │      engine/       │
+        │  MarketView       │  loop de barras     │
+        └───────────────────│  Broker/Portfolio    │
+                             └────────┬─────────────┘
+                                      │ BacktestResult
+                                      ▼
+                             ┌──────────────────┐
+                             │    analytics/      │──▶ Relatório (texto/JSON) + PNG
+                             └──────────────────┘
+```
+
+Dependências apontam para dentro: `engine/` não conhece MongoDB nem yfinance, recebe
+uma `PriceSeries` já materializada. `strategies/` não conhece o engine, só o contrato
+(`Strategy` Protocol). É o que permite testar engine e analytics inteiramente com
+séries de papel construídas à mão (RNF-03) — sem banco, sem rede.
+
+## Invariantes
+
+Três decisões arquiteturais fecham o comportamento do sistema e são impostas por
+construção, não por convenção — cada uma tem teste de aceitação dedicado:
+
+- **[ADR-0002](specs/adr/0002-execucao-no-open-seguinte.md) — execução no `open` do
+  pregão seguinte.** Um sinal calculado com informação até o fechamento de D só pode
+  ser executado a partir da abertura do próximo pregão. A `MarketView` que a estratégia
+  recebe só sabe devolver barras de índice `≤ i` — não há caminho normal para ler o
+  futuro. Provado por `test_mutating_future_bars_does_not_change_trades`: mutar
+  arbitrariamente as barras posteriores à última decisão e reexecutar produz
+  exatamente o mesmo conjunto de trades.
+- **[ADR-0003](specs/adr/0003-ajuste-em-tempo-de-leitura.md) — preço bruto persistido,
+  ajuste em tempo de leitura.** O ajuste por proventos não é propriedade do passado —
+  é função do presente: cada novo dividendo reescreve a série ajustada inteira,
+  retroativamente. Persiste-se OHLCV bruto; nunca se grava o ajustado por cima.
+- **[ADR-0004](specs/adr/0004-ajuste-sobre-historico-completo.md) — ajuste
+  materializado sobre o histórico completo, depois fatiado.** Duas leituras de janelas
+  distintas sobre o mesmo estado do banco concordam valor a valor nas barras que
+  compartilham — independência de janela, garantida por construção porque o cálculo do
+  fator de ajuste nunca vê a janela pedida.
+- **[ADR-0001](specs/adr/0001-mongodb-vs-relacional.md) — MongoDB como banco
+  primário**, índice composto `(ticker, date)`. A camada de repositório isola o resto
+  do sistema do driver — `engine/` não importa `pymongo`.
+
 ## Como rodar
 
 Pré-requisitos: [uv](https://docs.astral.sh/uv/), Docker e `make`.
 
 ```bash
 cp .env.example .env
-```
-
-```bash
 make install
-```
-
-```bash
 make up
 ```
 
+`make up` sobe o MongoDB e só retorna quando o healthcheck passa.
+
+**Ingerir dados** (RF-CLI-01) — sem `--tickers`, usa o universo default de
+`config/universe.yml`:
+
 ```bash
-python -m quantlab version
+python -m quantlab ingest --from 2015-01-01 --to 2024-12-31
 ```
 
-`make up` sobe o MongoDB e só retorna quando o healthcheck passa. `make down` derruba
-os containers preservando o volume de dados.
+**Rodar um backtest** (RF-CLI-02) — janela default 2015-01-01 até a última barra
+disponível:
 
-Os comandos de ingestão e backtest (`RF-CLI-01`, `RF-CLI-02`) **ainda não existem** —
-são escopo da Fase 1.
+```bash
+python -m quantlab backtest --strategy sma_cross --ticker AAPL --fast 20 --slow 50
+```
+
+Imprime o relatório no terminal e salva `results/AAPL_sma_cross_20_50.png` (gráfico) e
+`.json` (relatório), além de persistir o run em `backtest_runs`. Ticker sem dado
+ingerido falha com mensagem acionável e código de saída ≠ 0, em vez de um erro genérico
+do driver.
 
 ### Alvos do Makefile
 
@@ -88,78 +146,155 @@ são escopo da Fase 1.
 ```
 quantlab/
 ├── config/
-│   └── universe.yml           # 20 tickers por setor GICS, lista fixa e versionada
-├── specs/                     # fonte da verdade do projeto — leia antes de codar
-│   ├── README.md              # fluxo, gates, índice de ADRs, roadmap
-│   ├── CHANGELOG.md           # histórico de versões das specs
-│   ├── 00-plataforma/         # requisitos da Fase 1
-│   ├── adr/                   # decisões arquiteturais, numeradas e imutáveis
-│   └── _templates/            # esqueletos de requirements, design, tasks e ADR
+│   └── universe.yml          # 20 tickers por setor GICS, lista fixa e versionada
+├── specs/                    # fonte da verdade do projeto — leia antes de codar
+│   ├── README.md             # fluxo, gates, índice de ADRs, roadmap
+│   ├── 00-plataforma/        # requisitos e design da Fase 1
+│   ├── adr/                  # decisões arquiteturais, numeradas e imutáveis
+│   └── _templates/           # esqueletos de requirements, design, tasks e ADR
 ├── src/quantlab/
-│   ├── cli.py                 # app Typer
-│   ├── config.py              # Settings via env (prefixo QUANTLAB_)
-│   ├── logging.py             # structlog: JSON fora de dev, legível em dev
-│   ├── exceptions.py          # QuantlabError e subclasses
-│   ├── ingestion/             # vazio — aguarda gate de design
-│   ├── storage/               # vazio — aguarda gate de design
-│   ├── engine/                # vazio — aguarda gate de design
-│   ├── strategies/            # vazio — aguarda gate de design
-│   └── analytics/             # vazio — aguarda gate de design
+│   ├── cli.py                # app Typer: `ingest`, `backtest`, `version`
+│   ├── config.py             # Settings via env (prefixo QUANTLAB_)
+│   ├── logging.py            # structlog: JSON fora de dev, legível em dev
+│   ├── exceptions.py         # QuantlabError e subclasses
+│   ├── ingestion/            # provedor (yfinance), normalização, validação, orquestração
+│   ├── storage/               # repositório Mongo, ajuste em tempo de leitura, hashing
+│   ├── engine/                 # MarketView, Strategy, Portfolio, Broker, laço de barras
+│   ├── strategies/              # SMA cross
+│   └── analytics/                # métricas, benchmark, relatório, gráfico
 ├── tests/
-│   ├── conftest.py            # fixtures de infraestrutura
-│   ├── unit/                  # rodam sempre, offline
-│   ├── integration/           # exigem `make up`
-│   └── fixtures/              # séries sintéticas (RNF-03) — vazio na Fase 0
-├── docker-compose.yml         # MongoDB 7 (Redis é Fase 2)
-├── Dockerfile                 # multi-stage, runtime não-root
-└── CLAUDE.md                  # regras de trabalho no repositório
+│   ├── conftest.py           # fixtures de infraestrutura
+│   ├── support.py             # fakes (FakeProvider, FakeRepository, ...)
+│   ├── unit/                   # rodam sempre, offline — fixtures de papel para engine/analytics
+│   └── integration/             # exigem `make up`
+├── results/                  # artefatos do backtest de F4 — comprometidos de propósito
+├── docker-compose.yml        # MongoDB 7
+└── CLAUDE.md                 # regras de trabalho no repositório
 ```
 
-## Specs e decisões
+## Resultados
 
-A pasta [`specs/`](specs/) é a fonte da verdade. Três decisões arquiteturais já estão
-fechadas e o código precisa respeitá-las:
+**SMA cross, parâmetros fixos `fast=20, slow=50`, em todos os 20 tickers do universo
+default, janela 2015-01-01 até a última barra disponível (2026-07-31 — o pregão de
+2026-08-03 foi quarentenado em todos os tickers por preço não finito retornado pelo
+provedor; ver [Limitações](#limitações-conhecidas)).**
 
-- **[ADR-0001](specs/adr/0001-mongodb-vs-relacional.md)** — MongoDB como banco primário.
-  Reconhecidamente não-ótimo para séries temporais; a justificativa e os trade-offs
-  contra TimescaleDB e Parquet estão escritos.
-- **[ADR-0002](specs/adr/0002-execucao-no-open-seguinte.md)** — sinal calculado no
-  fechamento de D executa no `open` do próximo pregão. Invariante, não convenção.
-- **[ADR-0003](specs/adr/0003-ajuste-em-tempo-de-leitura.md)** — persiste-se o preço
-  bruto; o ajuste por proventos é aplicado na leitura. O ajustado envelhece, o bruto não.
+Nenhuma varredura de parâmetros, nenhuma seleção de tickers favoráveis, nenhum recorte
+de janela. `fast`/`slow` foram escolhidos uma vez, antes de rodar, e usados em todos os
+20 tickers sem ajuste. Otimizar parâmetros contra a mesma amostra e reportar o melhor é
+precisamente o viés 6 da seção de vieses abaixo — o objetivo aqui é medir, não vencer.
+Custos: USD 1 fixo + 1 bps por trade (default). Capital inicial: USD 100.000.
+
+| Ticker | CAGR estratégia | CAGR buy & hold | Sharpe estratégia | Sharpe buy & hold | Max DD estratégia | Max DD buy & hold | Trades | Taxa de acerto | Vencedor (CAGR) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| AAPL | 27.08% | 39.29% | 0.433 | 0.539 | 28.01% | 38.52% | 33 | 46.9% | buy & hold |
+| AMT | 1.57% | 8.05% | 0.177 | 0.430 | 48.09% | 45.34% | 31 | 38.7% | buy & hold |
+| AMZN | 11.66% | 64.63% | 0.571 | 0.346 | 56.65% | 44.20% | 28 | 50.0% | buy & hold |
+| BRK-B | 3.21% | 11.65% | 0.316 | 0.673 | 27.12% | 29.55% | 32 | 48.4% | buy & hold |
+| CAT | 13.35% | 25.52% | 0.669 | 0.893 | 56.16% | 43.36% | 29 | 44.8% | buy & hold |
+| CVX | 0.10% | 10.09% | 0.096 | 0.478 | 49.45% | 55.76% | 34 | 36.4% | buy & hold |
+| GOOGL | 14.80% | 62.73% | 0.748 | 0.345 | 45.25% | 31.66% | 28 | 64.3% | buy & hold |
+| HD | 4.57% | 12.28% | 0.351 | 0.599 | 27.55% | 37.98% | 30 | 55.2% | buy & hold |
+| JNJ | 3.05% | 11.49% | 0.296 | 0.687 | 31.15% | 27.37% | 36 | 42.9% | buy & hold |
+| JPM | 12.33% | 19.70% | 0.744 | 0.802 | 24.15% | 43.62% | 27 | 61.5% | buy & hold |
+| KO | 2.47% | 10.36% | 0.246 | 0.640 | 23.78% | 36.98% | 35 | 47.1% | buy & hold |
+| LIN | 6.37% | 14.55% | 0.466 | 0.718 | 34.43% | 32.58% | 29 | 53.6% | buy & hold |
+| META | 19.25% | 18.57% | 0.803 | 0.641 | 35.87% | 76.73% | 27 | 53.8% | **estratégia** |
+| MSFT | 9.78% | 25.13% | 0.563 | 0.953 | 39.81% | 37.15% | 30 | 50.0% | buy & hold |
+| NEE | 18.95% | 28.59% | 0.366 | 0.459 | 32.96% | 44.97% | 30 | 51.7% | buy & hold |
+| NVDA | 96.70% | 132.40% | 0.519 | 0.591 | 64.79% | 66.34% | 30 | 60.0% | buy & hold |
+| PG | 2.37% | 7.93% | 0.250 | 0.502 | 30.76% | 23.77% | 34 | 51.5% | buy & hold |
+| UNH | 2.02% | 13.36% | 0.203 | 0.577 | 62.36% | 61.39% | 31 | 46.7% | buy & hold |
+| UNP | 1.40% | 10.75% | 0.167 | 0.530 | 30.27% | 40.50% | 32 | 51.6% | buy & hold |
+| XOM | 2.76% | 9.85% | 0.238 | 0.479 | 38.82% | 61.32% | 33 | 34.4% | buy & hold |
+
+**A estratégia perdeu para o buy-and-hold em CAGR em 19 dos 20 tickers.** Rf=0, sem
+correção para múltiplas hipóteses.
+
+### Interpretação
+
+Isto é o resultado esperado, não uma falha do engine. Mega caps americanas entre
+2015 e 2026 atravessaram um dos mercados de alta mais longos e persistentes da
+história recente — inclusive a recuperação em V pós-2020. Nesse regime, qualquer
+estratégia que gaste tempo fora do mercado (como o cruzamento de médias móveis, que
+sai da posição em toda reversão de tendência) paga o custo de oportunidade de não
+estar posicionada durante os trechos de alta mais fortes, e paga de novo em custos de
+transação a cada entrada e saída — 27 a 36 trades por ticker aqui, contra 1 do
+buy-and-hold. A literatura de seguimento de tendência é consistente nisso: SMA cross
+tende a perder para buy-and-hold em mercados de alta prolongada e só se paga em
+mercados laterais ou de queda, onde evitar o drawdown grande compensa o retorno
+perdido nas altas. META é a única exceção aqui — não porque a estratégia "funcionou
+melhor" nela, mas porque META teve uma queda de 76.7% (2021-2022, era do metaverso)
+que o buy-and-hold sofreu inteira e a SMA cross evitou parcialmente saindo da posição.
+
+O número não foi maquiado, nenhum ticker foi excluído, e o parâmetro não foi escolhido
+depois de ver o resultado. Um engine que reportasse a estratégia vencendo a maioria
+das mega caps americanas dos últimos onze anos seria motivo de desconfiança do próprio
+engine, não celebração.
+
+### Exemplos de gráfico
+
+Equity da estratégia vs. benchmark (painel superior, com marcações de entrada/saída) e
+drawdown da estratégia (painel inferior):
+
+| META (a exceção) | NVDA (a maior base, mesmo perdendo em CAGR relativo) |
+|---|---|
+| ![META](results/META_sma_cross_20_50.png) | ![NVDA](results/NVDA_sma_cross_20_50.png) |
+
+Os 20 gráficos e relatórios completos (JSON, com todas as métricas e a seção de
+vieses) estão em [`results/`](results/).
 
 ## Limitações conhecidas
 
-Declaradas aqui porque um backtester que esconde suas premissas é pior que nenhum.
+Declaradas aqui porque um backtester que esconde suas premissas é pior que nenhum. Os
+seis itens fixos abaixo aparecem, literalmente, em todo relatório que o sistema emite
+(`BIAS_DISCLOSURE` em `analytics/report.py`) — não são texto de README desalinhado do
+código.
 
-**Da Fase 0 (este commit)**
+1. **Survivorship bias.** O universo em `config/universe.yml` é uma lista fixa de
+   empresas que existem e são líquidas hoje. Empresas que faliram ou foram deslistadas
+   não aparecem. Isso infla o retorno de qualquer estratégia testada — e do benchmark.
+2. **Sem slippage.** Execução integral ao `open`, sem desvio entre preço observado e
+   preço pago.
+3. **Custos simplificados.** Modelo fixo + bps; sem spread, sem borrow, sem imposto.
+4. **Sem impacto de mercado.** Ordens não movem preço, qualquer tamanho executa.
+5. **Granularidade de posição fictícia.** Quantidades inteiras calculadas sobre preços
+   **ajustados**, que não são os preços históricos reais (AAPL pré-split 4:1 aparece a
+   ~1/4 do preço da época). A restrição de ação inteira, portanto, não corresponde à
+   restrição que existia historicamente.
+6. **Sem correção para múltiplas hipóteses.** Parâmetros testados repetidamente contra
+   a mesma amostra inflacionam métricas — razão pela qual este README usa um único par
+   `(fast, slow)` fixo em todos os tickers, escolhido antes de rodar.
 
-- Nenhuma funcionalidade de negócio existe. O único comando é `version`.
-- A cobertura de 80% está configurada e escopada a `engine/` e `analytics/`, mas é
-  trivialmente satisfeita enquanto esses pacotes estiverem vazios.
-- O `Dockerfile` ainda não entra no `docker-compose.yml`.
-- O MongoDB local sobe com credenciais de exemplo, adequadas apenas à máquina do
-  desenvolvedor.
+**O que a Fase 1 deliberadamente não faz** (não é bug, é escopo):
 
-**Do desenho da Fase 1, já assumidas**
+- **Um único ativo por backtest.** `Portfolio` já modela N posições (decisão D4), mas
+  a Fase 1 exercita N=1. Sem portfólio multi-ativo, sem rebalanceamento.
+- **Sem position sizing.** Entrada é sempre *all-in*: todo o caixa disponível
+  (decisão D1). Sem fracionamento de risco por trade.
+- **Long-only, sem alavancagem, sem venda a descoberto.**
+- **Uma estratégia só** (SMA cross). O contrato (`Strategy` Protocol) já suporta
+  outras sem mudança no engine (ENG-05.1), mas nenhuma outra foi escrita.
+- **Sem walk-forward nem otimização de parâmetros** — de propósito, dado o viés 6
+  acima. Fase 2 escopa isso com a correção estatística apropriada, não como adição
+  ingênua de uma varredura de grade.
+- **Um único provedor de dados gratuito (yfinance)**, sem fallback para dado
+  pago/institucional caso o gratuito falhe ou tenha qualidade pior — mitigado por
+  `ResilientProvider` (retry) e pela validação de qualidade (ING-05), mas não
+  eliminado. O bug de preço `NaN` corrigido nesta mesma fase (ver
+  [HANDOFF.md](HANDOFF.md)) é evidência direta desse risco: dado real de provedor
+  gratuito tem qualidade inferior a dado institucional, e a defesa é validação
+  explícita, não confiança na fonte.
+- **Calendário de pregão não modelado.** Gaps de calendário são tratados via a barra
+  seguinte disponível (ADR-0002), sem lista de feriados dedicada.
 
-- **Survivorship bias.** O universo em `config/universe.yml` é uma lista fixa de
-  empresas que existem e são líquidas hoje. Empresas que faliram ou foram deslistadas
-  não aparecem. Isso infla o retorno de qualquer estratégia testada — e do benchmark.
-- **Slippage não modelado.** A execução assume preenchimento integral no `open`, sem
-  impacto de mercado e sem limite de participação no volume.
-- **Custos simplificados.** Valor fixo por trade mais percentual sobre o notional.
-  Sem taxas de bolsa, sem borrow, sem imposto.
-- **Múltiplas hipóteses.** Nenhuma correção para o número de configurações testadas.
-  Testar muitos parâmetros e reportar o melhor produz resultado enviesado por
-  construção.
-- **Dividendos entram via ajuste de preço**, não como crédito em caixa.
-- **Long-only, sem alavancagem, sem fracionário, moeda única (USD).**
+## Specs e decisões
 
-## Contribuindo
-
-O fluxo e os gates estão em [CONTRIBUTING.md](CONTRIBUTING.md). As convenções de código
-e as invariantes que não podem ser violadas estão em [CLAUDE.md](CLAUDE.md).
+A pasta [`specs/`](specs/) é a fonte da verdade — nenhuma linha de implementação é
+escrita antes da spec correspondente passar pelo gate de design. O fluxo e os gates
+estão em [CONTRIBUTING.md](CONTRIBUTING.md); as convenções de código e os invariantes
+que não podem ser violados estão em [CLAUDE.md](CLAUDE.md); o histórico de decisões de
+cada sessão de trabalho está em [HANDOFF.md](HANDOFF.md).
 
 ## Licença
 
