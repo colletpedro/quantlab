@@ -856,6 +856,46 @@ exige bater com o `Adj Close` do provedor; os CAs de PER-02 são cobertos pelas
 fixtures de papel de A7, calculadas à mão). Fica registrado para quem revisar decidir
 se vale investigar antes do Bloco C consumir `get_series`.
 
+> ### ⚠️ CORREÇÃO (2026-08-04) — a hipótese acima estava ERRADA
+>
+> O parágrafo acima fica como foi escrito, sem edição, porque o valor deste registro
+> está em mostrar uma hipótese sendo derrubada por evidência — não em parecer que
+> nunca houve hipótese errada.
+>
+> **O que eu supus:** que a divergência viesse de defasagem entre o `Adj Close` do
+> yfinance e o que `.dividends` devolve, "não necessariamente um bug do quantlab".
+>
+> **O que o diagnóstico encontrou:** era bug nosso, em A7. O raciocínio sobre o
+> *formato* estava certo — constância aponta para os fatores, não para a lógica por
+> barra —, mas eu parei uma casa antes de chegar na causa e escolhi a explicação que
+> não exigia culpa nossa. A causa real: `adjustment_factors()` recebia só as barras da
+> **janela pedida**, então o `C` de cada um dos 10 dividendos posteriores virava o
+> último fechamento da janela (`C = 186.19`, de 2024-01-10) em vez do fechamento do
+> pregão anterior a cada data ex (188.32, 216.24, ..., 293.32).
+>
+> **O número que fecha o caso:** trocando só o `C` pelo correto, mantendo conjunto de
+> eventos e fórmula, o fator vai de 0.9863884035 para 0.9888072905, contra
+> 0.9888072623 do yfinance — **razão 1.0000000285**, ruído de ponto flutuante. O
+> conjunto de eventos estava certo, a fórmula estava certa, o `cumprod` estava certo.
+> Só o `C`.
+>
+> **Consequência mais séria que a divergência em si:** o valor ajustado de uma barra
+> dependia da janela consultada. Medido no mesmo banco, sem envolver yfinance: leitura
+> de 42 barras contra leitura de 7, 0,0437% de diferença nas 7 compartilhadas, hashes
+> distintos — PER-03.1 atacado no ponto exato em que existe para dar garantia.
+>
+> **Onde foi parar:** [ADR-0004](specs/adr/0004-ajuste-sobre-historico-completo.md)
+> (ajuste materializado sobre o histórico completo), design v0.5 §3.7, e a correção de
+> A7 na seção "Correção de A7 + Bloco C" abaixo.
+>
+> **A lição que fica**, e que a v0.5 do design registra em §3.7 para não depender deste
+> handoff: o que separa ruído de arredondamento de bug de fator não é a **magnitude**,
+> é o **formato** — ruído é errático entre barras, bug de fator é constante. Eu escrevi
+> isso corretamente acima e ainda assim não segui até o fim. A segunda lição é sobre a
+> minha própria conclusão de que "não era critério de aceitação": era, sim — só não
+> pelo caminho que eu olhei. Nenhuma CA exige bater com o `Adj Close`, mas PER-02.3 e
+> PER-03.1 exigem determinismo, e a mesma causa quebrava os dois.
+
 **Limpeza:** as 14 barras, os 195 eventos corporativos e o documento de
 `ingestion_runs` foram removidos do banco de desenvolvimento (`quantlab`) logo após a
 inspeção, confirmado por contagem zero nas três coleções.
