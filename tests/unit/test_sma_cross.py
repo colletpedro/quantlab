@@ -25,6 +25,7 @@ onde o cruzamento de entrada acontece — a fixture usa a borda do aquecimento
 de propósito, não por acaso.
 """
 
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 
 import numpy as np
@@ -85,6 +86,56 @@ def test_valid_fast_slow_instantiates_without_error() -> None:
 def test_warmup_equals_slow() -> None:
     assert SmaCross(fast=2, slow=3).warmup == 3
     assert SmaCross(fast=5, slow=20).warmup == 20
+
+
+@dataclass
+class _CallRecordingSmaCross:
+    """Encapsula `SmaCross`, registrando todo índice em que `on_bar` é chamado.
+
+    A mutação `warmup = fast` (em vez de `slow`) só derruba
+    `test_warmup_equals_slow` — nenhum dos testes de cruzamento abaixo nota a
+    diferença, porque nesta fixture (`_CLOSES` plano nas três primeiras
+    barras) chamar `on_bar` prematuramente em `i=fast` produz `prev_diff ==
+    curr_diff == 0`, que não passa nas comparações estritas (`> 0`/`< 0`) e
+    portanto não gera sinal — um empate mascara o warmup errado, não prova
+    que ele está certo. Este teste trava o contrato pelo lado que a
+    coincidência aritmética não protege: quais índices o engine efetivamente
+    consultou, via `run_backtest` de ponta a ponta, não via chamada direta a
+    `on_bar`.
+    """
+
+    fast: int
+    slow: int
+    seen_indices: list[int] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self._inner = SmaCross(fast=self.fast, slow=self.slow)
+
+    @property
+    def warmup(self) -> int:
+        return self._inner.warmup
+
+    def on_bar(self, view: MarketView) -> Signal | None:
+        self.seen_indices.append(view.i)
+        return self._inner.on_bar(view)
+
+
+@pytest.mark.unit
+def test_engine_never_calls_on_bar_before_slow_bars_of_true_history() -> None:
+    """ENG-06.3, pelo lado do engine: o primeiro índice consultado é `i = slow`.
+
+    Não basta `warmup == slow` como valor isolado (já coberto acima); é o
+    `run_backtest` respeitando esse valor que garante que `on_bar` nunca vê
+    menos de `slow` barras de fechamento verdadeiro — é essa garantia que faz
+    as médias de `on_bar` serem calculadas sobre janelas completas.
+    """
+    series = _series(_CLOSES)
+    spy = _CallRecordingSmaCross(fast=2, slow=3)
+
+    run_backtest(series, spy, costs=_FREE)
+
+    assert spy.seen_indices, "on_bar nunca foi chamado — série curta demais para a fixture"
+    assert min(spy.seen_indices) == 3
 
 
 # ─── ENG-06.1 / ENG-06.2: cruzamento para cima e para baixo, calculados à mão ─
