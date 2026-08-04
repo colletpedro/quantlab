@@ -35,6 +35,7 @@ Decisões arquiteturais são **numeradas e imutáveis**. Quando uma decisão mud
 | [0001](adr/0001-mongodb-vs-relacional.md) | MongoDB como banco primário | aceito |
 | [0002](adr/0002-execucao-no-open-seguinte.md) | Execução no `open` do pregão seguinte | aceito |
 | [0003](adr/0003-ajuste-em-tempo-de-leitura.md) | Preço bruto persistido, ajuste na leitura | aceito |
+| [0004](adr/0004-ajuste-sobre-historico-completo.md) | Ajuste materializado sobre o histórico completo | aceito |
 
 ## Roadmap
 
