@@ -916,3 +916,219 @@ Dois avisos para quem pegar:
   vai comparar resultados contra alguma referência externa em algum momento (não é
   requisito da Fase 1, mas pode aparecer em teste exploratório), a causa dessa
   diferença de ~0,24% precisa estar entendida, não só registrada.
+
+---
+
+## Correção de A7 + Bloco C — engine
+
+**Data:** 2026-08-04
+**Origem:** diagnóstico da divergência de 0,24%, ADR-0004, e `fase-1-tasks.md` Bloco C
+**Escopo:** correção de `storage/` (ADR-0004) e `engine/` completo.
+`strategies/` (Bloco D) e `analytics/` (Bloco E) continuam vazios.
+
+### 1. O diagnóstico: era bug nosso, e o registro anterior foi corrigido
+
+O aviso da seção acima ("vale uma decisão antes de C1") estava certo, e a decisão foi
+investigar. Resultado: **categoria (ii), bug em A7** — não defasagem do provedor, como
+a hipótese do Bloco B §5 supunha.
+
+**A causa.** `adjustment_factors()` recebia só as barras da **janela pedida**. Para os
+10 dividendos de AAPL posteriores à janela de 7 barras, o `C` de cada um virou o último
+fechamento da janela (`186.19`, de 2024-01-10) em vez do fechamento do pregão anterior
+a cada data ex (188.32, 216.24, ..., 293.32).
+
+| | fator acumulado | ajustado de 2024-01-02 |
+|---|---|---|
+| implementação da v0.4 (`C` da janela) | 0.9863884035 | 183.1131 |
+| mesma fórmula, `C` correto de cada `D−1` | 0.9888072905 | 183.5622 |
+| `Adj Close` do yfinance | 0.9888072623 | 183.5622 |
+
+**Razão entre o corrigido e a referência: 1.0000000285** — ruído de ponto flutuante.
+Conjunto de eventos, fórmula e `cumprod` estavam corretos; só o `C`.
+
+**A consequência que torna isto bug de correção e não imprecisão**, observável sem
+nenhuma referência externa: leitura de 42 barras contra leitura de 7 divergiam em
+**0,0437%** nas 7 compartilhadas, com hashes distintos. O valor ajustado de uma barra
+dependia da consulta — PER-03.1 atacado no ponto em que existe para dar garantia.
+
+O registro do Bloco B §5 foi corrigido **no lugar**, sem reescrever o histórico: o
+parágrafo com a hipótese errada continua lá, com a correção anotada abaixo dele. O
+valor está em mostrar a hipótese sendo derrubada por evidência.
+
+### 2. O que foi entregue, por parte
+
+| Parte | Entrega | Commit |
+|---|---|---|
+| **0** | ADR-0004 + design v0.5 (6 itens, §3.2 e §3.7) | `4f8e08e`, `847ada5` |
+| **1** | Correção de A7 — `build_price_series`, borda de ponta direita, aviso de vão | `6a6c88a` |
+| **2** | Correção do registro no HANDOFF | `d3f28b0` |
+| **C1** | `MarketView` | `7d75d5b` |
+| **C2/C3/C4** | `Signal`/`Strategy`, `Trade`/`Position`/`Portfolio`, `Broker`/`CostModel` | `3c2dbcc` |
+| **C5/C6** | Laço de barras e conciliação | `4312957` |
+| — | Lacuna que a mutação expôs | `a0b17af` |
+
+**A peça de desenho que a correção exigiu:** `build_price_series` é função **pura**
+nova em `storage/series.py` — histórico completo + eventos entram, `PriceSeries`
+fatiada sai. Não foi refatoração gratuita: enquanto a materialização morava dentro de
+`MongoRepository.get_series`, só teste de integração alcançava, e foi por isso que
+nenhuma fixture cobria dividendo pós-janela. Agora o invariante de independência de
+janela é testável **offline, com fixtures de papel**.
+
+`get_series` ficou com sete linhas de corpo. `adjustment_factors` continua pura, como
+ADR-0004 exige — o que mudou é com o que ela é alimentada.
+
+### 3. Verificação por mutação — as duas frentes, separadas
+
+**Frente 1 — a correção de A7.** As fixtures novas foram escritas **antes** da
+implementação e falharam contra o código anterior, como a ordem da tarefa manda:
+
+| Mutação | Testes que caem |
+|---|---|
+| `get_series` volta a passar só as barras da janela (o bug original) | 3 |
+| Remover o descarte de evento posterior à última barra | 5 |
+| Fatiar antes de ajustar, dentro do builder (a assimetria) | 3 |
+
+**Frente 2 — o Bloco C.** As quatro mutações pedidas, mais uma que precisei
+acrescentar:
+
+| Mutação | Testes que caem |
+|---|---|
+| Executar ao `close[i]` em vez de `open[i]` | 3 |
+| Executar no mesmo índice da decisão | 6 |
+| Remover `writeable=False` da materialização | 16 |
+| Inverter passos 1 e 2 (marcar antes de executar) — *acrescentada* | 3 |
+| **Inverter passos 2 e 3 (consultar antes de marcar)** | **0** ⚠️ |
+
+Arquivos restaurados byte a byte em todos os casos, conferido com `diff` e
+`git status`.
+
+**A mutação que não derrubou nada, e o que fiz com isso.** Inverter os passos 2 e 3 do
+laço não quebra teste nenhum — verificado em isolamento, com confirmação explícita de
+que a mutação aplicou (75 testes, todos verdes com os passos trocados).
+
+A causa **não é teste faltando no sentido usual**: consultar a estratégia não tem
+efeito colateral sobre a carteira. `on_bar` só devolve um sinal, que vira ordem
+pendente para `i+1`. É consequência direta de ENG-05.2 — a estratégia não alcança
+caixa, posição nem trades. A ordem entre 2 e 3 é **genuinamente livre**, e a numeração
+de design §4.3 sugere uma restrição em três níveis que não existe.
+
+O que faltava era travar a **premissa** que torna a liberdade válida. Adicionei
+`test_the_equity_of_a_bar_does_not_depend_on_the_signal_emitted_on_it`, e confirmei que
+ele tem dente injetando um `cash -= 0.01` logo após a consulta: **10 testes caem**. Se
+alguém der efeito colateral a `on_bar` no futuro, descobre pelo teste e não por um
+número errado no relatório.
+
+A docstring do laço passou a declarar quais ordens carregam peso, com o número de
+testes de cada uma, em vez de apresentar os três passos como igualmente restritos.
+
+Como a instrução previa, essa foi a mutação mais informativa das cinco — justamente
+por não derrubar nada.
+
+### 4. Verificação e CI
+
+**Local — nove passos, todos verdes:** `make install`, `lint`, `typecheck`, `test`,
+`test-integration`, `check`, `audit`, `pre-commit run --all-files`,
+`python -m quantlab version`.
+
+- 266 testes unitários, 57 de integração.
+- **Cobertura de `engine/`: 96%** — o piso de 80% de RNF-02 deixou de ser trivialmente
+  satisfeito pela primeira vez. `portfolio.py` estava em 77% e ganhou testes próprios;
+  os pontos descobertos eram justamente os *guards* de ENG-04.4, e testar o guard é
+  diferente de testar o caminho feliz: o guard só serve se alguém provou que dispara.
+
+| Módulo | Cobertura |
+|---|---|
+| `engine/backtest.py` | 95% |
+| `engine/broker.py` | 90% |
+| `engine/market_view.py` | 98% |
+| `engine/portfolio.py` | 100% |
+| `engine/strategy.py` | 100% |
+
+**CI — [run 30876152658](https://github.com/colletpedro/quantlab/actions/runs/30876152658), os três jobs verdes.**
+
+### 5. Decisões que tomei por conta própria — revise
+
+**5.1 `build_price_series` como função pura, em `storage/series.py`.** ADR-0004 decide
+*o quê*; a separação em função pura é *como*, e não estava especificada. Justificativa
+no corpo: é o que torna o invariante testável offline. O custo é uma peça a mais no
+módulo.
+
+**5.2 O fatiamento usa `.copy()`, não view.** Uma view manteria vivo o array-mãe do
+histórico inteiro, alcançável por `.base` — inclusive as barras fora da janela, que é
+exatamente o que a janela existe para excluir. Custo: uma cópia por `get_series`,
+irrelevante contra a leitura do banco.
+
+**5.3 Aviso de vão grande só para dividendo, não para split.** Design v0.5 §3.7 escreve
+a regra dentro do parágrafo que define `C`, e o fator de um split é `1/r` qualquer que
+seja a barra âncora — um vão grande não torna o número suspeito. Para dividendo o `C`
+entra na conta. Se a intenção era avisar nos dois casos, é uma linha.
+
+**5.4 `_warn_if_gap_is_large` duplica `_business_day_gap` de
+`ingestion/validator.py`.** De propósito: `storage/` importar de `ingestion/`
+inverteria a direção das dependências (design §2) e criaria ciclo, já que `ingestion`
+importa `storage.models`. Duplicar duas linhas puras me pareceu melhor que criar um
+módulo `utils` prematuro. Se aparecer um terceiro uso, aí vale extrair.
+
+**5.5 `InsufficientHistoryError` como subclasse de `EngineError`.** Design §4.1 nomeia
+a exceção mas não diz onde ela mora na hierarquia. `EngineError` é o encaixe natural
+(CLAUDE.md §3 manda usar a hierarquia do projeto).
+
+**5.6 `Trade` congelado é fechado por substituição, não mutação.** `_close_trade` cria
+o `Trade` fechado e troca **no mesmo índice** da lista, preservando a ordem
+cronológica — que é o que `hit_rate` (E1) e o relatório vão esperar.
+
+**5.7 `close[i]` fica visível à estratégia.** ADR-0002 proíbe *executar* na barra da
+decisão, não usar o fechamento dela para decidir. Esconder quebraria a SMA cross sem
+necessidade. Está com teste explícito.
+
+**5.8 Dois erros meus, corrigidos, registrados porque são instrutivos.**
+(a) No teste de ENG-01.2, mutei a partir do índice 3 — mas a decisão do índice 2
+executa legitimamente no `open` de 3. A fronteira livre é *última decisão + 1*, não
+*última decisão*; um teste anti-lookahead cedo demais acusa lookahead onde há execução
+correta. (b) Em `test_entry_cost_is_debited_and_recorded_on_the_trade` eu esperava
+q=98 e a implementação deu 99 — o próprio comentário do meu teste mostrava
+`9900+1+0.99 = 9901.99 <= 10000`. Conferi a conta à mão antes de mexer, como CLAUDE.md
+manda, e corrigi o **teste**, não a implementação.
+
+### 6. Ambiguidades de spec encontradas — para a v0.6
+
+**6.1 Design §4.3 sugere uma ordem em três níveis; só duas restrições existem.** Ver a
+seção 3. As ordens que carregam peso são `1 antes de 2` e `1 antes de 3`; a relação
+entre 2 e 3 é livre por ENG-05.2. A v0.6 poderia dizer isso explicitamente — hoje um
+leitor razoável conclui que inverter 2 e 3 é violação, e não é.
+
+**6.2 ADR-0004 nomeia testes que não existem com aqueles nomes exatos.** A tabela de
+invariantes cita `test_factors_do_not_depend_on_the_requested_window` em
+`test_adjustment.py`. O invariante acabou onde ele é de fato observável — no builder
+(`tests/unit/test_series_builder.py`) e na integração —, porque no nível da função pura
+de fator ele não é enunciável: a função nunca vê uma janela. Os nomes reais estão nos
+commits; vale alinhar a tabela do ADR numa errata ou num ADR futuro, já que ADR é
+imutável.
+
+**6.3 §4.5 não diz se `Trade` guarda a data de decisão da SAÍDA.** A struct do design
+lista `exit_gap_days` mas não `exit_decision_date`. Adicionei o campo por simetria — o
+gap de saída precisa da mesma auditabilidade que o de entrada, e derivar a data a
+partir do gap seria reconstruir informação que já tínhamos.
+
+**6.4 §4.4 não define o que fazer com `EXIT` sem posição no nível do laço.** A decisão
+Q2 cobre o caso na estratégia ("ignorado e logado"), mas não diz se a ordem pendente é
+consumida ou fica para a barra seguinte. Implementei **consumida**: deixá-la pendente
+faria a ordem ser tentada de novo com um preço que a decisão não conhecia — o que é
+lookahead por outro caminho.
+
+### 7. Próximo passo
+
+**Bloco D — SMA cross** (`strategies/`), que é pequeno e depende só do protocolo de C2:
+`warmup = slow`, validação `fast < slow`, cruzamento para cima e para baixo, com série
+de papel e cruzamentos em datas conhecidas (ENG-06.1 a ENG-06.4).
+
+Depois, **Bloco E** (analytics) e **Bloco F** (fechamento). Dois avisos:
+
+- **O engine está pronto para receber a SMA cross sem alteração.** ENG-05.1 tem teste
+  (`test_a_strategy_the_engine_has_never_seen_runs_unchanged`, com uma estratégia
+  definida dentro do próprio teste). Se D1 exigir mudança no engine, é sinal de que o
+  protocolo de C2 está incompleto — vale parar e olhar em vez de adaptar o engine.
+- **F3 vai medir RNF-04 (10 anos em menos de 5 s) pela primeira vez com código real.**
+  ADR-0004 acrescentou uma leitura de histórico completo por `get_series`, e o gatilho
+  de revisitação que o próprio ADR declara é exatamente esse: gargalo *medido*, não
+  suposto. F3 é onde a medição acontece.
