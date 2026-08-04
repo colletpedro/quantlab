@@ -1,10 +1,10 @@
 # Fase 1 (MVP) — Design técnico
 
 **Status:** aprovada — gate check 2 concluído
-**Versão:** 0.4
-**Data:** 2026-08-03
+**Versão:** 0.5
+**Data:** 2026-08-04
 **Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0
-**ADRs vinculantes:** 0001, 0002, 0003
+**ADRs vinculantes:** 0001, 0002, 0003, 0004
 
 > **Convenção de referência:** critérios de aceitação são citados com prefixo da família de requisito — `ENG-01.4` significa CA-01.4 de RF-ENG-01; `ANA-01.4` significa CA-01.4 de RF-ANA-01. A v0.1 citava CAs sem prefixo e colidia namespaces. Recomenda-se adotar a mesma convenção no requirements na próxima revisão dele.
 
@@ -96,6 +96,8 @@ Dependências apontam para dentro. `engine/` não conhece MongoDB nem yfinance; 
 
 **Consequência declarada:** revisão retroativa de um evento muda a série ajustada e, portanto, o hash de PER-03.1. Isso é o comportamento desejado — o hash existe para detectar exatamente essa mudança de estado. Hash divergente entre dois runs após uma reingestão é **sinal esperado de revisão de dados**, não bug; o relatório de backtest referencia o `ingestion_run_id`, permitindo rastrear a divergência à sua causa.
 
+**Eventos de magnitude nula (v0.5).** Dividendo de valor `0.0` e split de razão `1.0` são descartados **silenciosamente na normalização** (`ingestion/normalizer.py`), antes de chegarem a esta coleção. Não são eventos: o provedor os inclui como resíduo em datas sem evento, e o fator de ambos é exatamente `1.0` — aplicá-los não mudaria número nenhum, e gravá-los poluiria a coleção com linhas sem significado. Silenciosamente, e não com aviso, porque a ausência de evento numa data é o caso comum, não uma anomalia que mereça atenção. Um dividendo **negativo** continua sendo erro e levanta `DataError` no construtor de `CorporateAction` — o filtro é de magnitude nula, não de sinal.
+
 ### 3.3 Coleção `quarantined_bars`
 
 A v0.1 referenciava quarentena sem desenhá-la. Fica desenhada aqui.
@@ -174,7 +176,11 @@ def get_series(
 
 **Sobre imutabilidade — precisão da claim:** `frozen=True` impede reatribuição de atributos, não mutação do conteúdo dos arrays. A imutabilidade **dos dados** vem de outra medida: **na materialização, todos os arrays internos são marcados `flags.writeable = False`**. As duas juntas dão o que a v0.1 chamava vagamente de "imutável": nem os atributos trocam, nem os dados mudam — por qualquer caminho, incluindo via `.base` de views derivadas (ver 4.1).
 
-**Quem paga o custo de CPU, e por quanto tempo:** o ajuste é computado **uma vez por chamada de `get_series`**, e o `PriceSeries` vive enquanto durar o backtest. O engine recebe o objeto materializado e nunca reconsulta o repositório. Uma travessia de ajuste por backtest, não uma por barra. Sem cache em Fase 1 — ADR-0003 registra materialização em Redis como escopo da Fase 2, condicionada a problema de performance real; RNF-04 dá folga.
+**Materialização sobre o histórico completo (v0.5 — ADR-0004).** `get_series` lê **todas** as barras do ticker, materializa a série ajustada inteira, e só então devolve o recorte `[start, end]`. Barras e eventos têm o mesmo escopo — o histórico completo. A v0.4 carregava os eventos sobre o histórico completo mas as barras filtradas pela janela, e essa assimetria foi exatamente o bug que ADR-0004 corrige: o `C` de um evento posterior ao fim da janela virava o último fechamento da janela, silenciosamente.
+
+**Quem paga o custo de CPU, e por quanto tempo:** o ajuste é computado **uma vez por chamada de `get_series`**, sobre o **histórico completo** do ticker — não sobre a janela —, e o `PriceSeries` vive enquanto durar o backtest. O engine recebe o objeto materializado e nunca reconsulta o repositório. Uma travessia de ajuste por backtest, não uma por barra. O desperdício de janelas curtas (ler dez anos para devolver um mês) é assumido: ~2500 barras para 10 anos de um ticker, irrelevante no volume que ADR-0001 dimensiona. Sem cache em Fase 1 — ADR-0003 registra materialização em Redis como escopo da Fase 2, condicionada a problema de performance real; RNF-04 dá folga.
+
+**Invariante: INDEPENDÊNCIA DE JANELA (v0.5).** Duas leituras de janelas distintas, sobre o mesmo estado do banco, concordam **valor a valor** nas barras que compartilham. O valor ajustado de uma barra é propriedade do dado, nunca da consulta. É o que a materialização sobre histórico completo garante por construção — não por disciplina de quem chama —, e o que a v0.4 violava: leituras de 42 e de 7 barras divergiam em 0,0437% nas 7 compartilhadas, com hashes distintos. Como o hash de PER-03.1 é função da série, violar este invariante violava PER-03.1 junto.
 
 **Algoritmo do fator.** Eventos carregados sobre o histórico completo do ticker (ING-02.3): um split fora da janela ainda afeta os preços dentro dela.
 
@@ -185,12 +191,35 @@ fator_evento(dividendo d, close C) = (C − d)/C sobre preços,  1 sobre volume
 
 onde `C` é o fechamento **bruto** do pregão anterior à data ex. O fator aplicado à barra em `t` é o produto de todos os fatores de eventos com data **estritamente posterior** a `t` — `cumprod` reverso sobre a série de fatores diários, O(n).
 
+**Definição precisa de `C` (v0.5 — ADR-0004).** `C` é o fechamento bruto da barra **imediatamente anterior à data ex no histórico completo**, qualquer que seja o gap de calendário entre as duas. Com o histórico completo em mãos, "barra imediatamente anterior" *é* o pregão anterior — não há como confundir "o mercado estava fechado" com "não ingerimos esse dia", e portanto não é preciso calendário de pregão para desambiguar. Um gap maior que **5 dias úteis** entre essa barra e a data ex (o mesmo limiar de ING-05.2) emite **aviso não-bloqueante**: o ajuste é aplicado com o `C` disponível, mas um vão desse tamanho indica dado faltando no histórico, e o número resultante merece desconfiança de quem o ler.
+
 **Casos de borda (v0.3 — precisados).** A v0.2 dava duas regras que se sobrepunham quando o evento sem barra anterior era um dividendo ("evento anterior à primeira barra é ignorado" e "dividendo sem barra anterior vira aviso") sem dizer qual prevalece. Resolvido por especificidade — a regra mais específica ao tipo de evento vence:
 
 - **Split** sem nenhuma barra estritamente anterior a ele (evento anterior à primeira barra da série disponível): descartado em silêncio. Não há preço para dividir nem volume para multiplicar; não é uma anomalia, é a série simplesmente não cobrir aquele passado.
 - **Dividendo** sem nenhuma barra estritamente anterior: descartado, mas com **aviso**, porque `C` — o fechamento anterior — seria indefinido e descartar em silêncio esconderia um ajuste que deveria ter acontecido caso a série cobrisse uma barra a mais para trás.
 
+**Evento posterior à última barra do histórico (v0.5 — ADR-0004).** Data ex depois do último pregão que existe no banco: **descartado com aviso**, qualquer que seja o tipo. Duas razões:
+
+1. **Não há `C` honesto.** O fechamento anterior à data ex é uma barra que ainda não foi ingerida. Usar o último fechamento disponível como substituto é exatamente o bug que ADR-0004 corrige — só que na ponta direita do histórico em vez da ponta direita da janela.
+2. **O fator seria neutro em retorno.** Um evento posterior a **todas** as barras multiplica a série inteira pelo mesmo fator, uniformemente. Retorno percentual entre quaisquer duas barras não muda; muda só o nível absoluto dos preços. E a distorção de nível absoluto já é declarada como o viés 5 de §5.2 (quantidade inteira sobre preço ajustado não corresponde à restrição histórica real). Descartar é conservador e não altera nenhuma métrica de performance.
+
+O aviso existe porque a situação é informativa: significa que o banco tem eventos mais recentes que as barras, ou seja, a ingestão de preços está atrasada em relação à de proventos.
+
 **Dividendo maior ou igual a `C` (v0.3 — não coberto na v0.2).** Produziria fator `(C − d)/C` nulo ou negativo, e um preço ajustado nulo ou negativo atravessaria o resto do sistema parecendo um número válido — o tipo de corrupção silenciosa que este projeto existe para evitar. Tratado como `DataError`: um dividendo maior ou igual ao fechamento do pregão anterior não corresponde a nenhum evento real e indica dado corrompido do provedor. A mensagem de erro deve sugerir a conferência dos eventos corporativos daquele ticker na data em questão.
+
+**Nota — a sanidade cruzada de ADR-0003 encontrou um bug real (v0.5).** ADR-0003 fecha com uma recomendação: "comparar a série ajustada própria contra o `Adj Close` do provedor. Divergência sistemática indica bug; divergência pequena é esperada por diferença de convenção de arredondamento." A recomendação se pagou — foi ela que expôs o bug que ADR-0004 corrige.
+
+Executada ao fim do Bloco B sobre AAPL, janela 2024-01-02 a 2024-01-10, a comparação deu **0,2447% de divergência, constante nas 7 barras**, sempre com a nossa série abaixo. A constância foi o diagnóstico: barras diferentes com a mesma razão só podem divergir por um fator comum, o que aponta para o conjunto ou os valores dos eventos e **descarta** erro de índice ou de `cumprod`. O diagnóstico confirmou:
+
+| | fator acumulado | ajustado de 2024-01-02 |
+|---|---|---|
+| implementação da v0.4 (`C` da janela) | 0.9863884035 | 183.1131 |
+| mesma fórmula, `C` correto de cada `D−1` | 0.9888072905 | 183.5622 |
+| `Adj Close` do yfinance | 0.9888072623 | 183.5622 |
+
+Razão entre o cálculo corrigido e a referência: **1.0000000285**. Conjunto de eventos, fórmula e `cumprod` estavam corretos; só o `C` estava errado.
+
+Duas lições que ficam registradas aqui e não só no HANDOFF: (1) a divergência pequena que ADR-0003 dizia ser "esperada por arredondamento" pode ser bug — o que separa os dois casos não é a magnitude, é o **formato**: ruído de arredondamento é errático entre barras, bug de fator é constante; (2) as fixtures de papel de A7 não pegaram porque nenhuma exercitava dividendo posterior ao fim da janela — a única fixture de evento fora da janela usava split, que não precisa de `C`. Fixture de papel só cobre o caso que alguém pensou em escrever.
 
 ### 3.8 Hash determinístico — PER-03.1
 
@@ -376,3 +405,4 @@ O item 5 é consequência direta de ADR-0003 + premissa 3 do requirements (sem f
 | 0.2 | 2026-08-03 | Review incorporado: (1) claim "sem escapatória" do `MarketView` corrigida — `.base` do numpy documentado, arrays-mãe marcados read-only na materialização, teste de ENG-01.3 passa a exercitar o caminho de fuga, risco adicionado à tabela; (2) distorção de quantidade inteira sobre preço ajustado adicionada à seção fixa de vieses (item 5), junto com slippage que também faltava; (3) quarentena desenhada — coleção `quarantined_bars`, regras, destino, módulo responsável (3.3); (4) referências de CA prefixadas por família (ENG-/ANA-/ING-/PER-) eliminando colisões de namespace; (5) semântica de upsert de `corporate_actions` declarada + hash divergente após revisão retroativa explicitado como sinal esperado (3.2); menores: `LookaheadError` → `InsufficientHistoryError` para histórico insuficiente, imutabilidade da `PriceSeries` precisada (frozen + writeable=False). Q1–Q3 fechadas |
 | 0.3 | 2026-08-03 | Ambiguidades encontradas na implementação do Bloco A (HANDOFF §"Bloco A — storage", seção 4), resolvidas: (1) regra da fronteira de timezone (3.6) reescrita — proíbe a classe `datetime` e o aparato de fuso fora de `ingestion/normalizer.py`/`storage/repository.py`, não o módulo inteiro, que proibiria o próprio `datetime.date` que o design exige no domínio; (2) `ingestion_run_id` removido dos metadados da `PriceSeries` (3.7) — o documento de `bars` nunca carregou o campo, e uma série materializada pode atravessar N ingestões, então não existe um valor singular correto; PER-03.1 continua atendido por `last_ingested_at` + hash; (3) índices de `ingestion_runs` e `backtest_runs` (3.4, 3.5) explicitamente adiados para quando B4 e F1 definirem o padrão de acesso, em vez de ficarem como lacuna silenciosa; (4) campos do hash enumerados — data ISO-8601 + OHLCV, ticker e `adjusted` de fora (3.8); zero negativo normalizado antes de formatar; (5) as duas bordas de ajuste que se sobrepunham (3.7) resolvidas por especificidade: split sem barra anterior é silencioso, dividendo sem barra anterior é aviso + descarte; (6) dividendo ≥ fechamento bruto anterior definido como `DataError` (3.7) — fator nulo ou negativo seria corrupção silenciosa; (7) `dates` da `PriceSeries` especificado como array de `datetime.date`, nunca `datetime64` (3.7); (8) semântica de escrita de `bars` (3.1) escrita explicitamente — upsert pela chave única com log de revisão, simétrica ao que §3.2 já dizia de `corporate_actions`. A implementação do Bloco A já seguia sete das oito decisões (o gate estava code-first nesses pontos); a exceção foi o campo `ingestion_run_id` da `PriceSeries` (item 2), que existia na classe sem ser usado em lugar nenhum e foi removido no mesmo commit desta revisão, para o código não ficar contradizendo a spec por um campo morto. |
 | 0.4 | 2026-08-03 | Índice de `ingestion_runs` (3.4) definido por B4, no mesmo commit que passou a gravar na coleção: `{tickers: 1, started_at: -1}`, multikey sobre o array de tickers combinado com ordenação por início — serve tanto "última ingestão deste ticker" quanto "runs mais recentes" com um índice só. `backtest_runs` continua sem índice, adiado para F1. |
+| 0.5 | 2026-08-04 | Incorpora **ADR-0004** (ajuste materializado sobre o histórico completo), escrito depois que a sanidade cruzada recomendada por ADR-0003 expôs um bug de correção em A7: `get_series` carregava os eventos sobre o histórico completo mas as barras filtradas pela janela, e o `C` de um evento posterior ao fim da janela virava silenciosamente o último fechamento dela. Mudanças: (1) §3.7 — materialização sobre o histórico completo, depois fatiamento; parágrafo "quem paga o custo de CPU" atualizado para dizer que a travessia é sobre o histórico, não a janela, com o desperdício de janelas curtas assumido; (2) §3.7 — nova borda: evento com data ex posterior à última barra do histórico é descartado com aviso, porque não há `C` honesto e o fator seria reescalonamento uniforme, neutro em retorno; (3) §3.7 — `C` definido como o fechamento bruto da barra imediatamente anterior à data ex **no histórico completo**, qualquer que seja o gap de calendário, com aviso não-bloqueante acima de 5 dias úteis (limiar de ING-05.2); (4) §3.7 — invariante nomeado: **independência de janela**, duas leituras concordam valor a valor nas barras compartilhadas; (5) §3.2 — eventos de magnitude nula (dividendo 0.0, split 1.0) descartados silenciosamente na normalização, pendência registrada no HANDOFF do Bloco B §4.6; (6) §3.7 — nota registrando que a sanidade cruzada de ADR-0003 encontrou o bug, com os números do diagnóstico e as duas lições (o que separa ruído de arredondamento de bug de fator é o formato, não a magnitude; fixture de papel só cobre o caso que alguém pensou em escrever). |
