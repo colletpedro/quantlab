@@ -9,6 +9,13 @@ resultado honesto rodado contra dado de mercado real e comprometido em
 [`results/`](../results/). Definition of Done da fase (requirements.md §8)
 integralmente atendido.
 
+**Consolidação pré-Fase 2 concluída (2026-08-06).** §7 de
+`specs/fase-2a-requirements.md` — RF-CON-01, RF-CON-02, RF-CON-03. Design
+v0.9 (`specs/00-plataforma/fase-1-design.md`) precede o código. Ver
+[HANDOFF.md](../HANDOFF.md) §"Consolidação pré-Fase 2" para o detalhe.
+Fase 2a segue em gate 1 (requisitos em revisão) — nada do corpo da Fase 2a
+foi implementado nesta sessão, só a dívida herdada da Fase 1.
+
 | Bloco | Escopo | Estado |
 |---|---|---|
 | A | `storage/` — persistência, ajuste em tempo de leitura | ✅ |
@@ -27,8 +34,11 @@ escrita ainda; `specs/README.md` tem o roadmap de alto nível.
 
 ## Números finais da Fase 1
 
-- **367 testes**: 333 unitários (offline), 60 de integração (`make up`).
-- Cobertura com `make test` (unitários, offline): **97.09%** total.
+(Atualizado após a consolidação pré-Fase 2 de 2026-08-06 — ver seção própria
+abaixo. Os números originais do fechamento de F4 eram 367/333/60.)
+
+- **401 testes**: 341 unitários (offline), 60 de integração (`make up`).
+- Cobertura com `make test` (unitários, offline): **97.12%** total.
   - `engine/`: 92-100% por arquivo.
   - `analytics/`: `metrics.py` e `benchmark.py` 100%, `report.py` 99%,
     `plot.py` 96%. Todos folgados acima do piso de 80% de RNF-02.
@@ -118,6 +128,44 @@ o contrato pelo lado que a coincidência aritmética não protege (quais
 índices `run_backtest` efetivamente consultou). Com o teste novo, a mesma
 mutação derruba 2 testes. Ver [HANDOFF.md](../HANDOFF.md) para a tabela de
 E1/E2 (sessão anterior) e a tabela completa desta.
+
+## Consolidação pré-Fase 2 (2026-08-06)
+
+Escopo: §7 de `specs/fase-2a-requirements.md` (v0.1, gate 1 em revisão —
+requisitos herdados da Fase 1, não corpo novo da Fase 2a). Design v0.9 de
+`specs/00-plataforma/fase-1-design.md` precede o código, conforme CLAUDE.md
+§1.
+
+- **RF-CON-01** — barra cuja `date` é ≥ à data UTC de execução (sessão em
+  formação) passa de **quarentenada** para **descartada com aviso**,
+  avaliada antes de ING-05.1. `MongoRepository.current_execution_date()` é o
+  único ponto novo de leitura do relógio (fronteira de instante do design
+  §3.6 preservada); `validate_bars` recebe `as_of` como parâmetro
+  obrigatório e continua função pura. `ingestion_runs` ganhou
+  `discarded_in_progress_count`, separado de `quarantined_count`. Verificado
+  contra ingestão real (`AAPL`, 2026-08-01 a 2026-08-06): campo presente no
+  documento, `0` no run porque o pregão do dia ainda não tinha barra
+  disponível no momento do teste — o mecanismo dispara quando há o quê
+  descartar, não sempre.
+- **RF-CON-02** — `BacktestReport` ganhou a seção `"run"`: nome/parâmetros
+  da estratégia, capital inicial, contagem de barras consumidas, datas
+  efetivas de início/fim. Antes, essa informação só existia no nome do
+  arquivo. Teste dedicado (`test_full_run_configuration_is_reconstructible_
+  from_the_json_alone`) prova CA-02.2 comparando o JSON isolado contra os
+  parâmetros originais, não contra `to_dict()` de novo.
+- **RF-CON-03** — README ganhou a explicação de por que a estratégia perde
+  em CAGR em 19/20 tickers mas só em 17/20 em Sharpe: sair do mercado corta
+  drawdown/volatilidade junto com retorno — é a assinatura de
+  trend-following (AMZN e GOOGL vencem em Sharpe apesar de perderem em
+  CAGR), não um segundo achado independente.
+- **Regeneração dos 20 relatórios.** Mesma ingestão, mesmo universo (20
+  tickers de `config/universe.yml`), mesmos parâmetros (SMA 20/50, D5).
+  **Os 20 `series_hash` batem, byte a byte, com os relatórios anteriores** —
+  confirma que só o formato do JSON mudou, não o pipeline de dados. PNGs não
+  regerados (nada nos gráficos depende do formato do relatório).
+
+Sequência completa (`make check` + `make test-integration`) verde após cada
+parte; commits pequenos por RF, um por vez.
 
 ## Pendências
 

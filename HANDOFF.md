@@ -1596,3 +1596,152 @@ bug de validação, já corrigido com spec e código no mesmo commit.
 - Position sizing, portfólio multi-ativo (N>1), walk-forward com correção estatística
   para múltiplas hipóteses, calendário de pregão dedicado — todos escopo já reconhecido
   e adiado desde o requirements da Fase 1, não descobertos agora.
+
+---
+
+## Consolidação pré-Fase 2
+
+**Data:** 2026-08-06
+**Origem:** `specs/fase-2a-requirements.md` v0.1 §7 (Fase 2a segue em gate 1,
+requisitos em revisão; §7 é a única parte executada aqui — dívida herdada da
+Fase 1, não corpo novo da Fase 2a).
+**Escopo:** RF-CON-01, RF-CON-02, RF-CON-03. Nenhum requisito do corpo
+principal da Fase 2a (slippage, ordens, custos expandidos, sizing,
+portfólio multi-ativo) foi tocado.
+
+### 1. Design v0.9 — antes de qualquer código
+
+`specs/00-plataforma/fase-1-design.md` §3.3 e §5.2, commit próprio
+(`ad17578`), conforme CLAUDE.md §1.
+
+- **§3.3** — barra cuja `date` é igual ou posterior à data UTC de execução
+  passa de quarentenada para **descartada com aviso**, avaliada antes de
+  ING-05.1. Razão registrada na spec: sessão em formação é dado incompleto,
+  não inválido; quarentenar toda ingestão que toque "hoje" era ruído
+  permanente e previsível, que treina o operador a ignorar a coleção de
+  quarentena em vez de investigá-la.
+- **§5.2** — `BacktestReport` ganha a seção `"run"` (nome/parâmetros da
+  estratégia, capital inicial, contagem de barras consumidas, datas
+  efetivas de início/fim). Razão: os parâmetros só existiam no nome do
+  arquivo, e um JSON isolado do repositório não permitia auditar o que o
+  produziu (PER-03.1 enfraquecido).
+
+### 2. RF-CON-01 — implementação
+
+| Peça | Onde |
+|---|---|
+| `MongoRepository.current_execution_date()` — único ponto novo de leitura do relógio | `storage/repository.py` |
+| `validate_bars(..., as_of: date, ...)` — parâmetro obrigatório, sem default | `ingestion/validator.py` |
+| `ValidationResult.discarded_bars` — campo próprio, separado de `quarantined_bars` | `ingestion/validator.py` |
+| `IngestionRepository.current_execution_date` no protocolo; `as_of` lido uma vez por run e propagado | `ingestion/orchestrator.py` |
+| `ingestion_runs.discarded_in_progress_count` — campo próprio no documento | `storage/repository.py` (`start_ingestion_run`, `finish_ingestion_run`) |
+| `FakeRepository.execution_date` (default no ano 2999, para não descartar fixture nenhuma por acidente) | `tests/support.py` |
+
+A checagem de descarte acontece **antes** de `_blocking_reasons`: uma barra
+de hoje com `close=nan` é descartada por RF-CON-01, não quarentenada por
+`non_finite_price`, mesmo violando aquela regra também — coberto por
+`test_bar_dated_today_is_discarded_not_quarantined`.
+
+A fronteira de instante do design §3.6 (só `ingestion/normalizer.py` e
+`storage/repository.py` tocam `datetime`/`UTC`) continua valendo e continua
+verificada pelo teste de arquitetura (`test_architecture_date_isolation.py`)
+sem alteração nenhuma nele — `validator.py` e `orchestrator.py` só ganharam
+um parâmetro `date`, que já era vocabulário livre.
+
+**Verificado contra ingestão real**, não só em teste: `python -m quantlab
+ingest --tickers AAPL --from 2026-08-01 --to 2026-08-06` (2026-08-06,
+antes da barra do dia existir na fonte) — `ingestion_runs` gravou
+`discarded_in_progress_count: 0` junto de `quarantined_count: 0`, os dois
+campos presentes e distintos. Zero é o resultado correto aqui: não havia
+barra de hoje na resposta do provedor no momento do teste, então não havia
+o quê descartar — o mecanismo dispara quando há dado a descartar, o teste
+confirma que ele não dispara por acidente quando não há.
+
+### 3. RF-CON-02 — implementação
+
+`BacktestReport.build()` passou a exigir `strategy_name` e `strategy_params`
+(antes só `strategy`/`benchmark`/`rf`). `bars_consumed` e as datas efetivas
+derivam da equity curve da própria estratégia
+(`len(strategy.equity_curve)`, `equity_curve[0].date`,
+`equity_curve[-1].date`) — não precisou passar a `PriceSeries` para
+`build()` só para isso, porque o laço do engine já registra um ponto de
+equity por barra consumida (design §4.3, ADR-0002).
+
+Dois testes novos em `test_report.py`:
+
+- `test_run_section_reports_strategy_params_bar_count_and_effective_window`
+  — CA-02.1, cada campo novo contra o valor esperado calculado no teste.
+- `test_full_run_configuration_is_reconstructible_from_the_json_alone` — o
+  critério de CA-02.2 em si. Constrói o relatório com parâmetros conhecidos
+  (`ticker`, `strategy_name`, `params`, `rf`, `costs`), serializa,
+  desserializa **isolado** (`json.loads(report.to_json())`, sem o objeto
+  `report` nem nome de arquivo) e compara campo a campo contra os
+  parâmetros **originais** — não contra `to_dict()` de novo, que só
+  provaria que a serialização é estável consigo mesma, não que carrega o
+  que foi pedido.
+
+`cli.py::run_backtest_flow` passa `strategy_name`/`strategy_params` ao
+`BacktestReport.build()` — já existiam como variáveis locais, usadas antes
+só para montar o documento de `backtest_runs`.
+
+### 4. Regeneração dos 20 relatórios
+
+Comando repetido para os 20 tickers de `config/universe.yml`, sem
+`--from`/`--to` além do default D5, sem tocar ingestão:
+
+```
+python -m quantlab backtest --strategy sma_cross --ticker <T> --fast 20 --slow 50
+```
+
+**Verificação pedida — feita antes de commitar:** extraí
+`provenance.series_hash` de cada um dos 20 JSONs antigos e dos 20 novos,
+ordenei por ticker, `diff`. **Idênticos, byte a byte, nos 20.** Confirma que
+a regeneração não tocou o pipeline de dados (ingestão intacta, mesmos
+parâmetros) — só o formato do relatório mudou. PNGs não regerados: nada no
+gráfico depende do formato do JSON.
+
+Efeito colateral esperado e aceito: cada `backtest` grava um novo documento
+em `backtest_runs` (sem upsert, por design §3.5) — os 20 runs anteriores
+continuam no banco, não foram substituídos.
+
+### 5. RF-CON-03 — README
+
+Parágrafo novo logo após a contagem de vitórias, antes de "Interpretação":
+explica que a divergência entre 19/20 (CAGR) e 17/20 (Sharpe) não são dois
+achados — é o mesmo mecanismo (sair da posição corta retorno e risco ao
+mesmo tempo) visto por duas métricas que pesam esse corte de forma
+diferente. AMZN e GOOGL vencem em Sharpe apesar de perderem em CAGR pelo
+mesmo motivo que META vence nos dois. Nem o resto do README nem o resultado
+foram suavizados — só a nota de leitura foi acrescentada, como o CA-03.1
+pede.
+
+### 6. Sequência de verificação e entrega
+
+| Comando | Resultado |
+|---|---|
+| `git status` (Parte 0, antes de começar) | sujo — `specs/fase-2a-requirements.md` untracked; commitado à parte antes do resto |
+| `make up` | healthy |
+| `make check` (após cada RF) | verde, 341 unitários / 97.12% cobertura |
+| `make test-integration` | verde, 60/60 |
+| Ingestão real (`ingest --tickers AAPL`) | RF-CON-01 confirmado no documento gravado |
+| Regeneração dos 20 relatórios + diff de hash | 20/20 idênticos |
+
+Commits pequenos, um por RF/parte, nenhum `git add .`:
+
+1. `docs(specs): versiona fase-2a-requirements v0.1`
+2. `docs(design): v0.9 — RF-CON-01/02`
+3. `feat(ingestion): RF-CON-01`
+4. `feat(analytics): RF-CON-02`
+5. `chore(results): regera os 20 relatórios`
+6. `docs(readme): RF-CON-03`
+7. `docs(state): fecha consolidação pré-Fase 2` (este commit)
+
+### 7. O que isto NÃO fez — para quem pegar a Fase 2a de verdade
+
+Nada do corpo de `specs/fase-2a-requirements.md` (§4: slippage, ordens,
+custos expandidos, sizing, portfólio multi-ativo) foi tocado. A spec
+continua em **gate 1, requisitos em revisão** — as questões abertas da
+seção 9 (Q1-Q5) seguem sem decisão fechada, e nenhuma linha de
+`engine/`/`strategies/` relativa a N-ativos foi escrita. Próximo passo real
+da Fase 2a é fechar o gate 1 (revisar §4-§6, decidir Q1-Q5) antes de
+qualquer design.
