@@ -61,7 +61,13 @@ def _build_report(n: int, *, costs: CostModel = _FREE, rf: float = 0.0) -> Backt
     series = _series(n)
     strategy_result = run_backtest(series, BuysOnceAtWarmup(warmup=2), costs=costs)
     benchmark_result = buy_and_hold(series, warmup=2, costs=costs)
-    return BacktestReport.build(strategy=strategy_result, benchmark=benchmark_result, rf=rf)
+    return BacktestReport.build(
+        strategy=strategy_result,
+        benchmark=benchmark_result,
+        strategy_name="buys_once_at_warmup",
+        strategy_params={"warmup": 2},
+        rf=rf,
+    )
 
 
 # ─── ANA-03.1: os seis itens, sempre ──────────────────────────────────────
@@ -188,3 +194,78 @@ def test_to_json_round_trips_to_the_same_dict() -> None:
     report = _build_report(40)
 
     assert json.loads(report.to_json()) == report.to_dict()
+
+
+# ─── RF-CON-02 (v0.9): relatório auto-suficiente ────────────────────────────
+
+
+@pytest.mark.unit
+def test_run_section_reports_strategy_params_bar_count_and_effective_window() -> None:
+    """CA-02.1 — parâmetros da estratégia, barras consumidas, datas efetivas."""
+    series = _series(10)
+    strategy_result = run_backtest(series, BuysOnceAtWarmup(warmup=2), costs=_FREE)
+    benchmark_result = buy_and_hold(series, warmup=2, costs=_FREE)
+    report = BacktestReport.build(
+        strategy=strategy_result,
+        benchmark=benchmark_result,
+        strategy_name="sma_cross",
+        strategy_params={"fast": 20, "slow": 50},
+        rf=0.0,
+    )
+
+    run = report.to_dict()["run"]
+    assert run["strategy"] == {"name": "sma_cross", "params": {"fast": 20, "slow": 50}}
+    assert run["initial_capital"] == strategy_result.initial_cash
+    # A série tem 10 barras; o laço registra um ponto de equity por barra
+    # consumida (design §4.3) — bars_consumed == len(series), não o tamanho
+    # de nenhum outro array.
+    assert run["bars_consumed"] == 10 == len(series)
+    assert run["effective_start"] == series.dates[0].isoformat()
+    assert run["effective_end"] == series.dates[-1].isoformat()
+
+
+@pytest.mark.unit
+def test_full_run_configuration_is_reconstructible_from_the_json_alone() -> None:
+    """CA-02.2 — o critério de aceitação em si: um JSON isolado, sem o nome
+    do arquivo nem `backtest_runs`, basta para reconstruir a configuração.
+
+    A comparação é campo a campo contra os parâmetros ORIGINAIS que
+    construíram o relatório — não contra `report.to_dict()` de novo, que só
+    provaria que a serialização é estável consigo mesma, não que carrega o
+    que foi pedido.
+    """
+    import json
+
+    original_ticker = "TEST"
+    original_strategy_name = "sma_cross"
+    original_params = {"fast": 20, "slow": 50}
+    original_rf = 0.01
+    original_costs = CostModel(fixed=1.0, rate=0.0001)
+
+    series = _series(40, ticker=original_ticker)
+    strategy_result = run_backtest(series, BuysOnceAtWarmup(warmup=2), costs=original_costs)
+    benchmark_result = buy_and_hold(series, warmup=2, costs=original_costs)
+    report = BacktestReport.build(
+        strategy=strategy_result,
+        benchmark=benchmark_result,
+        strategy_name=original_strategy_name,
+        strategy_params=original_params,
+        rf=original_rf,
+    )
+
+    # Isolado de propósito: nem `report`, nem o nome de arquivo — só a string
+    # JSON, como quem lê um `.json` copiado fora do repositório.
+    isolated = json.loads(report.to_json())
+
+    assert isolated["ticker"] == original_ticker
+    assert isolated["run"]["strategy"]["name"] == original_strategy_name
+    assert isolated["run"]["strategy"]["params"] == original_params
+    assert isolated["run"]["initial_capital"] == strategy_result.initial_cash
+    assert isolated["run"]["bars_consumed"] == len(series)
+    assert isolated["run"]["effective_start"] == series.dates[0].isoformat()
+    assert isolated["run"]["effective_end"] == series.dates[-1].isoformat()
+    assert isolated["assumptions"]["risk_free_rate"] == original_rf
+    assert isolated["assumptions"]["costs"] == {
+        "fixed": original_costs.fixed,
+        "rate": original_costs.rate,
+    }

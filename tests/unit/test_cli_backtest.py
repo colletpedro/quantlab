@@ -191,7 +191,13 @@ def test_build_run_document_records_costs_and_window() -> None:
     benchmark_result = buy_and_hold(
         series, warmup=strategy.warmup, initial_cash=10_000.0, costs=costs
     )
-    report = BacktestReport.build(strategy=strategy_result, benchmark=benchmark_result, rf=0.0)
+    report = BacktestReport.build(
+        strategy=strategy_result,
+        benchmark=benchmark_result,
+        strategy_name="sma_cross",
+        strategy_params={"fast": 2, "slow": 3},
+        rf=0.0,
+    )
 
     document = _build_run_document(
         ticker="AAPL",

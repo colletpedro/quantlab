@@ -9,7 +9,7 @@ formatos, texto para o CLI e um dicionário serializável em JSON para
 """
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pandas as pd
@@ -110,6 +110,16 @@ class BacktestReport:
     series_hash: str
     last_ingested_at: str | None
     insufficient_sample: bool
+    #: RF-CON-02 (v0.9, design §5.2) — o que produziu este run, dentro do
+    #: próprio relatório: sem isto, um JSON copiado ou lido fora do
+    #: repositório só é rastreável pelo nome do arquivo, que é convenção,
+    #: não dado.
+    strategy_name: str = ""
+    strategy_params: dict[str, Any] = field(default_factory=dict)
+    initial_cash: float = 0.0
+    bars_consumed: int = 0
+    effective_start: str = ""
+    effective_end: str = ""
 
     @classmethod
     def build(
@@ -117,9 +127,21 @@ class BacktestReport:
         *,
         strategy: BacktestResult,
         benchmark: BacktestResult,
+        strategy_name: str,
+        strategy_params: dict[str, Any],
         rf: float = 0.0,
     ) -> "BacktestReport":
-        """CA-02.1 — as mesmas métricas, lado a lado, de estratégia e benchmark."""
+        """CA-02.1 — as mesmas métricas, lado a lado, de estratégia e benchmark.
+
+        `strategy_name`/`strategy_params` são obrigatórios (v0.9, RF-CON-02):
+        sem eles não haveria como o relatório serializado se auto-descrever
+        (CA-02.1). `bars_consumed` e as datas efetivas vêm da equity curve da
+        estratégia — um ponto por barra consumida pelo laço (design §4.3),
+        então `len(strategy.equity_curve)` é exatamente `len(series)`, sem
+        precisar que `build()` receba a `PriceSeries` só para isso.
+        """
+        if not strategy.equity_curve:  # pragma: no cover - run_backtest já recusa série vazia
+            raise ValueError("BacktestResult sem equity curve: nada para reportar.")
         return cls(
             ticker=strategy.ticker,
             strategy=_summarize(strategy, rf),
@@ -129,6 +151,12 @@ class BacktestReport:
             series_hash=strategy.series_hash,
             last_ingested_at=strategy.last_ingested_at,
             insufficient_sample=len(strategy.equity_curve) < _MIN_SAMPLE_SIZE,
+            strategy_name=strategy_name,
+            strategy_params=dict(strategy_params),
+            initial_cash=strategy.initial_cash,
+            bars_consumed=len(strategy.equity_curve),
+            effective_start=strategy.equity_curve[0].date.isoformat(),
+            effective_end=strategy.equity_curve[-1].date.isoformat(),
         )
 
     @property
@@ -164,6 +192,17 @@ class BacktestReport:
                 "series_hash": self.series_hash,
                 "last_ingested_at": self.last_ingested_at,
             },
+            # RF-CON-02 (v0.9) — CA-02.2: a partir deste bloco sozinho,
+            # somado a `assumptions` acima, dá para reconstruir a
+            # configuração completa do run sem o nome do arquivo nem
+            # `backtest_runs`.
+            "run": {
+                "strategy": {"name": self.strategy_name, "params": dict(self.strategy_params)},
+                "initial_capital": self.initial_cash,
+                "bars_consumed": self.bars_consumed,
+                "effective_start": self.effective_start,
+                "effective_end": self.effective_end,
+            },
         }
 
     def to_json(self) -> str:
@@ -172,6 +211,10 @@ class BacktestReport:
     def to_text(self) -> str:
         lines = [
             f"Backtest — {self.ticker}",
+            f"  estratégia: {self.strategy_name} {self.strategy_params}",
+            f"  capital inicial: {self.initial_cash:,.2f}",
+            f"  barras consumidas: {self.bars_consumed} "
+            f"({self.effective_start} a {self.effective_end})",
             "",
             "Métricas                 estratégia        benchmark",
             f"  retorno acumulado      {self.strategy.cumulative_return:>14.2%}  "

@@ -316,7 +316,11 @@ def run_backtest_flow(
         series, warmup=strategy.warmup, initial_cash=settings.initial_capital, costs=costs
     )
     report = BacktestReport.build(
-        strategy=strategy_result, benchmark=benchmark_result, rf=settings.risk_free_rate
+        strategy=strategy_result,
+        benchmark=benchmark_result,
+        strategy_name=strategy_name,
+        strategy_params={"fast": fast, "slow": slow},
+        rf=settings.risk_free_rate,
     )
 
     document = _build_run_document(
