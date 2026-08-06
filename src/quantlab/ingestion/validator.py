@@ -16,6 +16,16 @@ Três famílias de regra:
 - **ING-05.3 (aviso).** Variação de fechamento a fechamento maior que 50% em
   valor absoluto, sem split registrado na data — indício de evento
   corporativo não capturado. Também não quarentena.
+
+Uma quarta família, à parte das três acima, entra na v0.9 (design §3.3,
+RF-CON-01): **RF-CON-01 — descarte de sessão em formação.** Uma barra cuja
+`date` é igual ou posterior a `as_of` (a data UTC do instante de execução,
+passada como parâmetro pelo chamador — a fronteira de instante continua
+restrita a `ingestion/normalizer.py` e `storage/repository.py`, design §3.6)
+não é dado inválido, é dado incompleto: o pregão ainda não fechou. Ela é
+**descartada com aviso**, avaliada *antes* de ING-05.1 — nunca chega a
+`quarantined_bars`, mesmo que também violasse alguma regra bloqueante (o caso
+mais comum sendo `close = nan` no pregão ainda em formação).
 """
 
 import math
@@ -46,8 +56,13 @@ class ValidationResult:
 
     valid_bars: list[Bar] = field(default_factory=list)
     quarantined_bars: list[QuarantinedBar] = field(default_factory=list)
-    #: Mensagens de ING-05.2/05.3 — não-bloqueantes, registradas no
-    #: `ingestion_run` por quem orquestra (B4), não escritas aqui.
+    #: RF-CON-01 (v0.9) — barras de sessão em formação, descartadas antes de
+    #: ING-05.1. Campo próprio, separado de `quarantined_bars`: as duas
+    #: coisas significam situações diferentes (dado incompleto vs. inválido).
+    discarded_bars: list[Bar] = field(default_factory=list)
+    #: Mensagens de ING-05.2/05.3 e do descarte de RF-CON-01 —
+    #: não-bloqueantes, registradas no `ingestion_run` por quem orquestra
+    #: (B4), não escritas aqui.
     warnings: list[str] = field(default_factory=list)
 
 
@@ -55,9 +70,10 @@ def validate_bars(
     bars: Sequence[Bar],
     corporate_actions: Sequence[CorporateAction],
     *,
+    as_of: date,
     ingestion_run_id: str | None = None,
 ) -> ValidationResult:
-    """Separa barras válidas de quarentenadas e coleta avisos não-bloqueantes.
+    """Separa barras válidas, descartadas e quarentenadas; coleta avisos.
 
     Args:
         bars: Barras de **um** ticker — a função ordena por data
@@ -66,6 +82,11 @@ def validate_bars(
         corporate_actions: Eventos do mesmo ticker, usados só para checar
             ING-05.3 (variação sem split correspondente). Não precisa ser
             filtrado por janela.
+        as_of: Data UTC do instante de execução da ingestão (design v0.9
+            §3.3, RF-CON-01) — obrigatória e sem default de propósito: quem
+            chama decide o relógio (`MongoRepository.current_execution_date`
+            em produção, uma data fixa em teste), este módulo permanece
+            função pura, sem `datetime.now()` escondido (RNF-01).
         ingestion_run_id: Referência cruzada gravada em cada
             `QuarantinedBar`, para rastrear a quarentena até o run que a
             produziu (design §3.3).
@@ -77,8 +98,23 @@ def validate_bars(
 
     valid: list[Bar] = []
     quarantined: list[QuarantinedBar] = []
+    discarded: list[Bar] = []
 
     for bar in ordered:
+        if bar.date >= as_of:
+            # RF-CON-01 — sessão em formação: dado incompleto, não inválido.
+            # Avaliada ANTES de ING-05.1, de propósito: uma barra de hoje com
+            # close=nan é descartada por este motivo, não quarentenada por
+            # `non_finite_price`, mesmo violando aquela regra também.
+            discarded.append(bar)
+            _log.warning(
+                "ingestion.bar_discarded_in_progress",
+                ticker=bar.ticker,
+                date=bar.date.isoformat(),
+                as_of=as_of.isoformat(),
+            )
+            continue
+
         reasons = _blocking_reasons(bar)
         if reasons:
             quarantined.append(
@@ -100,11 +136,25 @@ def validate_bars(
             valid.append(bar)
 
     # ING-05.2 e ING-05.3 avaliam sequência entre barras VÁLIDAS: uma barra
-    # quarentenada não é um pregão presente para fins de gap, e não é um
-    # ponto de comparação legítimo para variação.
+    # quarentenada (ou descartada) não é um pregão presente para fins de gap,
+    # e não é um ponto de comparação legítimo para variação.
     warnings = _sequence_warnings(valid, split_dates)
+    warnings.extend(_discard_warnings(discarded, as_of))
 
-    return ValidationResult(valid_bars=valid, quarantined_bars=quarantined, warnings=warnings)
+    return ValidationResult(
+        valid_bars=valid,
+        quarantined_bars=quarantined,
+        discarded_bars=discarded,
+        warnings=warnings,
+    )
+
+
+def _discard_warnings(discarded: Sequence[Bar], as_of: date) -> list[str]:
+    return [
+        f"Barra em formação descartada em {bar.ticker} {bar.date.isoformat()} "
+        f"(data >= data UTC da execução {as_of.isoformat()})."
+        for bar in discarded
+    ]
 
 
 def _blocking_reasons(bar: Bar) -> list[str]:

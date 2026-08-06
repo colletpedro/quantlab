@@ -42,6 +42,8 @@ class IngestionRepository(Protocol):
 
     def start_ingestion_run(self, tickers: Sequence[str], start: date, end: date) -> str: ...
 
+    def current_execution_date(self) -> date: ...
+
     def upsert_bars(self, bars: Sequence[Bar]) -> WriteReport: ...
 
     def upsert_corporate_actions(self, actions: Sequence[CorporateAction]) -> WriteReport: ...
@@ -57,6 +59,7 @@ class IngestionRepository(Protocol):
         bars_inserted: int,
         bars_modified: int,
         quarantined_count: int,
+        discarded_in_progress_count: int,
         warnings: Sequence[str],
     ) -> None: ...
 
@@ -80,6 +83,9 @@ class IngestionRunResult:
     bars_inserted: int
     bars_modified: int
     quarantined_count: int
+    #: RF-CON-01 (v0.9) — sessão em formação, campo próprio, separado de
+    #: `quarantined_count`.
+    discarded_in_progress_count: int
     warnings: tuple[str, ...]
 
     @property
@@ -103,7 +109,13 @@ def run_ingestion(
     daqui é bug de programação, não falha de dado — e deve mesmo propagar.
     """
     run_id = repository.start_ingestion_run(tickers=tickers, start=start, end=end)
-    _log.info("ingestion.run_started", run_id=run_id, tickers=list(tickers))
+    # RF-CON-01 (v0.9) — o relógio é lido uma única vez, aqui, na fronteira
+    # de instante (design §3.6). O validador recebe `as_of` como parâmetro e
+    # permanece função pura, sem consultar `datetime.now()` por conta própria.
+    as_of = repository.current_execution_date()
+    _log.info(
+        "ingestion.run_started", run_id=run_id, tickers=list(tickers), as_of=as_of.isoformat()
+    )
 
     succeeded: list[str] = []
     failed: list[TickerFailure] = []
@@ -111,6 +123,7 @@ def run_ingestion(
     total_inserted = 0
     total_modified = 0
     total_quarantined = 0
+    total_discarded_in_progress = 0
 
     for ticker in tickers:
         try:
@@ -120,7 +133,7 @@ def run_ingestion(
             raw_actions = provider.fetch_corporate_actions(ticker)
             actions = normalize_corporate_actions(ticker, raw_actions)
 
-            result = validate_bars(bars, actions, ingestion_run_id=run_id)
+            result = validate_bars(bars, actions, as_of=as_of, ingestion_run_id=run_id)
 
             bar_report = repository.upsert_bars(result.valid_bars)
             repository.upsert_corporate_actions(actions)
@@ -133,6 +146,7 @@ def run_ingestion(
         total_inserted += bar_report.inserted
         total_modified += bar_report.modified
         total_quarantined += quarantined_count
+        total_discarded_in_progress += len(result.discarded_bars)
         all_warnings.extend(f"{ticker}: {message}" for message in result.warnings)
         succeeded.append(ticker)
         _log.info(
@@ -142,6 +156,7 @@ def run_ingestion(
             inserted=bar_report.inserted,
             modified=bar_report.modified,
             quarantined=quarantined_count,
+            discarded_in_progress=len(result.discarded_bars),
         )
 
     repository.finish_ingestion_run(
@@ -151,6 +166,7 @@ def run_ingestion(
         bars_inserted=total_inserted,
         bars_modified=total_modified,
         quarantined_count=total_quarantined,
+        discarded_in_progress_count=total_discarded_in_progress,
         warnings=all_warnings,
     )
     _log.info(
@@ -168,5 +184,6 @@ def run_ingestion(
         bars_inserted=total_inserted,
         bars_modified=total_modified,
         quarantined_count=total_quarantined,
+        discarded_in_progress_count=total_discarded_in_progress,
         warnings=tuple(all_warnings),
     )

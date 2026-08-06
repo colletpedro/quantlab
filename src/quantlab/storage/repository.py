@@ -295,10 +295,24 @@ class MongoRepository:
             "bars_inserted": 0,
             "bars_modified": 0,
             "quarantined_count": 0,
+            "discarded_in_progress_count": 0,
             "warnings": [],
         }
         result = self._db[INGESTION_RUNS].insert_one(document)
         return str(result.inserted_id)
+
+    def current_execution_date(self) -> date:
+        """Data UTC do instante de execução — design v0.9 §3.3, RF-CON-01.
+
+        Único ponto de leitura do relógio para a regra de descarte de sessão
+        em formação: o validador (`ingestion/validator.py`) é função pura e
+        recebe esta data como parâmetro (`as_of`), em vez de consultar
+        `datetime.now()` por conta própria — RNF-01 proíbe não-determinismo
+        escondido dentro da lógica de negócio, e o teste de arquitetura
+        (B5) proíbe `datetime`/`UTC` fora deste arquivo e de
+        `ingestion/normalizer.py`.
+        """
+        return datetime.now(tz=UTC).date()
 
     def finish_ingestion_run(
         self,
@@ -309,9 +323,16 @@ class MongoRepository:
         bars_inserted: int,
         bars_modified: int,
         quarantined_count: int,
+        discarded_in_progress_count: int,
         warnings: Sequence[str],
     ) -> None:
-        """Fecha o `ingestion_run` com as contagens finais — design §3.4."""
+        """Fecha o `ingestion_run` com as contagens finais — design §3.4.
+
+        `discarded_in_progress_count` (v0.9) é campo próprio, separado de
+        `quarantined_count` — as duas coisas significam situações diferentes
+        (dado incompleto vs. dado inválido) e misturá-las esconderia a
+        distinção que RF-CON-01 existe para tornar visível.
+        """
         now = datetime.now(tz=UTC)
         self._db[INGESTION_RUNS].update_one(
             {"_id": ObjectId(run_id)},
@@ -323,6 +344,7 @@ class MongoRepository:
                     "bars_inserted": bars_inserted,
                     "bars_modified": bars_modified,
                     "quarantined_count": quarantined_count,
+                    "discarded_in_progress_count": discarded_in_progress_count,
                     "warnings": list(warnings),
                 }
             },

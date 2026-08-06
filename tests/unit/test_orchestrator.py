@@ -150,6 +150,39 @@ def test_quarantined_bar_carries_the_run_id() -> None:
 
 
 @pytest.mark.unit
+def test_in_progress_bar_is_discarded_not_quarantined() -> None:
+    """RF-CON-01 (v0.9) — a barra do pregão em formação some da contagem de
+    quarentena e ganha campo próprio, sem impedir o sucesso do ticker."""
+    two_bars = pd.DataFrame(
+        {
+            "Open": [100.0, 100.0],
+            "High": [101.0, 101.0],
+            "Low": [99.0, 99.0],
+            "Close": [100.5, 100.5],
+            "Volume": [1_000, 1_000],
+        },
+        index=pd.DatetimeIndex([pd.Timestamp(2024, 1, 2), pd.Timestamp(2024, 1, 3)]),
+    )
+    provider = ResilientProvider(FakeProvider(prices={"XYZ": two_bars}), sleep=_no_sleep)
+    # `as_of` = 2024-01-03: a barra de 03/01 ainda está em formação.
+    repository = FakeRepository(execution_date=date(2024, 1, 3))
+
+    result = run_ingestion(["XYZ"], _START, _END, provider=provider, repository=repository)
+
+    assert result.ok
+    assert result.bars_inserted == 1
+    assert result.quarantined_count == 0
+    assert result.discarded_in_progress_count == 1
+    assert len(repository.quarantined) == 0
+    assert len(repository.upserted_bars) == 1
+    assert repository.upserted_bars[0].date == date(2024, 1, 2)
+
+    call = repository.finished_calls[0]
+    assert call["discarded_in_progress_count"] == 1
+    assert call["quarantined_count"] == 0
+
+
+@pytest.mark.unit
 def test_warnings_are_prefixed_with_the_ticker() -> None:
     """Gap de pregões (ING-05.2) atravessa até o resultado final, identificável por ticker."""
     gapped = pd.DataFrame(
@@ -184,6 +217,7 @@ def test_ingestion_run_is_finished_with_final_counts() -> None:
     assert call["succeeded"] == ["AAPL"]
     assert call["failed"] == []
     assert call["bars_inserted"] == 3
+    assert call["discarded_in_progress_count"] == 0
 
 
 @pytest.mark.unit

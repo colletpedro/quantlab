@@ -91,9 +91,16 @@ class FakeRepository:
     quarantined: list[QuarantinedBar] = field(default_factory=list)
     finished_calls: list[dict[str, object]] = field(default_factory=list)
     next_run_id: str = "run-1"
+    #: Data UTC fixa devolvida por `current_execution_date` — RF-CON-01.
+    #: Bem à frente de qualquer fixture de teste por default, para que
+    #: nenhuma barra de teste seja descartada por acidente sem o teste pedir.
+    execution_date: date = date(2999, 1, 1)
 
     def start_ingestion_run(self, tickers: Sequence[str], start: date, end: date) -> str:
         return self.next_run_id
+
+    def current_execution_date(self) -> date:
+        return self.execution_date
 
     def upsert_bars(self, bars: Sequence[Bar]) -> WriteReport:
         self.upserted_bars.extend(bars)
@@ -118,6 +125,7 @@ class FakeRepository:
         bars_inserted: int,
         bars_modified: int,
         quarantined_count: int,
+        discarded_in_progress_count: int,
         warnings: Sequence[str],
     ) -> None:
         self.finished_calls.append(
@@ -128,6 +136,7 @@ class FakeRepository:
                 "bars_inserted": bars_inserted,
                 "bars_modified": bars_modified,
                 "quarantined_count": quarantined_count,
+                "discarded_in_progress_count": discarded_in_progress_count,
                 "warnings": list(warnings),
             }
         )
