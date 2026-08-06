@@ -208,8 +208,24 @@ Custos: USD 1 fixo + 1 bps por trade (default). Capital inicial: USD 100.000.
 | UNP | 1.40% | 10.75% | 0.167 | 0.530 | 30.27% | 40.50% | 32 | 51.6% | buy & hold |
 | XOM | 2.76% | 9.85% | 0.238 | 0.479 | 38.82% | 61.32% | 33 | 34.4% | buy & hold |
 
-**A estratégia perdeu para o buy-and-hold em CAGR em 19 dos 20 tickers.** Rf=0, sem
-correção para múltiplas hipóteses.
+**A estratégia perdeu para o buy-and-hold em CAGR em 19 dos 20 tickers, e em Sharpe em
+17 dos 20** (vence em Sharpe também em AMZN e GOOGL, além de META, que já vencia em
+CAGR). Rf=0, sem correção para múltiplas hipóteses.
+
+**Por que os dois números não coincidem (RF-CON-03).** A diferença não é um achado —
+é a assinatura da própria classe de estratégia. SMA cross sai da posição em toda
+reversão de tendência, e sair do mercado corta **os dois lados ao mesmo tempo**: o
+retorno que teria vindo do trecho evitado, e a volatilidade/drawdown que vinha junto.
+CAGR só enxerga o primeiro corte — por isso a estratégia perde nele quase sempre (19/20:
+o custo de oportunidade de ficar fora do mercado supera, quase sempre, o que se evita em
+queda). Sharpe divide retorno por risco, então enxerga os dois cortes ao mesmo tempo — e
+em AMZN e GOOGL o corte de risco foi grande o bastante para compensar o corte de
+retorno, mesmo com CAGR pior. Não é a estratégia "acertando o mercado" nesses dois
+tickers: é o mesmo mecanismo — sair da posição — sendo medido por uma métrica que
+credita reduzir variância, não só maximizar retorno. Tratar essas duas contagens
+diferentes como sinais contraditórios, ou como evidência de que Sharpe "descobriu" algo
+que CAGR não viu, seria ler ruído estrutural do próprio desenho da estratégia como
+informação nova.
 
 ### Interpretação
 
