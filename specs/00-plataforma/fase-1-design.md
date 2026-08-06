@@ -1,9 +1,10 @@
 # Fase 1 (MVP) — Design técnico
 
 **Status:** aprovada — gate check 2 concluído
-**Versão:** 0.8
-**Data:** 2026-08-04
-**Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0
+**Versão:** 0.9
+**Data:** 2026-08-06
+**Requisitos de origem:** `specs/00-plataforma/fase-1-requirements.md` v1.0,
+`specs/fase-2a-requirements.md` §7 (consolidação herdada da Fase 1)
 **ADRs vinculantes:** 0001, 0002, 0003, 0004
 
 > **Convenção de referência:** critérios de aceitação são citados com prefixo da família de requisito — `ENG-01.4` significa CA-01.4 de RF-ENG-01; `ANA-01.4` significa CA-01.4 de RF-ANA-01. A v0.1 citava CAs sem prefixo e colidia namespaces. Recomenda-se adotar a mesma convenção no requirements na próxima revisão dele.
@@ -128,6 +129,47 @@ A v0.1 referenciava quarentena sem desenhá-la. Fica desenhada aqui.
 **Decisões:** (a) coleção própria, e não flag em `bars` — uma barra inválida dentro de `bars` seria uma bomba esperando um `find` que esqueça o filtro; (b) payload bruto preservado, e não descartado com log — quarentena serve para diagnóstico, e diagnóstico precisa do dado original; (c) sem índice único — o mesmo par `(ticker, date)` pode ser quarentenado em runs diferentes, e o histórico interessa; índice simples `{ticker: 1, date: 1}` para consulta.
 
 Quarentena **não bloqueia** o run (diferente de falha de provedor, ING-04.1): as demais barras do ticker seguem, e o `ingestion_run` registra a contagem. Os avisos não-bloqueantes de ING-05.2 e ING-05.3 (gap de pregões, variação extrema sem split) **não** quarentenam — são registrados como `warnings` no `ingestion_run`, porque a barra em si é plausível; o que é suspeito é o contexto.
+
+**Barra do pregão corrente — descarte, não quarentena (v0.9 — RF-CON-01).** Uma
+ingestão que vai até "hoje" traz, na última posição da série, a sessão em
+formação: preços parciais, e `close` que pode vir `NaN` porque o pregão ainda
+não fechou. Antes desta versão, essa barra era tratada como qualquer outra —
+o preço não finito acionava `non_finite_price` e ela ia para quarentena. Na
+prática isso significava que **toda** ingestão que tocasse o dia corrente
+reportava uma quarentena, sempre a mesma, sempre a mesma causa: ruído
+permanente e previsível, que treina quem opera a ignorar a contagem de
+quarentena em vez de investigá-la — o oposto do que a coleção existe para
+fazer.
+
+A distinção que faltava: sessão em formação não é dado **inválido**, é dado
+**incompleto**. Quarentena é para o primeiro caso (`high < low`, preço ≤ 0,
+`NaN` num pregão já fechado — sinal de que o provedor devolveu algo
+corrompido). Uma barra cuja data ainda não fechou não é um provedor mentindo,
+é o calendário: ela vai ficar completa amanhã, ingerida de novo, e entrar
+normalmente.
+
+**Regra:** uma barra cuja `date` é **igual ou posterior** à data UTC do
+instante de execução da ingestão é **descartada com aviso**, antes de
+qualquer regra de ING-05.1 ser avaliada para ela — não entra em `bars` nem em
+`quarantined_bars`. A checagem acontece primeiro: uma barra do dia corrente
+com `close = nan` é descartada por este motivo, não quarentenada por
+`non_finite_price`, mesmo que também violasse aquela regra.
+
+**Fronteira de instante (§3.6 continua valendo).** A data UTC de execução é
+obtida uma única vez por run, na camada de repositório (o único lugar,
+junto de `ingestion/normalizer.py`, autorizado a tocar `datetime`/`UTC`), e
+passada como parâmetro explícito (`as_of: date`) para o validador — que
+continua sendo função pura de `list[Bar]` para `ValidationResult`, testável
+com uma data injetada, sem relógio escondido dentro da lógica de negócio
+(RNF-01).
+
+**Contagem em campo próprio (CA-01.2).** `ingestion_runs` ganha
+`discarded_in_progress_count`, separado de `quarantined_count` — os dois
+significam coisas diferentes e misturá-los esconderia a distinção que esta
+seção inteira existe para fazer. Uma ingestão diária contra o universo
+completo deve mostrar rotineiramente `discarded_in_progress_count = 20` (uma
+por ticker, a barra de hoje) e `quarantined_count = 0` — o oposto do padrão
+de ruído permanente que motivou esta mudança.
 
 ### 3.4 Coleção `ingestion_runs`
 
@@ -374,6 +416,46 @@ O benchmark compra ao `open[warmup + 1]`, com os mesmos custos de entrada, e é 
 
 `BacktestReport` é um dataclass renderizado em dois formatos: texto para o CLI e JSON persistido em `backtest_runs`. Contém métricas lado a lado com o benchmark, premissas declaradas (`rf = 0`, custos configurados, tratamento de dividendo via ajuste de preço), e a seção fixa de vieses.
 
+**Relatório auto-suficiente (v0.9 — RF-CON-02).** Até esta versão, os
+parâmetros da estratégia (`fast`, `slow`) só existiam no **nome do arquivo**
+(`AAPL_sma_cross_20_50.json`) e no documento de `backtest_runs` — nunca dentro
+do próprio JSON. Um relatório copiado, anexado a um review ou lido fora do
+repositório não permitia a quem o lesse reconstruir o que o produziu: o nome
+do arquivo é convenção, não dado, e nada impede um `mv` de quebrar essa
+convenção silenciosamente. Isso enfraquece PER-03.1 — proveniência que
+depende do nome do arquivo não é proveniência.
+
+`BacktestReport.build()` passa a receber, além do par de `BacktestResult`
+(estratégia e benchmark): `strategy_name`, `strategy_params` (dict — `{fast,
+slow}` para `sma_cross`, livre para estratégias futuras), e o `initial_cash`
+usado no run. `bars_consumed` e as datas efetivas de início/fim vêm da série
+consumida (`len(series)`, `series.dates[0]`, `series.dates[-1]`) — "efetivas"
+porque podem diferir do `--from`/`--to` pedido: a primeira barra disponível
+pode ser posterior ao início pedido (IPO, início de cobertura do provedor), e
+a última pode ser anterior ao fim pedido (dado ainda não ingerido).
+
+`to_dict()` ganha uma seção `"run"`:
+
+```json
+"run": {
+  "strategy": {"name": "sma_cross", "params": {"fast": 20, "slow": 50}},
+  "initial_capital": 100000.0,
+  "bars_consumed": 2912,
+  "effective_start": "2015-01-02",
+  "effective_end": "2026-07-31"
+}
+```
+
+**Critério de aceitação verificável (CA-02.2):** a partir do JSON isolado —
+sem o nome do arquivo, sem o documento de `backtest_runs`, sem o repositório
+— é possível reconstruir a configuração completa do run: ticker, estratégia e
+seus parâmetros, capital inicial, janela efetivamente consumida, custos
+(já presente em `assumptions.costs`) e taxa livre de risco (já presente em
+`assumptions.risk_free_rate`). Um teste monta um relatório com parâmetros
+conhecidos, serializa, desserializa de volta e compara campo a campo contra
+os parâmetros originais — não contra o texto do JSON, para não validar a
+serialização contra si mesma.
+
 A seção de vieses é **constante literal no código**, não texto montado condicionalmente. Um relatório sem ela é impossível de produzir. Conteúdo integral da constante:
 
 1. **Survivorship bias** — universo fixo de sobreviventes; retornos inflados por construção.
@@ -411,6 +493,7 @@ O item 5 é consequência direta de ADR-0003 + premissa 3 do requirements (sem f
 
 | Versão | Data | Mudança |
 |---|---|---|
+| 0.9 | 2026-08-06 | Consolidação de pendências herdadas da Fase 1, §7 de `specs/fase-2a-requirements.md`, antes de qualquer trabalho novo de Fase 2. (1) §3.3 — barra do pregão corrente (data ≥ data UTC de execução) passa de quarentenada para **descartada com aviso**, avaliada antes de ING-05.1; `ingestion_runs` ganha `discarded_in_progress_count`, separado de `quarantined_count`. Razão: quarentenar sessão em formação gerava uma quarentena idêntica em toda ingestão que tocasse "hoje", ruído permanente que treina a ignorar a coleção. (2) §5.2 — `BacktestReport` ganha seção `"run"` (nome e parâmetros da estratégia, capital inicial, contagem de barras consumidas, datas efetivas de início/fim), para o relatório serializado ser auditável isoladamente, sem depender do nome do arquivo nem de `backtest_runs`. |
 | 0.8 | 2026-08-04 | §3.3 — preço não finito (`NaN`/infinito) adicionado às regras de quarentena bloqueante de ING-05.1, em par com a mesma correção no requirements (v1.1). Bug real, não hipotético: exposto rodando F4 contra dado do yfinance, onde o pregão do dia corrente (ainda em formação no momento da consulta) veio com `close = nan`, e as comparações de desigualdade existentes deixavam passar — `NaN` não satisfaz nenhuma delas. |
 | 0.7 | 2026-08-04 | F1 (Bloco F) define o índice de `backtest_runs` que a v0.3 tinha adiado: `{ticker: 1, "strategy.name": 1, created_at: -1}` (3.5), mesmo padrão que `ingestion_runs` recebeu em B4. Aproveitado para corrigir `ingestion_run_id` — listado como campo do documento desde a v0.1, mas removido de `PriceSeries` já na v0.3 (3.7) sem que esta lista fosse atualizada; PER-03.1 continua atendido por `series_hash` + `last_ingested_at`. |
 | 0.6 | 2026-08-04 | Fecha três das quatro ambiguidades registradas em HANDOFF §"Correção de A7 + Bloco C" (a quarta, nomes de teste do ADR-0004, já fora corrigida por errata no próprio ADR). Todas as três são precisão de documentação sobre decisões já tomadas e testadas no Bloco C — nenhuma muda comportamento. (1) §4.3 reescrita: a sequência de três passos do laço não é uma cadeia total — só 1-antes-de-2 e 1-antes-de-3 são restrições reais; a ordem entre 2 e 3 é livre (ENG-05.2) e travada por teste dedicado, não presumida; (2) §4.5 — `exit_decision_date` adicionado ao struct de `Trade`, por simetria com `entry_decision_date`, já implementado desde o Bloco C; (3) §4.2 — precisão sobre Q2: `EXIT` sem posição não só é "ignorado e logado", a ordem pendente correspondente é **consumida**, não retida para a barra seguinte — reter reintroduziria lookahead pela fila. Q4 adicionada à tabela de decisões (7) para ficar no mesmo formato de Q1-Q3. |
