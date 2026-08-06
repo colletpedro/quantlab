@@ -46,5 +46,18 @@
   "provenance": {
     "series_hash": "940ea82b8ec6c1f48c2f4b72fa701d9d79cef0f4098901f9cf7af844b2bceab0",
     "last_ingested_at": "2026-08-04T05:31:25.769000+00:00"
+  },
+  "run": {
+    "strategy": {
+      "name": "sma_cross",
+      "params": {
+        "fast": 20,
+        "slow": 50
+      }
+    },
+    "initial_capital": 100000.0,
+    "bars_consumed": 2911,
+    "effective_start": "2015-01-02",
+    "effective_end": "2026-07-31"
   }
 }
