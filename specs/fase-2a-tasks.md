@@ -559,8 +559,8 @@ CLI completa com flags novas (não pedida na v0.2 — runner programático basta
 
 **Critério de verificação**
 
-- [ ] `make up` + `make test-integration` verde (run real contra Mongo)
-- [ ] Run de 20 ativos roda ponta a ponta; conciliação CA-04.2 passa no run real; RNF-04 medido < 30 s no harness declarado
+- [ ] `make up` + `make test-integration` verde (hermético — o job de integração do CI sobe Mongo fresco, sem ingestão; os dados do teste são sintéticos RNF-03 no banco descartável, e o run passa pelo stack real storage → engine → analytics)
+- [ ] Run de 20 ativos roda ponta a ponta; conciliação CA-04.2 passa no run real; RNF-04 medido < 30 s no harness declarado — **a verificação do run REAL é o artefato persistido** (`results/fase_2a_run_20_ativos.json` + `scripts/e2e_run_20.py`); o teste de integração guarda os invariantes (determinismo + CA-04.2 + benchmark 1/N) de forma automática e reproduzível no CI
 - [ ] Relatório contém: benchmark 1/N lado a lado, contadores de mecanismo, seção run com N=20 e tickers
 - [ ] Resultado commitado em `results/` como saiu, com a seção de vieses declarada; README atualizado se a narrativa mudar
 - [ ] Checklist de encerramento abaixo integralmente ✅
