@@ -361,7 +361,7 @@ Alto — é o C5 da Fase 2a. Inverter executar-antes-de-consultar reintroduz loo
 **Arquivos:** `src/quantlab/engine/backtest.py` (estendido), `tests/unit/test_backtest.py`
 
 **Escopo**
-Mark-to-market por **último close conhecido** para ativo sem barra na data-união (CA-05.2/POR-02.2); deslistagem = posição travada e reportada (POR-02.3); atendimento **alfabético** com caixa insuficiente, ordem não-atendida logada e contada (CA-01.2); segunda entrada na mesma barra vê o caixa **já debitado** pela primeira (ORD-04.3).
+Mark-to-market por **último close conhecido** para ativo sem barra na data-união (CA-05.2/POR-02.2); deslistagem = posição travada e reportada (POR-02.3 — `BacktestResultMulti.delisted`, emenda §3.6: tickers com posição ABERTA cuja série terminou antes do fim da união; marcadas pelo último close, nunca liquidadas); atendimento **alfabético** com caixa insuficiente, ordem não-atendida logada (CA-01.2); segunda entrada na mesma barra vê o caixa **já debitado** pela primeira (ORD-04.3).
 
 **Fora do escopo**
 Laço/instâncias/ADR-0002 por ativo (T11a); contadores de mecanismo no relatório (T16); conciliação somando N ativos (T13); benchmark (T15 — a deslistagem do benchmark repete esta regra).

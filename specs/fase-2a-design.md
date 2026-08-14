@@ -356,6 +356,9 @@ class BacktestResultMulti:
     cap: float
     calendar: UnionCalendar
     pending_dead: dict[str, int]         # ENG-01.4 por ativo — intenções mortas na última barra
+    delisted: tuple[str, ...]            # posições ABERTAS travadas por deslistagem (POR-02.3) —
+                                        # série terminou antes do fim da união; marcadas pelo último
+                                        # close, nunca liquidadas; reportadas (T16) — emenda T11b
 ```
 
 ```python
