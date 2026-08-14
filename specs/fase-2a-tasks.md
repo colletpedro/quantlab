@@ -147,7 +147,7 @@ Baixo. Defaults não-determinísticos seriam a falha de gate 3 — o teste de f�
 **Arquivos:** `src/quantlab/engine/sizing.py` (novo), `tests/unit/test_sizing.py` (novo)
 
 **Escopo**
-`SizingInputs` (patrimônio, caixa, posições, último close por ativo, `n`); Protocol `Sizer.target_fraction(ticker, inputs)` devolvendo fração; `FixedOneOverN` (`1/n`, N fixado no run, `N=1 ⇒ 1.0` all-in); `EqualWeightOpen` (`1/k`, `threshold_pp=1.0`) — só a política, sem o gatilho de rebalance (T11).
+`SizingInputs` (patrimônio, caixa, posições, último close por ativo, `n` — com `positions: dict[str, int]` ticker → quantidade, emenda §3.4: o sizer consome só quantidade, nunca `Position` da Fase 1); Protocol `Sizer.target_fraction(ticker, inputs)` devolvendo fração; `FixedOneOverN` (`1/n`, N fixado no run, `N=1 ⇒ 1.0` all-in); `EqualWeightOpen` (`1/k`, `threshold_pp=1.0`) + helper puro `rebalance_deviation_pp` (SIZ-03.3) — só a política, sem o gatilho de rebalance (T11).
 
 **Fora do escopo**
 Gatilho de rebalance por mudança de `k` e limiar em pp (T11); conversão de fração em quantidade (T06); invariante `k ≤ N` (T11); ativo sem barra nunca recebe alvo (T11, provado na T13).

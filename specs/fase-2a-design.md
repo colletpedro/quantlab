@@ -195,7 +195,7 @@ def participation_cap(qty: int, adv: float, cap: float = 0.10) -> int:
 class SizingInputs:
     equity: float
     cash: float
-    positions: dict[str, Position]    # por ativo
+    positions: dict[str, int]         # por ativo: ticker → QUANTIDADE (T04)
     last_close: dict[str, float]      # por ativo
     n: int                            # ativos do RUN, fixado no início (SIZ-02.1/P3)
 
@@ -211,9 +211,16 @@ class FixedOneOverN(Sizer):           # default (ADR-0008)
 @dataclass(frozen=True)
 class EqualWeightOpen(Sizer):         # opcional, configurável (SIZ-03)
     threshold_pp: float = 1.0         # limiar |w − 1/k| em pp absolutos do patrimônio (SIZ-03.3)
-    # rebalance é disparado pelo engine apenas em mudança de k (SIZ-03.1/03.4) e executa no próximo open (ADR-0002)
+    def target_fraction(self, ticker, inputs) -> float:
+        k = len(inputs.positions)     # posições abertas distintas
+        return 1.0 / k                # 1/k (SIZ-03.1); k=0 ⇒ EngineError (1/0 indefinido)
+
+# helper PURO de limiar (SIZ-03.3) — o gatilho (≥ threshold_pp, só em mudança de k) é do laço (T11a)
+def rebalance_deviation_pp(weight_fraction: float, k: int) -> float:
+    """Desvio |w − 1/k| em pp absolutos do patrimônio."""
 ```
 
+- **`SizingInputs.positions` é `dict[str, int]` (ticker → quantidade), não `dict[str, Position]` (emenda T04):** o `Position` da Fase 1 (`engine/portfolio.py`) carrega `entry_price`/`entry_date` que o sizer nunca consome — arrastaria data para o módulo folha sem necessidade. O broker (T06) constrói o `SizingInputs` extraindo a quantidade do `Portfolio`; a conversão de fração em quantidade é do broker (SIZ-01.2).
 - **Invariante `k ≤ N` (SIZ-04.3):** checada a cada barra pelo laço (§4), como erro de programação — nunca mais posições abertas que ativos no run.
 
 ### 3.5 Broker e ciclo de vida de ordens — `engine/broker.py` (estendido)
