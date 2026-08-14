@@ -431,7 +431,7 @@ Para cada índice-união `u` em `0..D-1` (em cada fase, ativos processados em **
 | Bracket de **entrada** (limite L + stop S), ambos tocados na mesma barra | Posição **abre em L** e **fecha no stop S** na mesma barra ⇒ perda realizada `(L − S + custos)`, fica **flat** | `True` |
 | Bracket de **saída** (take-profit limite + stop sobre posição aberta), ambos tocados | O **stop preenche em S** (pior que o limite) | `True` |
 
-Ambos os casos incrementam `MechanismCounters.intrabar_ambiguities` (MET-05). Stop só fica vivo **após a entrada preencher** (ORD-02.2).
+Ambos os casos incrementam `MechanismCounters.intrabar_ambiguities` (MET-05). Stop só fica vivo **após a entrada preencher** (ORD-02.2). **Sem stop órfão (T09):** se o limite de ENTRADA do bracket CANCELA ao fim da barra (Q2), o stop do MESMO par sai do book junto — a intenção morreu; nunca fica um stop flutuando esperando uma posição que não abriu. Nos fills, a ambiguidade usa os preços das ordens (abre em L, fecha em S — sem slippage, conforme a tabela).
 
 ## 5. Calendário-união — algoritmo e complexidade (D1)
 
