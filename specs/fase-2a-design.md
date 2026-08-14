@@ -334,7 +334,10 @@ class Portfolio:
     positions: dict[str, Position]              # por ativo — modelo N desde a Fase 1 (D4)
     trades: list[Trade]
     pending: PendingBook                        # por ativo — emenda T07 (broker.py); ADR-0002 por ativo (POR-05.3)
+    marks: dict[str, float]                     # último close conhecido por ativo (POR-02.2) — emenda T10
     def market_to_market(self, close_by_ticker: dict[str, float]) -> None: ...
+    def equity(self, prices: dict[str, float] | None = None) -> float: ...   # Fase 1 preservada; sem arg ⇒ usa marks (POR-04.1)
+    def check_invariants(self, n: int | None = None) -> None: ...            # n ⇒ k ≤ N (POR-04.3/SIZ-04.3); Fase 1 sem arg preservada
 ```
 
 ```python
@@ -387,7 +390,8 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `Broker.cancel_all(store, ticker)` | — | delega ao store — todas as pendentes do ativo canceladas, incluindo stops (ORD-04.1) | — |
 | `Broker.execute_pending(store, ticker, bar, portfolio, cost_model, slippage, adv)` | `bar` é a próxima barra do próprio ativo (ADR-0002 por ativo, POR-05.3); preços > 0 | mercado ao open + slippage (SLP-04.1); limite a `min/max(L, open)` ou cancelado ao fim da barra (ORD-01.1/01.3), nunca violado (SLP-04.2); stop a `min(S, open)` + slippage (ORD-02.1), só com posição, persiste quando não disparado (ORD-02.2); custos fora do preço (SLP-04.3); `origin` no Trade (ORD-04.4); caixa nunca negativo; consumidas/removidas do store | `EngineError` se preço ≤ 0 ou barra malformada |
 | `Broker.cancel_all(ticker)` | — | todas as pendentes do ativo canceladas, incluindo stops (ORD-04.1) | — |
-| `Portfolio.market_to_market(close_by_ticker)` | `close_by_ticker` cobre todos os ativos com posição (último close conhecido — POR-02.2) | equity consistente com a identidade de POR-04.1 | — |
+| `Portfolio.market_to_market(close_by_ticker)` | `close_by_ticker` cobre todos os ativos com posição (último close conhecido — POR-02.2) | atualiza `marks` (último close conhecido por ativo); `equity()` sem argumento deriva de `marks` e é consistente com a identidade de POR-04.1 | — |
+| `Portfolio.check_invariants(n=None)` | `n ≥ 1` quando dado | `cash ≥ 0`; `qty[X] ≥ 0` ∀X; com `n`, `k ≤ n` (POR-04.3/SIZ-04.3) — violação = erro de programação (`EngineError`) | `EngineError` se `n < 1` |
 | `Trade` | campos obrigatórios preenchidos na criação | `origin`/`cut_reason`/`ambiguous` auditáveis (ORD-04.4/CST-01.3/ORD-03.1) | — |
 | `MechanismCounters` | — | contagens incrementadas apenas pelo engine, categorias próprias (MET-05) | — |
 | `buy_and_hold_multi(series, n, cost_cfg, slippage, cap)` | mesmo universo/N do run (P3); mesmas regras de entrada | compra cada ativo na primeira barra negociável do próprio ativo; caixa ocioso; sem rebalance; deslistagem travada (MET-02.1–02.4) | — |
