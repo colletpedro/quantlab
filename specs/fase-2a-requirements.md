@@ -454,7 +454,10 @@ escopo novo** (decisão S8). Nada da 2a reabre estes RFs; eles valem como estão
 - **RF-CON-02** — relatório auto-suficiente, com parâmetros da estratégia, contagem de
   barras consumidas e datas efetivas de início e fim (CA-02.1/02.2).
 - **RF-CON-03** — nota de leitura no README explicando a diferença entre 19/20 em CAGR e
-  17/20 em Sharpe (CA-03.1).
+  17/20 em Sharpe (CA-03.1). *(Errata 2026-08-14: após a regeneração pós-back-out de
+  splits, o placar de Sharpe passou a 19/20 — as vitórias de AMZN/GOOGL eram artefato
+  do split duplicado; o README atualizado explica o placar vigente. O CA-03.1 continua
+  valendo: a nota de leitura existe e é consistente com os números publicados.)*
 
 ## 8. Decisões fechadas — Q1–Q5 e resolução de S1–S10
 
