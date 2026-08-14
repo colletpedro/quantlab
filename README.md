@@ -175,9 +175,8 @@ quantlab/
 ## Resultados
 
 **SMA cross, parâmetros fixos `fast=20, slow=50`, em todos os 20 tickers do universo
-default, janela 2015-01-01 até a última barra disponível (2026-07-31 — o pregão de
-2026-08-03 foi quarentenado em todos os tickers por preço não finito retornado pelo
-provedor; ver [Limitações](#limitações-conhecidas)).**
+default, janela 2015-01-01 até a última barra disponível (2026-07-31 na maioria dos
+tickers; AAPL a 2026-08-05).**
 
 Nenhuma varredura de parâmetros, nenhuma seleção de tickers favoráveis, nenhum recorte
 de janela. `fast`/`slow` foram escolhidos uma vez, antes de rodar, e usados em todos os
@@ -187,13 +186,13 @@ Custos: USD 1 fixo + 1 bps por trade (default). Capital inicial: USD 100.000.
 
 | Ticker | CAGR estratégia | CAGR buy & hold | Sharpe estratégia | Sharpe buy & hold | Max DD estratégia | Max DD buy & hold | Trades | Taxa de acerto | Vencedor (CAGR) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| AAPL | 27.08% | 39.29% | 0.433 | 0.539 | 28.01% | 38.52% | 33 | 46.9% | buy & hold |
+| AAPL | 12.77% | 22.63% | 0.709 | 0.854 | 28.00% | 38.67% | 33 | 50.0% | buy & hold |
 | AMT | 1.57% | 8.05% | 0.177 | 0.430 | 48.09% | 45.34% | 31 | 38.7% | buy & hold |
-| AMZN | 11.66% | 64.63% | 0.571 | 0.346 | 56.65% | 44.20% | 28 | 50.0% | buy & hold |
+| AMZN | 11.56% | 26.50% | 0.574 | 0.878 | 54.89% | 56.15% | 28 | 46.4% | buy & hold |
 | BRK-B | 3.21% | 11.65% | 0.316 | 0.673 | 27.12% | 29.55% | 32 | 48.4% | buy & hold |
 | CAT | 13.35% | 25.52% | 0.669 | 0.893 | 56.16% | 43.36% | 29 | 44.8% | buy & hold |
 | CVX | 0.10% | 10.09% | 0.096 | 0.478 | 49.45% | 55.76% | 34 | 36.4% | buy & hold |
-| GOOGL | 14.80% | 62.73% | 0.748 | 0.345 | 45.25% | 31.66% | 28 | 64.3% | buy & hold |
+| GOOGL | 15.59% | 25.04% | 0.785 | 0.913 | 40.71% | 44.32% | 29 | 62.1% | buy & hold |
 | HD | 4.57% | 12.28% | 0.351 | 0.599 | 27.55% | 37.98% | 30 | 55.2% | buy & hold |
 | JNJ | 3.05% | 11.49% | 0.296 | 0.687 | 31.15% | 27.37% | 36 | 42.9% | buy & hold |
 | JPM | 12.33% | 19.70% | 0.744 | 0.802 | 24.15% | 43.62% | 27 | 61.5% | buy & hold |
@@ -201,31 +200,52 @@ Custos: USD 1 fixo + 1 bps por trade (default). Capital inicial: USD 100.000.
 | LIN | 6.37% | 14.55% | 0.466 | 0.718 | 34.43% | 32.58% | 29 | 53.6% | buy & hold |
 | META | 19.25% | 18.57% | 0.803 | 0.641 | 35.87% | 76.73% | 27 | 53.8% | **estratégia** |
 | MSFT | 9.78% | 25.13% | 0.563 | 0.953 | 39.81% | 37.15% | 30 | 50.0% | buy & hold |
-| NEE | 18.95% | 28.59% | 0.366 | 0.459 | 32.96% | 44.97% | 30 | 51.7% | buy & hold |
-| NVDA | 96.70% | 132.40% | 0.519 | 0.591 | 64.79% | 66.34% | 30 | 60.0% | buy & hold |
+| NEE | 3.75% | 12.73% | 0.299 | 0.611 | 35.47% | 44.97% | 31 | 50.0% | buy & hold |
+| NVDA | 39.28% | 67.48% | 1.067 | 1.307 | 64.81% | 66.36% | 29 | 58.6% | buy & hold |
 | PG | 2.37% | 7.93% | 0.250 | 0.502 | 30.76% | 23.77% | 34 | 51.5% | buy & hold |
 | UNH | 2.02% | 13.36% | 0.203 | 0.577 | 62.36% | 61.39% | 31 | 46.7% | buy & hold |
 | UNP | 1.40% | 10.75% | 0.167 | 0.530 | 30.27% | 40.50% | 32 | 51.6% | buy & hold |
 | XOM | 2.76% | 9.85% | 0.238 | 0.479 | 38.82% | 61.32% | 33 | 34.4% | buy & hold |
 
-**A estratégia perdeu para o buy-and-hold em CAGR em 19 dos 20 tickers, e em Sharpe em
-17 dos 20** (vence em Sharpe também em AMZN e GOOGL, além de META, que já vencia em
-CAGR). Rf=0, sem correção para múltiplas hipóteses.
+**A estratégia perdeu para o buy-and-hold em CAGR em 19 dos 20 tickers e em Sharpe em
+19 dos 20 — META é o único ticker em que a estratégia vence, em ambas as métricas.**
+Rf=0, sem correção para múltiplas hipóteses.
 
-**Por que os dois números não coincidem (RF-CON-03).** A diferença não é um achado —
-é a assinatura da própria classe de estratégia. SMA cross sai da posição em toda
-reversão de tendência, e sair do mercado corta **os dois lados ao mesmo tempo**: o
-retorno que teria vindo do trecho evitado, e a volatilidade/drawdown que vinha junto.
-CAGR só enxerga o primeiro corte — por isso a estratégia perde nele quase sempre (19/20:
-o custo de oportunidade de ficar fora do mercado supera, quase sempre, o que se evita em
-queda). Sharpe divide retorno por risco, então enxerga os dois cortes ao mesmo tempo — e
-em AMZN e GOOGL o corte de risco foi grande o bastante para compensar o corte de
-retorno, mesmo com CAGR pior. Não é a estratégia "acertando o mercado" nesses dois
-tickers: é o mesmo mecanismo — sair da posição — sendo medido por uma métrica que
-credita reduzir variância, não só maximizar retorno. Tratar essas duas contagens
-diferentes como sinais contraditórios, ou como evidência de que Sharpe "descobriu" algo
-que CAGR não viu, seria ler ruído estrutural do próprio desenho da estratégia como
-informação nova.
+**Por que o placar é o mesmo nas duas métricas (RF-CON-03).** SMA cross sai da posição
+em toda reversão de tendência, e sair do mercado corta **os dois lados ao mesmo
+tempo**: o retorno que teria vindo do trecho evitado, e a volatilidade/drawdown que
+vinha junto. CAGR perde quase sempre (19/20: o custo de oportunidade de ficar fora do
+mercado supera, quase sempre, o que se evita em queda) e Sharpe só vira a favor quando
+o corte de risco compensa o corte de retorno — o que acontece num único ticker aqui
+(META, que evitou parte da queda de 76.7% de 2021-2022). Não é a estratégia
+"acertando o mercado": é o mesmo mecanismo — sair da posição — medido por duas
+métricas que pesam esse corte de forma diferente.
+
+> **Atualização 2026-08-14 (pós-correção de splits).** A versão anterior desta nota
+> reportava 17/20 em Sharpe, com AMZN e GOOGL vencendo o buy-and-hold em Sharpe apesar
+> de perderem em CAGR. Após a correção da dupla contagem de splits e a regeneração dos
+> relatórios (ver [abaixo](#regeneração-após-a-correção-de-splits-2026-08-14)), essas
+> duas vitórias desapareceram: eram artefato do retorno do buy-and-hold inflado pelo
+> salto espúrio do ajuste na data do split, não o mecanismo. Com os dados corretos, os
+> dois placares coincidem (19/20 em ambos).
+
+### Regeneração após a correção de splits (2026-08-14)
+
+Os 20 relatórios desta seção foram regenerados sobre a base corrigida (back-out da
+dupla contagem de splits, 2026-08-14 — ver [docs/STATE.md](docs/STATE.md)).
+Verificação de inocuidade: os **15 tickers sem split na janela têm `series_hash`
+inalterado e JSON byte a byte idêntico** ao da versão anterior. Os 5 afetados (AAPL,
+NVDA, GOOGL, AMZN, NEE) têm hash novo; a tabela acima reflete os valores novos. AAPL
+adicionalmente ganhou 3 barras (2026-08-03 a 2026-08-05), da re-ingestão de teste do
+RF-CON-01 — por isso a janela dela termina em 2026-08-05.
+
+No run corrigido não há trade tocando as datas de split (o ajustado é contínuo, sem o
+salto espúrio): NVDA perdeu 1 trade (30→29, o round-trip que o salto de 40×
+fabricava); GOOGL passou de 28 para 29 trades (entrada em 2022-07-19, 4 dias após o
+split de 20:1 — sinal real do selloff de julho/2022, não artefato). O efeito mais
+visível foi no benchmark: o buy-and-hold de GOOGL caiu de 62,73% para 25,04% de CAGR e
+o de AMZN de 64,63% para 26,50% — os antigos eram inflados pelo salto do ajuste na
+data do split.
 
 ### Fase 2a — multi-ativo, benchmark 1/N (2026-08-14)
 
@@ -258,7 +278,8 @@ semântica de série terminada (POR-02.3), não deslistagem real de mercado.
 Nota de dados: durante este run foi encontrado e corrigido um bug real da
 ingestão da Fase 1 (dupla contagem de splits no raw — ver
 [docs/STATE.md](docs/STATE.md) e o CHANGELOG). O run da Fase 2a usou a base
-corrigida; os 20 relatórios por ticker da Fase 1, não.
+corrigida; os 20 relatórios por ticker da Fase 1 foram regenerados sobre a
+mesma base (ver [acima](#regeneração-após-a-correção-de-splits-2026-08-14)).
 
 ### Interpretação
 
