@@ -420,7 +420,8 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `buy_and_hold_multi(series, n, cost_cfg, slippage, cap)` | mesmo universo/N do run (P3); mesmas regras de entrada | compra cada ativo na primeira barra negociável do próprio ativo; caixa ocioso; sem rebalance; deslistagem travada (MET-02.1–02.4) | — |
 | `turnover_annualized(trades, equity_daily, n_bars)` | `n_bars ≥ 1`; `equity_daily` alinhada à série | valor = fórmula fechada de RF-MET-04; mesma definição para estratégia e benchmark (MET-04.1/04.2/04.3) | — |
 | `avg_exposure(daily_notional, equity_daily)` | séries alinhadas; `equity > 0` | média diária de `(Σ qtyᵢ · closeᵢ) / equity` (MET-04.4) | — |
-| `contribution_per_asset(trades)` | — | soma concilia com o PnL total (MET-01.1) | — |
+| `reconcile_multi(result)` | `result` de um run multi (T11) | `ReconciliationReport` com as parcelas; `reconciles` = `math.isclose(rel_tol=1e-9)` (POR-04.2/RNF-08), nunca igualdade exata; PnL realizado BRUTO (custos fora — §4.6) | `EngineError` se `result` inválido (trade aberto sem `marks[ticker]` — erro de programa) |
+| `contribution_per_asset(result)` | `result` de um run multi (T11) | `dict[str, float]` com TODOS os N ativos (nunca-negociado = 0.0, SIZ-02.4/R2); soma concilia com o PnL total (MET-01.1) | — |
 
 ## 4. Fluxo da barra multi-ativo — §4.3 da Fase 1 estendido
 
@@ -501,6 +502,29 @@ equity_final − equity_inicial ≡ Σ_i pnl_realizado_i + Σ_i pnl_nao_realizad
 - Contribuições por ativo (MET-01.1) somam ao PnL total — mesma identidade, fatiada por ticker.
 - Invariantes da barra: `cash ≥ 0`, `qty_i ≥ 0` (POR-04.3), `k ≤ N` (SIZ-04.3).
 
+**Contrato (emenda T13 — o §6 não nomeava as funções):** a conciliação vive em
+`analytics/metrics.py`, sobre o `BacktestResultMulti` (T11):
+
+```python
+@dataclass(frozen=True)
+class ReconciliationReport:      # parcelas da identidade (POR-04.2/RNF-08)
+    initial_equity: float
+    final_equity: float
+    realized_pnl: float          # Σ bruto (custos FORA — §4.6; nunca líquido)
+    unrealized_pnl: float        # Σ (último_close_conhecido − entrada) × qty, por trade aberto;
+                                 #   inclui posição TRAVADA (POR-02.3)
+    total_costs: float           # Σ (entry_cost + exit_cost) — uma única vez, termo próprio
+    @property
+    def reconciles(self) -> bool: ...  # math.isclose(rel_tol=1e-9, abs_tol=1e-9); nunca igualdade exata
+
+def reconcile_multi(result: BacktestResultMulti) -> ReconciliationReport: ...
+def contribution_per_asset(result: BacktestResultMulti) -> dict[str, float]:
+    """PnL por ativo: realizado BRUTO − custos do ativo + não-realizado pelo último
+    close conhecido (inclui travada). TODOS os N ativos presentes — o nunca-
+    negociado contribui zero (SIZ-02.4/R2); a soma concilia com o PnL total
+    (MET-01.1/CA-01.1)."""
+```
+
 ## 7. Analytics — métricas, benchmark, relatório
 
 ```python
@@ -509,7 +533,7 @@ def turnover_annualized(trades: list[Trade], equity_daily: Series, n_bars: int) 
     """(Σ|notional_compra| + Σ|notional_venda|) / (2 × patrimônio_médio) × (252 / n_barras)"""
 def avg_exposure(daily_notional: Series, equity_daily: Series) -> float:
     """média diária de (Σ qtyᵢ × closeᵢ) / equity"""
-def contribution_per_asset(trades: list[Trade]) -> dict[str, float]: ...
+def contribution_per_asset(result: BacktestResultMulti) -> dict[str, float]: ...  # emenda T13
 
 # analytics/benchmark.py (estendido) — S6
 def buy_and_hold_multi(series: dict[str, PriceSeries], n: int,
