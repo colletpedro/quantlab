@@ -268,6 +268,7 @@ class PendingOrder:
     intent_seq: int           # "última intenção vence" (ORD-04.2)
     bracket: bool             # originado de bracket (resolução de ambiguidade — ADR-0007)
     cut_reason: CutStage | None  # etapa do corte no convert (CST-01.3) — emenda T08
+    rebalance: bool = False   # ordem sintética do rebalance (SIZ-03/T11a); MARKET SELL só existe aqui
 
 @dataclass
 class PendingBook:            # emenda T07 — o store de pendentes VIVE AQUI (broker.py),
@@ -326,7 +327,7 @@ class Broker:
 - **`ref_price = last_close[ticker]` (escolha documentada, T06):** sizing, caixa e custo estimado usam o último close **conhecido na decisão**; a execução acontece no open da próxima barra do próprio ativo (ADR-0002) com slippage — o preço final é do T08, e o `est_cost` é estimativa. Preço de execução nunca negativo; `ref_price ≤ 0` ⇒ `EngineError`.
 - **Caixa/custos = reduce-until-fits em forma fechada (decisão T06):** a desigualdade `q·p + max(f + r·q·p, m) ≤ cash` é linear por partes; resolve-se nos dois candidatos (`⌊(cash−f)/(p(1+r))⌋` e `⌊(cash−m)/p⌋`, validados com o custo real) — mesmo resultado do laço decremental, sem risco de O(q) (mesmo princípio do `max_affordable_quantity` da Fase 1).
 
-### 3.6 Portfolio e Trade — estendidos
+### 3.6 Portfolio, Trade e resultado — estendidos
 
 ```python
 class Portfolio:
@@ -341,6 +342,23 @@ class Portfolio:
 ```
 
 ```python
+@dataclass(frozen=True)                  # resultado do run multi-ativo — emenda T11a
+class BacktestResultMulti:
+    dates: tuple[date, ...]              # união — alinhamento da equity curve
+    equity_curve: list[float]            # um ponto por data-união (após marcar — POR-04.1)
+    portfolio: Portfolio                 # estado final (cash, positions, trades, marks, pending)
+    initial_cash: float
+    n: int                               # ativos do run (P3)
+    tickers: tuple[str, ...]             # ordenado (determinismo RNF-01)
+    warmup: dict[str, int]
+    costs: CostModel
+    slippage: SlippageModel
+    cap: float
+    calendar: UnionCalendar
+    pending_dead: dict[str, int]         # ENG-01.4 por ativo — intenções mortas na última barra
+```
+
+```python
 @dataclass(frozen=True)
 class Trade:                       # Fase 1 + 3 campos novos
     ticker: str
@@ -351,6 +369,8 @@ class Trade:                       # Fase 1 + 3 campos novos
     entry_gap_days: int;  exit_gap_days: int | None
     origin: OrderKind | None       # market | limit | stop — auditoria do ENG-01.2 (ORD-04.4)
     cut_reason: CutStage | None    # SIZING | CAP | INTEGER | CASH — motivo do corte (CST-01.3/R1)
+    rebalance: bool = False        # trade de rebalanceamento (SIZ-03.2/CA-03.2) — contado
+                                  # separadamente dos trades de sinal no relatório (T16)
     ambiguous: bool                # ambiguidade intrabarra (ORD-03.1/03.3)
 ```
 
@@ -406,9 +426,20 @@ Para cada índice-união `u` em `0..D-1` (em cada fase, ativos processados em **
 ```
 1. EXECUTAR — para cada X com bar_index[X][u] ≥ 0 (alfabético):
        i = bar_index[X][u]
+       # saída pendente (EXIT da barra anterior de X, decisão T11a) → vende ao open[i]
+       if exit_pending[X]:  broker.sell(X, open[i], origin=MARKET);  exit_pending[X] = None
        trades += broker.execute_pending(book, X, barra_i, portfolio, cost_model, slippage, adv(X, i))
        # limite não preenchido cancela ao fim da barra (Q2/ORD-01.3)
        # decisão da barra i de X executa no open[i+1] de X (ADR-0002 por ativo — POR-05.3)
+       # MARKET SELL só existe aqui: ordem sintética do REBALANCE (SIZ-03) — venda parcial
+       #   ao open, nunca de sinal (EXIT vai por cancel_all + saída ao open)
+
+1b. REBALANCE (T11a, só se sizer == EqualWeightOpen): se k mudou vs início de u e k ≥ 1,
+       alvo = 1/k; para cada X aberto com |w_X − 1/k| ≥ threshold_pp (w_X = qty×mark/equity
+       após o passo 2): gera ordem sintética (MARKET, side = sinal de delta, qty = |alvo − qty_X|,
+       rebalance=True) para o próximo open do próprio ativo (ADR-0002). O gatilho roda entre
+       marcar e consultar: intenção de estratégia do MESMO barra (passo 3) tem intent_seq maior
+       e substitui o ajuste (última intenção vence — ORD-04.2).
 
 2. MARCAR A MERCADO:
        equity[u] = cash + Σ_X qty[X] × close_conhecido(X, u)
@@ -417,10 +448,12 @@ Para cada índice-união `u` em `0..D-1` (em cada fase, ativos processados em **
 
 3. CONSULTAR — para cada X com bar_index[X][u] ≥ 0 e i ≥ warmup (alfabético):
        intent = strategies[X].on_bar(MarketView_X(i))
-       # EXIT     → broker.cancel_all(X) (ORD-04.1); saída ao open da próxima barra de X
+       # EXIT     → broker.cancel_all(X) (ORD-04.1) + exit_pending[X] = dates[u] (saída ao open
+       #            da próxima barra de X — ADR-0002; origin=MARKET)
        # ENTER    → convert (sizing→cap→inteiras→caixa/custos) → place (última intenção vence — ORD-04.2)
        # ENG-01.4 POR ATIVO (C1): se i é a ÚLTIMA barra da série de X, a intenção MORRE pendente
-       #   (não existe "próxima barra de X") e é reportada como pendente no relatório
+       #   (não existe "próxima barra de X") — ENTER não é colocada, EXIT não agenda saída;
+       #   contada em `pending_dead[X]` (T11a) e reportada no relatório
 
 4. INVARIANTES a cada barra (erro de programação, não condição de mercado):
        cash ≥ 0; qty[X] ≥ 0 ∀X; k ≤ N (POR-04.3, SIZ-04.3)
