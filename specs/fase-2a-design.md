@@ -350,6 +350,10 @@ class BacktestResultMulti:
     initial_cash: float
     n: int                               # ativos do run (P3)
     tickers: tuple[str, ...]             # ordenado (determinismo RNF-01)
+    counters: MechanismCounters          # MET-05/P6 — agregado pelo laço (emenda T16);
+                                         #   stops/ambiguidades derivados dos trades de execução
+                                         #   (origin=STOP / ambiguous), não-atendidas por caixa
+                                         #   contadas no broker (convert/execute_pending)
     warmup: dict[str, int]
     costs: CostModel
     slippage: SlippageModel
@@ -416,7 +420,7 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `Portfolio.market_to_market(close_by_ticker)` | `close_by_ticker` cobre todos os ativos com posição (último close conhecido — POR-02.2) | atualiza `marks` (último close conhecido por ativo); `equity()` sem argumento deriva de `marks` e é consistente com a identidade de POR-04.1 | — |
 | `Portfolio.check_invariants(n=None)` | `n ≥ 1` quando dado | `cash ≥ 0`; `qty[X] ≥ 0` ∀X; com `n`, `k ≤ n` (POR-04.3/SIZ-04.3) — violação = erro de programação (`EngineError`) | `EngineError` se `n < 1` |
 | `Trade` | campos obrigatórios preenchidos na criação | `origin`/`cut_reason`/`ambiguous` auditáveis (ORD-04.4/CST-01.3/ORD-03.1) | — |
-| `MechanismCounters` | — | contagens incrementadas apenas pelo engine, categorias próprias (MET-05) | — |
+| `MechanismCounters` | — | contagens incrementadas apenas pelo engine, categorias próprias (MET-05); agregado no laço e carregado em `BacktestResultMulti.counters` — o relatório só reporta | — |
 | `buy_and_hold_multi(series, n, *, initial_cash, costs, slippage, cap)` | `n == len(series) ≥ 1` (P3 — o N do run É o conjunto passado); `series` não vazio; `cap ∈ (0, 1]` | compra cada ativo na primeira barra negociável do próprio ativo (warmup 0 da instância ⇒ execução ao open da PRÓXIMA barra do próprio ativo, ADR-0002); herda TODAS as regras de entrada por construção (reusa o pipeline `convert`/`execute_pending` do broker); caixa ocioso; sem rebalance; deslistagem travada (MET-02.1–02.4) | `EngineError` se `n != len(series)` ou `n < 1` ou `series` vazio |
 | `turnover_annualized(trades, equity_daily, n_bars)` | `n_bars ≥ 1`; `equity_daily` alinhada à série | valor = fórmula fechada de RF-MET-04; mesma definição para estratégia e benchmark (MET-04.1/04.2/04.3) | — |
 | `avg_exposure(daily_notional, equity_daily)` | séries alinhadas; `equity > 0` | média diária de `(Σ qtyᵢ · closeᵢ) / equity` (MET-04.4) | — |
@@ -553,10 +557,11 @@ def buy_and_hold_multi(series: dict[str, PriceSeries], n: int, *,
 
 # analytics/report.py (estendido)
 @dataclass(frozen=True)
-class MechanismCounters:            # bloco "contadores de mecanismo" (MET-05/P6)
-    stops_triggered: int            # categoria própria (P6)
-    intrabar_ambiguities: int       # ORD-03.2 — incrementado pelo pior caso (ADR-0007/D2)
-    unfilled_cash_orders: int       # Q5 / POR-01.2
+class MechanismCounters:            # engine/broker.py (emenda T16) — bloco "contadores de mecanismo" (MET-05/P6)
+    stops_triggered: int            # categoria própria (P6) — derivado dos trades de execução com origin=STOP
+    intrabar_ambiguities: int       # ORD-03.2 — derivado dos trades com ambiguous=True (1 trade por ocorrência)
+    unfilled_cash_orders: int       # Q5 / POR-01.2 — contado no broker: convert (nem 1 ação após custos) e
+                                    #   execute_pending (caixa insuficiente na barra de execução)
 ```
 
 - **Seção "run" ampliada (RF-CON-02 continua valendo, multi-ativo):** universo (`N`, lista de tickers), capital inicial, custos/slippage/cap configurados, `n_barras`, datas efetivas de início/fim, contagem de pendentes mortas (ENG-01.4 por ativo).

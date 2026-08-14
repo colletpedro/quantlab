@@ -493,10 +493,10 @@ Médio — benchmark com regras de entrada diferentes da estratégia invalida a 
 
 **Depende de:** T14, T15
 **RFs cobertos:** RF-MET-05 (CA-05.1, CA-05.2, CA-05.3), RF-MET-03 (CA-03.1), RF-CON-02 (extensão multi-ativo)
-**Arquivos:** `src/quantlab/analytics/report.py` (estendido), `tests/unit/test_report.py`
+**Arquivos:** `src/quantlab/analytics/report.py` (estendido), `src/quantlab/engine/broker.py` (emenda: `MechanismCounters` + contagem de não-atendidas), `src/quantlab/engine/backtest.py` (emenda: agregação no laço + campo no resultado), `tests/unit/test_report.py`
 
 **Escopo**
-Bloco "contadores de mecanismo" — `stops_triggered` (categoria própria), `intrabar_ambiguities`, `unfilled_cash_orders` (CA-05.1–05.3); seção "run" ampliada com universo (`N`, tickers) e configuração (CA-02.2/02.1 — extensão do teste da Fase 1); seção fixa de vieses com os itens novos (CA-03.1); trades de rebalance contados separados dos de sinal (SIZ-03.2 — exposição).
+Bloco "contadores de mecanismo" — `stops_triggered` (categoria própria), `intrabar_ambiguities`, `unfilled_cash_orders` (CA-05.1–05.3). **Agregação (emenda §3.6/§3.8/§7):** `MechanismCounters` em `broker.py`; o laço deriva stops (trades com `origin=STOP`) e ambiguidades (trades com `ambiguous=True`, 1 trade por ocorrência) dos fills, e o broker conta não-atendidas por caixa (`convert`: nem 1 ação após custos; `execute_pending`: caixa insuficiente na barra de execução); carregado em `BacktestResultMulti.counters` — o relatório só reporta. Seção "run" ampliada com universo (`N`, tickers), capital, custos/slippage/cap, `n_barras`, datas efetivas, pendentes mortas e deslistados (CA-02.2/02.1 — extensão do teste da Fase 1); seção fixa de vieses com os itens novos (CA-03.1); caixa ocioso e nunca-negociados reportados (SIZ-02.2/R2); slippage/custo zero ⇒ aviso de irrealismo (SLP-01.3).
 
 **Fora do escopo**
 CLI/gráfico (não escopados nesta fase); medição de RNF-04 (T17).
