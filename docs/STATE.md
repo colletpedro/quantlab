@@ -152,6 +152,12 @@ corrigido não há trade ≤ 7 dias das datas ex (GOOGL tem 1 trade com entrada
 14,80→15,59 (B&H 62,73→25,04); AMZN 11,66→11,56 (B&H 64,63→26,50); NEE
 18,95→3,75 (B&H 28,59→12,73).
 
+**Nota de ambiente (push).** A migração de splits foi aplicada **no Mongo
+local desta máquina**; os dados não vão no git. Qualquer outro ambiente que
+precise da base corrigida roda o script determinístico e idempotente
+versionado no repo (`scripts/migrate_raw_split_backout.py`, backup em
+`/tmp`) e valida com `make verify-raw` antes de rodar E2E com dados reais.
+
 ## O que Bloco F entregou
 
 **F1 — CLI `backtest`** (`cli.py::backtest`, `cli.py::run_backtest_flow`).
