@@ -1799,5 +1799,11 @@ migração determinística de 9.030 barras (backup em `/tmp`, idempotente).
   ficaram declaradamente fora da 2a e são o primeiro item da 2b.
 - `make verify-raw` como guarda de dados permanente (rodar antes de qualquer
   E2E com dados reais).
-- Pendência registrada para decisão do autor: os 20 relatórios por ticker da
-  Fase 1 foram gerados com a base pré-correção e não foram regenerados.
+- Regeneração dos 20 relatórios por ticker da Fase 1 sobre a base corrigida
+  (2026-08-14): 15 tickers com hash e JSON byte-idênticos; 5 com números
+  novos. **O placar de Sharpe caiu de 17/20 para 19/20** — AMZN e GOOGL
+  "venciam" em Sharpe apenas por artefato do split duplicado (o
+  buy-and-hold deles tinha o retorno inflado pelo salto espúrio do ajuste).
+  O placar de CAGR permaneceu 19/20 (META, único vencedor em ambas).
+  Confirma a lição da seção acima: suspeitar de fator constante antes de
+  acreditar em "vitória" da estratégia.

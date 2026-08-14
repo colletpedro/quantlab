@@ -136,11 +136,21 @@ idempotente). A sanidade cruzada que o ADR-0003 previa (provedor entregando
 ajustado como bruto) virou **guarda executável**: `make verify-raw` falha se
 a razão bruta colar em 1 ou se o ajustado saltar fora da data ex.
 
-Consequência registrada: os 20 relatórios por ticker da Fase 1 foram
-gerados antes do back-out e **não foram regenerados** — para os 5 tickers
-afetados, a comparação estratégia × buy-and-hold de cada relatório
-permanece válida (mesma série dos dois lados), mas os níveis absolutos de
-preço/CAGR não.
+**Regeneração dos 20 relatórios (2026-08-14).** Os relatórios por ticker da
+Fase 1 foram regenerados sobre a base corrigida (CLI, mesmos parâmetros:
+SMA 20/50, D5). Inocuidade confirmada byte a byte: os **15 tickers sem
+split na janela têm `series_hash` inalterado e JSON idêntico**; os 5
+afetados (AAPL, NVDA, GOOGL, AMZN, NEE) têm hash novo — AAPL também ganhou
+3 barras (2026-08-03 a 2026-08-05, re-ingestão de teste do RF-CON-01).
+Mudança de placar: CAGR segue 1/20 (META), mas **Sharpe caiu de 3/20 para
+1/20** — as vitórias de AMZN e GOOGL em Sharpe eram artefato do retorno do
+buy-and-hold inflado pelo salto espúrio do ajuste na data do split. No run
+corrigido não há trade ≤ 7 dias das datas ex (GOOGL tem 1 trade com entrada
+4 dias após o split de 07/2022 — sinal real, série sem salto); NVDA perdeu
+1 trade (30→29). Efeitos por ticker (CAGR estratégia, antigo→novo): AAPL
+27,08→12,77 (B&H 39,29→22,63); NVDA 96,70→39,28 (B&H 132,40→67,48); GOOGL
+14,80→15,59 (B&H 62,73→25,04); AMZN 11,66→11,56 (B&H 64,63→26,50); NEE
+18,95→3,75 (B&H 28,59→12,73).
 
 ## O que Bloco F entregou
 
@@ -217,12 +227,17 @@ requisitos herdados da Fase 1, não corpo novo da Fase 2a). Design v0.9 de
   em CAGR em 19/20 tickers mas só em 17/20 em Sharpe: sair do mercado corta
   drawdown/volatilidade junto com retorno — é a assinatura de
   trend-following (AMZN e GOOGL vencem em Sharpe apesar de perderem em
-  CAGR), não um segundo achado independente.
+  CAGR), não um segundo achado independente. **Atualizado em 2026-08-14:**
+  após a regeneração pós-back-out de splits, as vitórias de AMZN/GOOGL em
+  Sharpe se revelaram artefato do split duplicado e o placar passou a 19/20
+  em ambas as métricas (ver a subseção do bug dos splits abaixo).
 - **Regeneração dos 20 relatórios.** Mesma ingestão, mesmo universo (20
   tickers de `config/universe.yml`), mesmos parâmetros (SMA 20/50, D5).
   **Os 20 `series_hash` batem, byte a byte, com os relatórios anteriores** —
   confirma que só o formato do JSON mudou, não o pipeline de dados. PNGs não
-  regerados (nada nos gráficos depende do formato do relatório).
+  regerados (nada nos gráficos depende do formato do relatório). *(A base
+  mudou em 2026-08-14 — back-out de splits; a regeneração correspondente
+  está na subseção do bug dos splits abaixo.)*
 
 Sequência completa (`make check` + `make test-integration`) verde após cada
 parte; commits pequenos por RF, um por vez.
@@ -234,10 +249,11 @@ todas fechadas: uma por errata do ADR-0004 (sessão anterior), três por v0.6
 do design (esta sessão — todas descritivas, nenhuma exigiu escolher entre
 comportamentos, código já implementava a única opção documentada).
 
-**Registrado para decisão do autor:** os 20 relatórios por ticker da Fase 1
-(F4) foram gerados com a base pré-correção (dupla contagem de splits). Não
-regenerados no fechamento da Fase 2a; regenerar é só rodar a ingestão/CLI de
-novo com a base corrigida.
+**Resolvida (2026-08-14):** os 20 relatórios por ticker da Fase 1 (F4)
+foram **regenerados** sobre a base corrigida (back-out de splits) — 15
+tickers byte-idênticos, 5 com números novos; placar de Sharpe 17/20 → 19/20
+(vitórias de AMZN/GOOGL eram artefato do split duplicado). Detalhe na
+subseção do bug dos splits.
 
 **Para a Fase 2b, quando começar:** nenhuma spec escrita ainda. Ideias que já
 apareceram ao longo da Fase 1 e vale revisitar então — não implementar agora:

@@ -78,7 +78,11 @@ Implementação commit a commit (uma tarefa por commit, gate 4 a cada merge): co
 
 ### Fechamento da sessão — docs de estado (2026-08-14)
 
-`docs/STATE.md` e o README (seção Resultados) atualizados para o estado da Fase 2a (números finais, bug dos splits, próximo = Fase 2b); lição registrada no `HANDOFF.md` (erro de fator constante × ruído errático — a dupla contagem de splits como o cenário que a sanidade cruzada do ADR-0003 previa, agora guarda executável `make verify-raw`). Pendência registrada para decisão do autor: os 20 relatórios por ticker da Fase 1 (gerados antes do back-out) não foram regenerados.
+`docs/STATE.md` e o README (seção Resultados) atualizados para o estado da Fase 2a (números finais, bug dos splits, próximo = Fase 2b); lição registrada no `HANDOFF.md` (erro de fator constante × ruído errático — a dupla contagem de splits como o cenário que a sanidade cruzada do ADR-0003 previa, agora guarda executável `make verify-raw`).
+
+### Fase 1 — regeneração dos 20 relatórios sobre a base corrigida (2026-08-14)
+
+Pendência do fechamento resolvida: os 20 relatórios por ticker (SMA 20/50, D5) foram regenerados via CLI sobre a base pós-back-out de splits. Inocuidade confirmada byte a byte: 15 tickers com `series_hash` inalterado e JSON idêntico; 5 afetados (AAPL, NVDA, GOOGL, AMZN, NEE) com hash novo — AAPL também ganhou 3 barras (2026-08-03 a 08-05, re-ingestão de teste do RF-CON-01). **Placar de Sharpe 17/20 → 19/20**: AMZN e GOOGL "venciam" em Sharpe apenas por artefato do split duplicado (B&H inflado); CAGR permaneceu 19/20 (META, único vencedor em ambas). No run corrigido não há trade ≤ 7 dias das datas ex (GOOGL: entrada 4 dias após o split de 07/2022 — sinal real); NVDA 30→29 trades. Efeitos (CAGR estratégia): AAPL 27,08→12,77 (B&H 39,29→22,63); NVDA 96,70→39,28 (B&H 132,40→67,48); GOOGL 14,80→15,59 (B&H 62,73→25,04); AMZN 11,66→11,56 (B&H 64,63→26,50); NEE 18,95→3,75 (B&H 28,59→12,73). README/STATE/HANDOFF atualizados; errata datada adicionada ao RF-CON-03 (baseline §7).
 
 ## 2026-08-03
 
