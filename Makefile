@@ -13,7 +13,7 @@ COMPOSE ?= docker compose
 .DEFAULT_GOAL := help
 
 .PHONY: help up down logs install test test-unit test-integration \
-        lint format typecheck audit check rnf04 clean
+        lint format typecheck audit check rnf04 verify-raw clean
 
 help: ## Lista os alvos disponíveis
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -68,6 +68,9 @@ check: lint typecheck test ## Portão local completo — espelha o job "quality"
 
 rnf04: ## Harness do RNF-04 — mede o cômputo (20 ativos x 10 anos < 30 s; escopo declarado em scripts/rnf04_harness.py)
 	$(RUN) python scripts/rnf04_harness.py
+
+verify-raw: ## Guarda de consistência bruto×split na base real (design Fase 1 v0.10 §3.1) — falha se houver dupla contagem de splits
+	$(RUN) python scripts/verify_raw_consistency.py
 
 # ─── Limpeza ─────────────────────────────────────────────────────────────────
 
