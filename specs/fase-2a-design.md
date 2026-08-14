@@ -52,7 +52,7 @@ O requisito pode ser satisfeito por convenção (quem escreveu lembrou) ou por c
 | RF-MET-01 | por teste | `test_contributions_per_asset_reconcile_with_total_pnl` (CA-01.1); CA-01.2 → fórmulas de RF-MET-04 |
 | RF-MET-02 | benchmark por construção (função dedicada) | `test_benchmark_buys_at_first_tradable_bar_per_asset_with_entry_rules` (CA-02.1/02.2); `test_delisted_position_is_locked_and_reported` (CA-02.3) |
 | RF-MET-03 | por construção (constante literal) | `test_bias_section_includes_conditional_items` (CA-03.1) |
-| RF-MET-04 | por teste (fórmulas fechadas) | `test_turnover_and_exposure_closed_form_fixture` (CA-04.1/04.3/04.4); `test_same_definitions_strategy_and_benchmark` (CA-04.2) |
+| RF-MET-04 | por teste (fórmulas fechadas) | `test_turnover_formula_closed_form` (CA-04.1/04.3); `test_average_exposure_formula_closed_form` (CA-04.4); `test_same_definitions_strategy_and_benchmark` (CA-04.2) |
 | RF-MET-05 | por construção (bloco no relatório) | `test_report_mechanism_counters_block` (CA-05.1–05.3) |
 | RF-RNF-01 (herança) | por teste/CI | `test_architecture_timezone_imports` (RNF-07); `test_rnf04_harness_measures_compute_only` (CA-01.3); `test_ci_coverage_floor_85` (RNF-02); `test_multi_asset_run_is_deterministic` (RNF-01) |
 | RF-CON-01/02/03 (baseline §7) | verificado — S8 | testes da Fase 1 + `docs/STATE.md` 2026-08-06 (não reaberto) |
@@ -530,7 +530,10 @@ def contribution_per_asset(result: BacktestResultMulti) -> dict[str, float]:
 ```python
 # analytics/metrics.py (estendido) — fórmulas de RF-MET-04, MESMAS para estratégia e benchmark (MET-04.2)
 def turnover_annualized(trades: list[Trade], equity_daily: Series, n_bars: int) -> float:
-    """(Σ|notional_compra| + Σ|notional_venda|) / (2 × patrimônio_médio) × (252 / n_barras)"""
+    """(Σ|notional_compra| + Σ|notional_venda|) / (2 × patrimônio_médio) × (252 / n_barras),
+    patrimônio_médio = média aritmética DIÁRIA da equity sobre as n_barras (len(equity_daily) == n_bars);
+    DECISÃO T14: trades de REBALANCE ENTRAM no turnover (são giro real de caixa);
+    o relatório os separa por flag para transparência (SIZ-03 CA-03.2/MET-01, T16)."""
 def avg_exposure(daily_notional: Series, equity_daily: Series) -> float:
     """média diária de (Σ qtyᵢ × closeᵢ) / equity"""
 def contribution_per_asset(result: BacktestResultMulti) -> dict[str, float]: ...  # emenda T13
@@ -623,7 +626,7 @@ As quatro decisões de peso viraram ADRs — ver **ADR-0005** (execução condic
 | Rebalance só por mudança de k (SIZ-03.1/03.4/S4) | Gatilho no engine, limiar em pp | `test_no_rebalance_without_k_change` |
 | Sizer devolve fração (SIZ-04.2) | Contrato do protocolo | `test_sizer_returns_fraction_not_quantity` |
 | Benchmark por ativo, mesmas regras (MET-02.1–02.4/S6) | `buy_and_hold_multi` | `test_benchmark_buys_at_first_tradable_bar_per_asset_with_entry_rules` |
-| Fórmulas de turnover/exposição (MET-04.1–04.4/P4) | Fórmulas fechadas, mesmas definições | `test_turnover_and_exposure_closed_form_fixture`; `test_same_definitions_strategy_and_benchmark` |
+| Fórmulas de turnover/exposição (MET-04.1–04.4/P4) | Fórmulas fechadas, mesmas definições | `test_turnover_formula_closed_form`; `test_average_exposure_formula_closed_form`; `test_same_definitions_strategy_and_benchmark` |
 | Contadores de mecanismo (MET-05.1–05.3/P6) | Bloco no relatório, categorias próprias | `test_report_mechanism_counters_block` |
 | Vieses ampliados (MET-03.1) | Constante literal no relatório | `test_bias_section_includes_conditional_items` |
 | Fronteira de instante (RNF-07) | Imports restritos aos módulos novos | `test_architecture_timezone_imports` — estendido, bloqueante |
