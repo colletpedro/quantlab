@@ -12,7 +12,13 @@ from datetime import date
 import pytest
 from structlog.typing import EventDict
 
-from quantlab.engine.broker import Broker, ConvertedOrder, CostModel, CutStage
+from quantlab.engine.broker import (
+    Broker,
+    ConvertedOrder,
+    CostModel,
+    CutStage,
+    PendingBook,
+)
 from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind
 from quantlab.engine.portfolio import Portfolio
 from quantlab.engine.sizing import FixedOneOverN, SizingInputs
@@ -537,3 +543,120 @@ def test_convert_domain_errors_raise_engine_error() -> None:
     with pytest.raises(EngineError):
         broker.max_affordable_quantity(1_000.0, 0.0)  # preço não positivo
     assert broker.max_affordable_quantity(-5.0, 10.0) == 0  # caixa negativo ⇒ 0
+
+
+# ─── T07 — ciclo de vida de ordens (RF-ORD-04/S3) ────────────────────────────
+
+
+def _converted(
+    kind: OrderKind = OrderKind.MARKET,
+    *,
+    limit: float | None = None,
+    stop: float | None = None,
+    qty: int = 100,
+    seq: int = 1,
+    bracket: bool = False,
+    ticker: str = _TICKER,
+) -> ConvertedOrder:
+    return ConvertedOrder(
+        ticker=ticker,
+        kind=kind,
+        limit=limit,
+        stop=stop,
+        qty=qty,
+        ref_price=10.0,
+        decision_date=_DECIDED,
+        intent_seq=seq,
+        cut_reason=None,
+        est_cost=2.0,
+        bracket=bracket,
+    )
+
+
+@pytest.mark.unit
+def test_last_intention_wins_replaces_pending() -> None:
+    """ORD-04.2 — a segunda intenção substitui as pendentes do mesmo ativo;
+    a ordem antiga jamais fica no book (nunca vai executar)."""
+    broker = Broker()
+    book = PendingBook()
+
+    broker.place(book, _converted(seq=1))
+    assert len(book.pending_for(_TICKER)) == 1
+
+    broker.place(book, _converted(kind=OrderKind.LIMIT, limit=9.5, seq=2))
+    pending = book.pending_for(_TICKER)
+    assert len(pending) == 1
+    assert pending[0].intent_seq == 2
+    assert pending[0].kind is OrderKind.LIMIT
+    assert pending[0].limit == pytest.approx(9.5)
+
+    # Bracket (seq 3) substitui a intenção 2 e instala o PAR limite+stop.
+    broker.place(book, _converted(kind=OrderKind.LIMIT, limit=10.5, stop=9.0, seq=3, bracket=True))
+    pair = book.pending_for(_TICKER)
+    assert [p.kind for p in pair] == [OrderKind.LIMIT, OrderKind.STOP]
+    assert all(p.intent_seq == 3 for p in pair)  # mesma intenção (SIG-01.3)
+    assert all(p.decision_date == _DECIDED for p in pair)
+
+
+@pytest.mark.unit
+def test_place_only_touches_the_same_asset_and_is_deterministic() -> None:
+    """ORD-04.2 — substituição é por ativo; outros ativos ficam intactos;
+    a mesma sequência produz o mesmo book (RNF-01)."""
+    broker = Broker()
+
+    first = PendingBook()
+    broker.place(first, _converted(seq=1))
+    broker.place(first, _converted(ticker="OTHER", seq=5))
+    broker.place(first, _converted(kind=OrderKind.LIMIT, limit=9.0, seq=2))
+    assert [p.intent_seq for p in first.pending_for(_TICKER)] == [2]
+    assert [p.intent_seq for p in first.pending_for("OTHER")] == [5]  # intacto
+
+    second = PendingBook()
+    broker.place(second, _converted(seq=1))
+    broker.place(second, _converted(ticker="OTHER", seq=5))
+    broker.place(second, _converted(kind=OrderKind.LIMIT, limit=9.0, seq=2))
+    assert first.pending_for(_TICKER) == second.pending_for(_TICKER)
+    assert first.pending_for("OTHER") == second.pending_for("OTHER")
+
+
+@pytest.mark.unit
+def test_place_never_touches_cash() -> None:
+    """ORD-04.3 — sem reserva de caixa: `place` não tem caixa nenhuma no
+    contrato; duas entradas na mesma barra apenas populam o book, na ordem
+    de intenção, sem debitar nada (o caixa entra só na execução — T08)."""
+    broker = Broker()
+    book = PendingBook()
+
+    broker.place(book, _converted(seq=1))
+    broker.place(book, _converted(seq=2))
+
+    assert [p.intent_seq for p in book.pending_for(_TICKER)] == [2]
+    assert book.orders == {_TICKER: [book.pending_for(_TICKER)[0]]}
+
+
+@pytest.mark.unit
+def test_exit_cancels_all_pending_including_stops() -> None:
+    """ORD-04.1 — EXIT (cancel_all) remove TODAS as pendentes do ativo,
+    incluindo o stop do bracket; nada sobra para executar depois."""
+    broker = Broker()
+    book = PendingBook()
+    broker.place(book, _converted(kind=OrderKind.LIMIT, limit=10.5, stop=9.0, seq=1, bracket=True))
+    assert len(book.pending_for(_TICKER)) == 2
+
+    broker.cancel_all(book, _TICKER)
+    assert book.pending_for(_TICKER) == ()
+
+    # Ativo sem pendentes: cancel_all é no-op, não erro.
+    broker.cancel_all(book, "GHOST")
+
+
+@pytest.mark.unit
+def test_pending_lifecycle_domain_errors() -> None:
+    """§3.8 — bracket malformado (sem limit/stop) é EngineError."""
+    broker = Broker()
+    book = PendingBook()
+
+    malformed = _converted(kind=OrderKind.MARKET, bracket=True)
+    with pytest.raises(EngineError):
+        broker.place(book, malformed)
+    assert book.pending_for(_TICKER) == ()

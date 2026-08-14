@@ -21,7 +21,7 @@ aqui (RNF-07): `decision_date` é `date` naive.
 """
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 
@@ -149,7 +149,7 @@ class ConvertedOrder:
 
 @dataclass(frozen=True, slots=True)
 class PendingOrder:
-    """Ordem pendente por ativo (design §3.5) — criada por `place` (T07).
+    """Ordem pendente por ativo (design §3.5) — criada por `Broker.place` (T07).
 
     `intent_seq` distingue intenções; o par de um bracket compartilha
     `decision_date` e `intent_seq` (SIG-01.3).
@@ -163,6 +163,50 @@ class PendingOrder:
     decision_date: date
     intent_seq: int
     bracket: bool
+
+
+@dataclass(slots=True)
+class PendingBook:
+    """Store de pendentes por ativo (emenda T07, design §3.5).
+
+    O broker é ESTÁTICO: o store é passado como parâmetro (`Broker.place`/
+    `Broker.cancel_all`), e a T10 compõe um `PendingBook` no `Portfolio`.
+    Nenhum caixa existe aqui — a ordem usa o caixa disponível na hora da
+    EXECUÇÃO (T08), sem reserva (ORD-04.3).
+
+    Invariantes:
+    - ``orders[ticker]`` nunca tem intenção "vencida" (substituída);
+    - o par de um bracket compartilha `intent_seq` (mesma intenção);
+    - intenções diferentes têm `intent_seq` crescente (o laço incrementa).
+    """
+
+    orders: dict[str, list[PendingOrder]] = field(default_factory=dict)
+
+    def place(self, order: PendingOrder) -> None:
+        """Registra a ordem por ativo — última intenção vence (ORD-04.2).
+
+        Pendentes do MESMO ativo com ``intent_seq`` menor são substituídas;
+        pendentes de outros ativos ficam intactas; a mesma intenção (par de
+        bracket, mesmo seq) convive. Determinístico e sem efeito no caixa.
+        """
+
+        current = self.orders.setdefault(order.ticker, [])
+        surviving = [p for p in current if p.intent_seq >= order.intent_seq]
+        surviving.append(order)
+        self.orders[order.ticker] = surviving
+
+    def cancel_all(self, ticker: str) -> None:
+        """Remove TODAS as pendentes do ativo, incluindo stops (ORD-04.1).
+
+        Ativo sem pendentes ⇒ no-op (não é erro).
+        """
+
+        self.orders.pop(ticker, None)
+
+    def pending_for(self, ticker: str) -> tuple[PendingOrder, ...]:
+        """Leitura imutável das pendentes do ativo, em ordem de inserção."""
+
+        return tuple(self.orders.get(ticker, ()))
 
 
 class Broker:
@@ -456,3 +500,69 @@ class Broker:
             est_cost=est_cost,
             bracket=bracket,
         )
+
+    def place(self, store: PendingBook, order: ConvertedOrder) -> None:
+        """Registra a ordem convertida no store (T07, emenda §3.5).
+
+        Broker ESTÁTICO: o `PendingBook` vem por parâmetro; sem reserva de
+        caixa (ORD-04.3) — a ordem usa o caixa disponível na EXECUÇÃO (T08).
+        Última intenção vence (ORD-04.2): a substituição é do próprio store.
+
+        Bracket ⇒ o PAR nasce aqui (limite + stop protetor, mesmo
+        `decision_date`/`intent_seq` — SIG-01.3): o stop fica pendente desde
+        já mas só ATIVA com posição aberta (ORD-02.2, T08) — o ADR-0007/D2
+        exige o stop vivo durante a barra de entrada para a ambiguidade
+        intrabarra (abre em L e fecha no stop na mesma barra).
+
+        Raises:
+            EngineError: `bracket` sem `kind = LIMIT` ou sem `limit`/`stop`
+                (ordem malformada — erro de programação).
+        """
+        if order.bracket:
+            if order.kind is not OrderKind.LIMIT or order.limit is None or order.stop is None:
+                raise EngineError(
+                    "place: ordem bracket malformada — exige kind=LIMIT com limit e stop."
+                )
+            store.place(
+                PendingOrder(
+                    ticker=order.ticker,
+                    kind=OrderKind.LIMIT,
+                    limit=order.limit,
+                    stop=None,
+                    qty=order.qty,
+                    decision_date=order.decision_date,
+                    intent_seq=order.intent_seq,
+                    bracket=True,
+                )
+            )
+            store.place(
+                PendingOrder(
+                    ticker=order.ticker,
+                    kind=OrderKind.STOP,
+                    limit=None,
+                    stop=order.stop,
+                    qty=order.qty,
+                    decision_date=order.decision_date,
+                    intent_seq=order.intent_seq,
+                    bracket=True,
+                )
+            )
+            return
+
+        store.place(
+            PendingOrder(
+                ticker=order.ticker,
+                kind=order.kind,
+                limit=order.limit,
+                stop=order.stop,
+                qty=order.qty,
+                decision_date=order.decision_date,
+                intent_seq=order.intent_seq,
+                bracket=False,
+            )
+        )
+
+    def cancel_all(self, store: PendingBook, ticker: str) -> None:
+        """EXIT cancela TODAS as pendentes do ativo, incluindo stops (ORD-04.1)."""
+
+        store.cancel_all(ticker)
