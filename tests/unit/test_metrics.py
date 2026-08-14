@@ -12,8 +12,16 @@ from datetime import date
 import pandas as pd
 import pytest
 
-from quantlab.analytics.metrics import cagr, hit_rate, max_drawdown, sharpe
+from quantlab.analytics.metrics import (
+    avg_exposure,
+    cagr,
+    hit_rate,
+    max_drawdown,
+    sharpe,
+    turnover_annualized,
+)
 from quantlab.engine.portfolio import Trade
+from quantlab.exceptions import EngineError
 
 # ─── ANA-01.1 / ANA-01.4: Sharpe ──────────────────────────────────────────────
 
@@ -225,3 +233,140 @@ def test_hit_rate_exact_breakeven_does_not_count_as_a_win() -> None:
     breakeven = _closed_trade(entry_price=10.0, exit_price=10.0)
 
     assert hit_rate([breakeven]) == 0.0
+
+
+# ─── RF-MET-04 (T14): turnover anualizado e exposição média ───────────────────
+
+
+def _notional_trade(
+    quantity: int, entry_price: float, exit_price: float | None = None, *, rebalance: bool = False
+) -> Trade:
+    """Trade de papel com notional controlado e custos zero (RNF-03)."""
+    return Trade(
+        ticker="AAA",
+        entry_date=date(2024, 1, 2),
+        entry_price=entry_price,
+        entry_decision_date=date(2024, 1, 2),
+        quantity=quantity,
+        entry_cost=0.0,
+        entry_gap_days=0,
+        exit_date=date(2024, 1, 3) if exit_price is not None else None,
+        exit_price=exit_price,
+        exit_cost=0.0,
+        rebalance=rebalance,
+    )
+
+
+@pytest.mark.unit
+def test_turnover_formula_closed_form() -> None:
+    """Fórmula fechada do P4/RF-MET-04 (CA-04.1/CA-04.3), derivada à mão.
+
+    T1: 100 x 10.0 (compra 1_000), venda a 11.0 (1_100).
+    T2: 50 x 20.0 (compra 1_000), venda a 19.0 (950).
+    notional = (1_000 + 1_000) + (1_100 + 950) = 4_050.
+    equity = [100_000, 101_000, 99_000] -> média 100_000; n_bars = 3.
+    turnover = 4_050 / (2 x 100_000) x (252 / 3) = 0.02025 x 84 = 1.701.
+    """
+    trades = [
+        _notional_trade(100, 10.0, 11.0),
+        _notional_trade(50, 20.0, 19.0),
+    ]
+    equity_daily = pd.Series([100_000.0, 101_000.0, 99_000.0])
+
+    result = turnover_annualized(trades, equity_daily, n_bars=3)
+
+    assert result == pytest.approx(4_050 / (2 * 100_000) * (252 / 3))
+    assert result == pytest.approx(1.701)
+
+
+@pytest.mark.unit
+def test_turnover_includes_rebalance_trades() -> None:
+    """Decisão T14 (emenda §7): rebalance entra no giro — é notional real.
+
+    T de sinal: 100 x 10.0 -> 11.0 (compra 1_000, venda 1_100).
+    T de rebalance: 10 x 30.0 -> 31.0 (compra 300, venda 310).
+    notional total = 2_710; equity média 100_000; n_bars = 2.
+    turnover = 2_710 / 200_000 x (252 / 2) = 1.7073.
+    """
+    trades = [
+        _notional_trade(100, 10.0, 11.0),
+        _notional_trade(10, 30.0, 31.0, rebalance=True),
+    ]
+    equity_daily = pd.Series([100_000.0, 100_000.0])
+
+    result = turnover_annualized(trades, equity_daily, n_bars=2)
+
+    assert result == pytest.approx(2_710 / (2 * 100_000) * (252 / 2))
+
+
+@pytest.mark.unit
+def test_average_exposure_formula_closed_form() -> None:
+    """Média diária de (Σ qty_i x close_i) / equity (CA-04.4).
+
+    notional = [50_000, 40_000, 60_000], equity = 100_000 constante:
+    razões [0.5, 0.4, 0.6], média = 0.5.
+    """
+    daily_notional = pd.Series([50_000.0, 40_000.0, 60_000.0])
+    equity_daily = pd.Series([100_000.0, 100_000.0, 100_000.0])
+
+    result = avg_exposure(daily_notional, equity_daily)
+
+    assert result == pytest.approx((0.5 + 0.4 + 0.6) / 3)
+    assert result == pytest.approx(0.5)
+
+
+@pytest.mark.unit
+def test_same_definitions_strategy_and_benchmark() -> None:
+    """MET-04.2/CA-04.2: esta função é a ÚNICA fonte da fórmula.
+
+    Prova por determinismo (mesma entrada => mesmo valor, sem estado) e por
+    escala (CA-04.3): com o mesmo numerador e a mesma média de equity
+    (100_500 em 2 e em 4 pontos), dobrar n_bars divide o fator 252/n pela
+    metade — o resultado responde só aos parâmetros, sem modo "estratégia"
+    vs "benchmark".
+    """
+    trades = [_notional_trade(100, 10.0, 11.0)]
+    base = turnover_annualized(trades, pd.Series([100_000.0, 101_000.0]), n_bars=2)
+
+    assert turnover_annualized(trades, pd.Series([100_000.0, 101_000.0]), n_bars=2) == base
+    doubled_window = turnover_annualized(
+        trades, pd.Series([100_000.0, 101_000.0, 100_000.0, 101_000.0]), n_bars=4
+    )
+    assert doubled_window == pytest.approx(base / 2)
+
+
+@pytest.mark.unit
+def test_turnover_domain_errors_raise_engine_error() -> None:
+    """Pré/pós do §3.8 (RF-MET-04): n_bars < 1, série vazia/desalinhada,
+    patrimônio médio não positivo => EngineError (erro de programação)."""
+    trades = [_notional_trade(100, 10.0, 11.0)]
+    equity = pd.Series([100_000.0, 100_000.0])
+
+    with pytest.raises(EngineError):
+        turnover_annualized(trades, equity, n_bars=0)
+    with pytest.raises(EngineError):
+        turnover_annualized(trades, pd.Series([], dtype="float64"), n_bars=2)
+    with pytest.raises(EngineError):
+        turnover_annualized(trades, pd.Series([100_000.0]), n_bars=2)  # 1 != 2
+    with pytest.raises(EngineError):
+        turnover_annualized(trades, pd.Series([0.0, 0.0]), n_bars=2)  # média 0
+
+
+@pytest.mark.unit
+def test_average_exposure_domain_errors_raise_engine_error() -> None:
+    """Séries vazias/desalinhadas (comprimento ou índice) e equity não
+    positiva => EngineError (§3.8, RF-MET-04)."""
+    notional = pd.Series([50_000.0, 40_000.0])
+    equity = pd.Series([100_000.0, 100_000.0])
+
+    with pytest.raises(EngineError):
+        avg_exposure(pd.Series([], dtype="float64"), equity)
+    with pytest.raises(EngineError):
+        avg_exposure(notional, pd.Series([100_000.0]))  # comprimentos diferentes
+    with pytest.raises(EngineError):
+        avg_exposure(
+            pd.Series([50_000.0], index=[date(2024, 1, 1)]),
+            pd.Series([100_000.0], index=[date(2024, 1, 2)]),  # índices diferentes
+        )
+    with pytest.raises(EngineError):
+        avg_exposure(notional, pd.Series([100_000.0, 0.0]))  # equity não positiva

@@ -21,6 +21,7 @@ from quantlab.exceptions import EngineError
 __all__ = [
     "DrawdownResult",
     "ReconciliationReport",
+    "avg_exposure",
     "cagr",
     "contribution_per_asset",
     "daily_returns",
@@ -28,6 +29,7 @@ __all__ = [
     "max_drawdown",
     "reconcile_multi",
     "sharpe",
+    "turnover_annualized",
 ]
 
 #: Tolerância da identidade de conciliação multi-ativo — §6, RNF-08.
@@ -253,3 +255,51 @@ def contribution_per_asset(result: BacktestResultMulti) -> dict[str, float]:
                 )
             contribution[trade.ticker] += (mark - trade.entry_price) * trade.quantity
     return contribution
+
+
+#: Pregões por ano na anualização de RF-MET-04/P4 (CA-04.3).
+_TRADING_DAYS_PER_YEAR = 252
+
+
+def turnover_annualized(trades: list[Trade], equity_daily: pd.Series, n_bars: int) -> float:
+    """Turnover anualizado — fórmula fechada de RF-MET-04/P4 (emenda T14).
+
+    ``(Σ|notional_compra| + Σ|notional_venda|) / (2 x patrimônio_médio) x (252 / n_barras)``,
+    com patrimônio_médio = média aritmética DIÁRIA da equity sobre as n_barras
+    (``len(equity_daily) == n_bars`` — séries alinhadas). Notional por trade =
+    ``quantity x preço de execução limpo`` (custos fora do preço — SLP-04.3).
+    Trades de REBALANCE entram no giro (decisão T14 — são giro real de caixa;
+    o relatório os separa por flag, T16). Esta função é a ÚNICA fonte da
+    fórmula: a mesma definição vale para estratégia e benchmark (MET-04.2).
+    """
+    if n_bars < 1:
+        raise EngineError(f"turnover_annualized: n_bars={n_bars} < 1 (RF-MET-04).")
+    if equity_daily.empty or len(equity_daily) != n_bars:
+        raise EngineError(
+            "turnover_annualized: equity_daily deve ter exatamente n_bars="
+            f"{n_bars} pontos (alinhada à série), recebidos {len(equity_daily)} (RF-MET-04)."
+        )
+    avg_equity = float(equity_daily.mean())
+    if avg_equity <= 0:
+        raise EngineError(f"turnover_annualized: patrimônio médio {avg_equity} <= 0 (RF-MET-04).")
+    notional_buy = sum(abs(t.quantity * t.entry_price) for t in trades)
+    notional_sell = sum(abs(t.quantity * t.exit_price) for t in trades if t.exit_price is not None)
+    return (notional_buy + notional_sell) / (2 * avg_equity) * (_TRADING_DAYS_PER_YEAR / n_bars)
+
+
+def avg_exposure(daily_notional: pd.Series, equity_daily: pd.Series) -> float:
+    """Exposição média — média diária de ``(Σ qty_i x close_i) / equity`` (MET-04.4).
+
+    Séries alinhadas = mesmo comprimento E mesmo índice (sem alinhamento
+    silencioso do pandas); equity estritamente positiva (divisão definida).
+    MESMA definição para estratégia e benchmark (MET-04.2).
+    """
+    if daily_notional.empty or equity_daily.empty:
+        raise EngineError("avg_exposure: séries vazias (RF-MET-04).")
+    if len(daily_notional) != len(equity_daily) or not daily_notional.index.equals(
+        equity_daily.index
+    ):
+        raise EngineError("avg_exposure: séries desalinhadas (comprimento ou índice) (RF-MET-04).")
+    if (equity_daily <= 0).any():
+        raise EngineError("avg_exposure: equity deve ser estritamente positiva (RF-MET-04).")
+    return float((daily_notional / equity_daily).mean())
