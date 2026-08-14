@@ -226,7 +226,7 @@ Médio — é a tarefa que materializa R1; a ambiguidade de motivo do corte é e
 **Arquivos:** `src/quantlab/engine/broker.py` (estendido), `tests/unit/test_broker.py`
 
 **Escopo**
-`Broker.place` — sem reserva de caixa (CA-04.3); última intenção vence via `intent_seq` (CA-04.2); `Broker.cancel_all(ticker)` — EXIT cancela TODAS as pendentes do ativo, incluindo stops (CA-04.1); `decision_date` gravado na ordem (CA-04.4, base da auditoria do ENG-01.2).
+`PendingBook` em `broker.py` (emenda §3.5: o store de pendentes vive no broker, broker ESTÁTICO — a T10 compõe no Portfolio); `Broker.place(store, order)` — sem reserva de caixa (CA-04.3); última intenção vence via `intent_seq` (CA-04.2); bracket ⇒ o PAR nasce no place (limite + stop, mesmo `decision_date`/`intent_seq` — SIG-01.3), stop só ATIVA com posição aberta (ORD-02.2, T08); `Broker.cancel_all(store, ticker)` — EXIT cancela TODAS as pendentes do ativo, incluindo stops (CA-04.1); `decision_date` gravado na ordem (CA-04.4, base da auditoria do ENG-01.2).
 
 **Fora do escopo**
 Execução de ordens (T08); o teste de "segunda entrada vê caixa já debitado" exige duas entradas na mesma barra — laço (T11); preenchimento de limite/stop (T08).

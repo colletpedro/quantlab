@@ -259,6 +259,13 @@ class PendingOrder:
     intent_seq: int           # "última intenção vence" (ORD-04.2)
     bracket: bool             # originado de bracket (resolução de ambiguidade — ADR-0007)
 
+@dataclass
+class PendingBook:            # emenda T07 — o store de pendentes VIVE AQUI (broker.py),
+    orders: dict[str, list[PendingOrder]]  # por ativo; a T10 compõe no Portfolio
+    def place(self, order: PendingOrder) -> None: ...      # última intenção vence (ORD-04.2)
+    def cancel_all(self, ticker: str) -> None: ...         # inclui stops (ORD-04.1)
+    def pending_for(self, ticker: str) -> tuple[PendingOrder, ...]: ...  # leitura imutável
+
 class Broker:
     def convert(self, intent: Signal | ConditionalIntent, ticker: str,
                 inputs: SizingInputs, sizer: Sizer, adv: float | None,
@@ -270,9 +277,17 @@ class Broker:
            A etapa que cortou é registrada no trade (cut_reason).
            Função PURA (não toca o portfolio); None ⇒ sem ordem (CST-01.2/SLP-03.5).
            decision_date/intent_seq vêm do laço — convert permanece pura."""
-    def place(self, order: ConvertedOrder) -> None:
-        """Sem reserva de caixa (ORD-04.3): a ordem usa o caixa disponível na hora da execução.
-           Última intenção vence (ORD-04.2): place substitui pendentes anteriores do ativo."""
+    def place(self, store: PendingBook, order: ConvertedOrder) -> None:
+        """Registra a ordem convertida no store (emenda T07 — broker é ESTÁTICO,
+           o store é parâmetro; a T10 compõe o PendingBook no Portfolio).
+           Sem reserva de caixa (ORD-04.3): nenhum caixa existe aqui — a ordem usa
+           o caixa disponível na hora da EXECUÇÃO (T08).
+           Última intenção vence (ORD-04.2): substitui pendentes do mesmo ativo
+           com intent_seq menor. Bracket ⇒ o PAR nasce aqui (limite + stop,
+           mesmo decision_date/intent_seq — SIG-01.3): o stop fica pendente desde
+           já, mas só ATIVA com posição aberta (ORD-02.2, T08) — D2/ADR-0007
+           exige o stop vivo durante a barra de entrada para a ambiguidade
+           intrabarra (abre em L e fecha no stop na MESMA barra)."""
     def execute_pending(self, ticker: str, bar: BarSlice, adv: float | None) -> list[Trade]:
         """Executa pendentes de X no open da barra do PRÓPRIO ativo (POR-05.3 — ADR-0002 por ativo):
            - MARKET → open, com slippage de preço (SLP-04.1)
@@ -282,7 +297,7 @@ class Broker:
            - Ambiguidade intrabarra → pior caso (ADR-0007/D2), Trade.ambiguous = True
            - Caixa insuficiente para múltiplas ordens → atendimento alfabético por ticker,
              não-atendida logada e contada (POR-01.2/MET-05)"""
-    def cancel_all(self, ticker: str) -> None:
+    def cancel_all(self, store: PendingBook, ticker: str) -> None:
         """EXIT cancela TODAS as pendentes do ativo, incluindo stops (ORD-04.1)."""
 ```
 
@@ -297,7 +312,7 @@ class Portfolio:
     cash: float
     positions: dict[str, Position]              # por ativo — modelo N desde a Fase 1 (D4)
     trades: list[Trade]
-    pending: dict[str, list[PendingOrder]]      # por ativo — ADR-0002 por ativo (POR-05.3)
+    pending: PendingBook                        # por ativo — emenda T07 (broker.py); ADR-0002 por ativo (POR-05.3)
     def market_to_market(self, close_by_ticker: dict[str, float]) -> None: ...
 ```
 
@@ -344,7 +359,11 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `CostModel.cost_for(notional)` | `notional ≥ 0`; `fixed, rate, min_cost ≥ 0` | `max(fixed + rate×notional, min_cost)` (CST-01 CA-01.1) | `EngineError` se algum parâmetro < 0 |
 | `Broker.convert(intent, ticker, inputs, sizer, adv, cost_model, cap, decision_date, intent_seq)` | intenção de ENTRADA válida (3.2); `ticker ∈ inputs.last_close`; `ref_price > 0`; `inputs` coerentes | aplica a sequência fixa SIZING → CAP → INTEIRAS → CAIXA/CUSTOS (R1/CST-01.3); `cut_reason` = última etapa que reduziu; `ConvertedOrder | None` (None ⇒ sem ordem, logado — CST-01.2/SLP-03.5); função pura; sem reserva de caixa (ORD-04.3) | `EngineError` se `ticker` sem last_close, `ref_price ≤ 0` ou intenção de saída |
 | `ConvertedOrder` | campos coerentes com o `kind` (3.2) | `qty ≥ 1`; `est_cost` = custo no `ref_price`; imutável | — |
-| `Broker.place(order)` | ordem já convertida | pendente registrada por ativo; substitui pendentes anteriores do ativo (última intenção vence — ORD-04.2) | — |
+| `PendingBook.place(order)` | ordem válida (3.5) | pendente registrada por ativo; substitui pendentes do MESMO ativo com `intent_seq` menor (última intenção vence — ORD-04.2); nunca toca caixa (ORD-04.3); determinístico | — |
+| `PendingBook.cancel_all(ticker)` | — | todas as pendentes do ativo removidas, incluindo stops (ORD-04.1) | — |
+| `PendingBook.pending_for(ticker)` | — | tupla imutável com as pendentes do ativo (ordem de inserção) | — |
+| `Broker.place(store, order)` | ordem já convertida (`qty ≥ 1`); `bracket` ⇒ `kind = LIMIT` e `limit`/`stop` presentes | delega ao store: 1 pendente (sem bracket) ou o par limite+stop (bracket, mesmo `decision_date`/`intent_seq` — SIG-01.3); sem reserva de caixa (ORD-04.3) | `EngineError` se `bracket` sem `limit`/`stop` |
+| `Broker.cancel_all(store, ticker)` | — | delega ao store — todas as pendentes do ativo canceladas, incluindo stops (ORD-04.1) | — |
 | `Broker.execute_pending(ticker, bar, adv)` | `bar` é a próxima barra do próprio ativo (ADR-0002 por ativo, POR-05.3) | mercado ao open; limite a `min/max(L, open)` ou cancelado ao fim da barra (ORD-01.1/01.3); stop a `min(S, open)` com slippage (ORD-02.1); pior caso intrabarra registrado (ADR-0007); atendimento alfabético (POR-01.2); caixa nunca negativo | — |
 | `Broker.cancel_all(ticker)` | — | todas as pendentes do ativo canceladas, incluindo stops (ORD-04.1) | — |
 | `Portfolio.market_to_market(close_by_ticker)` | `close_by_ticker` cobre todos os ativos com posição (último close conhecido — POR-02.2) | equity consistente com a identidade de POR-04.1 | — |
