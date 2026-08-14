@@ -4,6 +4,18 @@ Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versioname
 
 ## 2026-08-14
 
+### fase-2b-requirements 0.1 — draft (em revisão)
+
+Abertura da Fase 2b: spec de requisitos v0.1 em draft, aguardando revisão do tech lead do web e do autor (gate 1).
+
+**Escopo** — venda a descoberto + aluguel (borrow fee); margem (substitui o invariante RF-POR-04 CA-04.3 da 2a por `equity ≥ margem exigida`); buy-stop (adiado da 2a, P2); walk-forward (IS/OOS). Fora: opções, fracionário, múltiplas moedas, imposto, high-frequency.
+
+**Decisões da v0.1 (D1–D6)** — D1 invariante de margem (exige ADR-0009); D2 liquidação forçada determinística (integral por ativo, alfabética, `origin = MARGIN_CALL`, fundo quebrado congelado e reportado); D3 direção no `Signal` (`ENTER_SHORT`/`EXIT_SHORT`, retrocompatível; sizer nunca decide direção); D4 exposição gross/net e turnover com shorts; D5 buy-stop a `max(S, open)` com slippage + pior caso em brackets com buy-stop; D6 walk-forward com grade determinística IS, isolamento estrito IS/OOS e resultado = concatenação OOS.
+
+**Famílias de RFs** — RF-SHT (01–05: contrato, execução, borrow fee, PnL algébrico, deslistagem short); RF-MRG (01–04: margem, liquidação, fundo quebrado, gross/net); RF-ORD-05/06 (buy-stop e ambiguidades, estendem a 2a); RF-WFK (01–05: folds, otimização, concatenação OOS, mutação, orçamento); RF-MET-05/06 (benchmark long-only + vieses MHT/aluguel); RF-RNF-02 (herança e cobertura estendida).
+
+**Questões em aberto (Q1–Q6)** — Q1–Q5 com proposta fechada na v0.1 (confirmar no gate 1); Q6 (ancoragem dos folds: rolling vs anchored) escalada ao autor.
+
 ### fase-2a-requirements 0.2 — em revisão
 
 Promovida de 0.1 (draft) para 0.2 (em revisão) após o gate check 1: parecer P2 validado pelo tech lead do web e pendências P1–P6 aprovadas pelo autor do projeto. Reservas R1–R2 incorporadas.
