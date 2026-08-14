@@ -16,6 +16,7 @@ Cada transição entre etapas é um **gate check** explícito. Um gate reprovado
 | Spec | Versão | Requisitos | Design | Tarefas | Implementada |
 |---|---|---|---|---|---|
 | `00-plataforma/fase-1` | 1.0 | ✅ aprovada | ✅ aprovada (v0.2) | ✅ aprovada (v0.1) | 🟡 Bloco A |
+| `fase-2a` | 0.2 | 🟢 gate 1 aprovado (em revisão) | ✅ aprovada (v0.1) | 🟢 aprovada (v0.1) | — |
 | `01-ingestao` | — | — | — | — | ⬜ |
 | `02-persistencia` | — | — | — | — | ⬜ |
 | `03-engine` | — | — | — | — | ⬜ |
@@ -36,6 +37,10 @@ Decisões arquiteturais são **numeradas e imutáveis**. Quando uma decisão mud
 | [0002](adr/0002-execucao-no-open-seguinte.md) | Execução no `open` do pregão seguinte | aceito |
 | [0003](adr/0003-ajuste-em-tempo-de-leitura.md) | Preço bruto persistido, ajuste na leitura | aceito |
 | [0004](adr/0004-ajuste-sobre-historico-completo.md) | Ajuste materializado sobre o histórico completo | aceito |
+| [0005](adr/0005-execucao-condicional-e-fronteira-de-mutacao.md) | Execução condicional e fronteira de mutação (ENG-01.2 em duas partes) | aceito |
+| [0006](adr/0006-modelo-de-slippage.md) | Modelo de slippage (fixo bps + participação com cap, forma funcional cravada) | aceito |
+| [0007](adr/0007-ambiguidade-intrabarra.md) | Resolução da ambiguidade intrabarra (pior caso para o executor) | aceito |
+| [0008](adr/0008-politica-de-sizing.md) | Política de sizing default (1/N, N do run, N=1 ⇒ all-in) | aceito |
 
 ## Roadmap
 
