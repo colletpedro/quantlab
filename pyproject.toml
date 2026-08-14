@@ -140,7 +140,8 @@ markers = [
 ]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# coverage — RNF-02: mínimo de 80% em engine/ e analytics/
+# coverage — RNF-02 (v0.2): mínimo de 85% em engine/ e analytics/ (supersede o
+# piso de 80% da Fase 1; módulos novos vivem dentro de engine/, decisão D3)
 # ─────────────────────────────────────────────────────────────────────────────
 [tool.coverage.run]
 # O piso vale só onde o erro custa dinheiro: o engine e a medição.
@@ -149,7 +150,7 @@ source_pkgs = ["quantlab.engine", "quantlab.analytics"]
 branch = true
 
 [tool.coverage.report]
-fail_under = 80
+fail_under = 85
 show_missing = true
 skip_empty = true
 exclude_also = [

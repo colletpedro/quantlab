@@ -13,7 +13,7 @@ COMPOSE ?= docker compose
 .DEFAULT_GOAL := help
 
 .PHONY: help up down logs install test test-unit test-integration \
-        lint format typecheck audit check clean
+        lint format typecheck audit check rnf04 clean
 
 help: ## Lista os alvos disponíveis
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -65,6 +65,9 @@ audit: ## Vulnerabilidades conhecidas nas dependências instaladas
 	$(RUN) pip-audit --skip-editable
 
 check: lint typecheck test ## Portão local completo — espelha o job "quality" do CI
+
+rnf04: ## Harness do RNF-04 — mede o cômputo (20 ativos x 10 anos < 30 s; escopo declarado em scripts/rnf04_harness.py)
+	$(RUN) python scripts/rnf04_harness.py
 
 # ─── Limpeza ─────────────────────────────────────────────────────────────────
 

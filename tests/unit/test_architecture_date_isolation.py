@@ -10,6 +10,12 @@ vocabulário de data-calendário que RNF-07 exige em todo o domínio, e a v0.2
 original proibia justamente esse vocabulário ao proibir o módulo `datetime`
 inteiro (ambiguidade registrada no HANDOFF do Bloco A e corrigida na v0.3).
 
+**Fase 2a (T17):** a varredura é projeto-inteiro (`rglob`), então os módulos
+novos — `engine/calendar.py`, `liquidity.py`, `slippage.py`, `sizing.py`,
+`conditional.py` e o `broker.py` estendido — já caem na regra acima; o guard
+`test_scan_covers_every_subpackage` passa a exigi-los explicitamente, para o
+teste não "passar vazio" se algum sumir do glob (RNF-07 herdado, bloqueante).
+
 **Bloqueante no CI** (decisão Q3 do design, confirmada na v0.2): um aviso
 não-bloqueante vira ruído e para de ser lido. Este teste falha o build.
 """
@@ -111,8 +117,24 @@ def test_scan_covers_every_subpackage() -> None:
     assert names >= _ALLOWED_INSTANT_MODULES
 
     covered_subpackages = {Path(name).parts[0] for name in names if len(Path(name).parts) > 1}
-    for subpackage in ("ingestion", "storage"):
+    for subpackage in ("ingestion", "storage", "engine", "analytics"):
         assert subpackage in covered_subpackages, (
             f"a varredura não alcançou quantlab/{subpackage}/ — "
             "o teste de arquitetura estaria coberto sem estar checando nada"
         )
+
+    # Fase 2a (T17, RNF-07): os módulos novos do engine precisam estar no
+    # glob — se um nascer fora do alcance (ex.: pacote novo na raiz), a regra
+    # de instante para de valer para ele e o teste "passa vazio" aqui.
+    fase_2a_engine_modules = {
+        "engine/calendar.py",
+        "engine/liquidity.py",
+        "engine/slippage.py",
+        "engine/sizing.py",
+        "engine/conditional.py",
+        "engine/broker.py",
+    }
+    assert fase_2a_engine_modules <= names, (
+        f"módulos novos da Fase 2a fora da varredura: "
+        f"{sorted(fase_2a_engine_modules - names)} — RNF-07 não estaria sendo checado neles"
+    )
