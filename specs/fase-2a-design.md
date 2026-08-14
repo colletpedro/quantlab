@@ -50,7 +50,7 @@ O requisito pode ser satisfeito por convenção (quem escreveu lembrou) ou por c
 | RF-POR-04 | invariantes por asserção no laço | `test_equity_identity_multi_asset` (CA-04.1); `test_reconciliation_multi_asset_20_assets` (CA-04.2); `test_cash_and_quantity_never_negative_multi` (CA-04.3) |
 | RF-POR-05 | índice por ativo por construção; fronteira por teste | `test_pending_order_executes_at_next_bar_of_own_asset` (CA-05.3); `test_mutation_frontier_is_per_asset` (CA-05.4) |
 | RF-MET-01 | por teste | `test_contributions_per_asset_reconcile_with_total_pnl` (CA-01.1); CA-01.2 → fórmulas de RF-MET-04 |
-| RF-MET-02 | benchmark por construção (função dedicada) | `test_benchmark_buys_at_first_tradable_bar_per_asset_with_entry_rules` (CA-02.1/02.2); `test_delisted_position_is_locked_and_reported` (CA-02.3) |
+| RF-MET-02 | benchmark por construção (função dedicada, reusa o pipeline do broker) | `test_benchmark_buys_at_first_tradable_bar_per_asset_with_entry_rules` (CA-02.1/02.2); `test_benchmark_delisted_position_is_locked_and_reported` (CA-02.3); `test_benchmark_no_rebalance` (CA-02.4) |
 | RF-MET-03 | por construção (constante literal) | `test_bias_section_includes_conditional_items` (CA-03.1) |
 | RF-MET-04 | por teste (fórmulas fechadas) | `test_turnover_formula_closed_form` (CA-04.1/04.3); `test_average_exposure_formula_closed_form` (CA-04.4); `test_same_definitions_strategy_and_benchmark` (CA-04.2) |
 | RF-MET-05 | por construção (bloco no relatório) | `test_report_mechanism_counters_block` (CA-05.1–05.3) |
@@ -417,7 +417,7 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `Portfolio.check_invariants(n=None)` | `n ≥ 1` quando dado | `cash ≥ 0`; `qty[X] ≥ 0` ∀X; com `n`, `k ≤ n` (POR-04.3/SIZ-04.3) — violação = erro de programação (`EngineError`) | `EngineError` se `n < 1` |
 | `Trade` | campos obrigatórios preenchidos na criação | `origin`/`cut_reason`/`ambiguous` auditáveis (ORD-04.4/CST-01.3/ORD-03.1) | — |
 | `MechanismCounters` | — | contagens incrementadas apenas pelo engine, categorias próprias (MET-05) | — |
-| `buy_and_hold_multi(series, n, cost_cfg, slippage, cap)` | mesmo universo/N do run (P3); mesmas regras de entrada | compra cada ativo na primeira barra negociável do próprio ativo; caixa ocioso; sem rebalance; deslistagem travada (MET-02.1–02.4) | — |
+| `buy_and_hold_multi(series, n, *, initial_cash, costs, slippage, cap)` | `n == len(series) ≥ 1` (P3 — o N do run É o conjunto passado); `series` não vazio; `cap ∈ (0, 1]` | compra cada ativo na primeira barra negociável do próprio ativo (warmup 0 da instância ⇒ execução ao open da PRÓXIMA barra do próprio ativo, ADR-0002); herda TODAS as regras de entrada por construção (reusa o pipeline `convert`/`execute_pending` do broker); caixa ocioso; sem rebalance; deslistagem travada (MET-02.1–02.4) | `EngineError` se `n != len(series)` ou `n < 1` ou `series` vazio |
 | `turnover_annualized(trades, equity_daily, n_bars)` | `n_bars ≥ 1`; `equity_daily` alinhada à série | valor = fórmula fechada de RF-MET-04; mesma definição para estratégia e benchmark (MET-04.1/04.2/04.3) | — |
 | `avg_exposure(daily_notional, equity_daily)` | séries alinhadas; `equity > 0` | média diária de `(Σ qtyᵢ · closeᵢ) / equity` (MET-04.4) | — |
 | `reconcile_multi(result)` | `result` de um run multi (T11) | `ReconciliationReport` com as parcelas; `reconciles` = `math.isclose(rel_tol=1e-9)` (POR-04.2/RNF-08), nunca igualdade exata; PnL realizado BRUTO (custos fora — §4.6) | `EngineError` se `result` inválido (trade aberto sem `marks[ticker]` — erro de programa) |
@@ -539,12 +539,17 @@ def avg_exposure(daily_notional: Series, equity_daily: Series) -> float:
 def contribution_per_asset(result: BacktestResultMulti) -> dict[str, float]: ...  # emenda T13
 
 # analytics/benchmark.py (estendido) — S6
-def buy_and_hold_multi(series: dict[str, PriceSeries], n: int,
-                       cost_cfg, slippage: SlippageModel, cap: float) -> BacktestResult:
+def buy_and_hold_multi(series: dict[str, PriceSeries], n: int, *,
+                       initial_cash: float = 100_000.0,
+                       costs: CostModel | None = None,
+                       slippage: SlippageModel | None = None,
+                       cap: float = 0.10) -> BacktestResultMulti:
     """compra cada ativo na primeira barra negociável do PRÓPRIO ativo (MET-02.2);
-       herda TODAS as regras de entrada: custos, slippage, cap (MET-02.1);
-       mesmo N do run (P3); caixa ocioso; sem rebalance (MET-02.4);
-       deslistagem travada e reportada (MET-02.3)"""
+       herda TODAS as regras de entrada por construção (MET-02.1) — REUSA o pipeline
+       do broker (convert 1/N + cap + custos; execute_pending MARKET ao open com
+       slippage) via estratégia de papel buy-and-hold + FixedOneOverN no
+       run_backtest_multi (T15); mesmo N do run (P3); caixa ocioso; sem rebalance
+       (MET-02.4); deslistagem travada e reportada (MET-02.3)"""
 
 # analytics/report.py (estendido)
 @dataclass(frozen=True)
