@@ -14,9 +14,24 @@ from typing import cast
 
 import pandas as pd
 
+from quantlab.engine.backtest import BacktestResultMulti
 from quantlab.engine.portfolio import Trade
+from quantlab.exceptions import EngineError
 
-__all__ = ["DrawdownResult", "cagr", "daily_returns", "hit_rate", "max_drawdown", "sharpe"]
+__all__ = [
+    "DrawdownResult",
+    "ReconciliationReport",
+    "cagr",
+    "contribution_per_asset",
+    "daily_returns",
+    "hit_rate",
+    "max_drawdown",
+    "reconcile_multi",
+    "sharpe",
+]
+
+#: Tolerância da identidade de conciliação multi-ativo — §6, RNF-08.
+_RECONCILIATION_REL_TOL = 1e-9
 
 _DAYS_PER_YEAR = 365.25
 
@@ -132,3 +147,109 @@ def hit_rate(trades: list[Trade]) -> float | None:
         return None
     wins = sum(1 for trade in closed if trade.realized_pnl > 0)
     return wins / len(closed)
+
+
+# ─── 2a (T13): conciliação multi-ativo (POR-04.2/§6) e contribuição por ativo ─
+
+
+@dataclass(frozen=True, slots=True)
+class ReconciliationReport:
+    """Parcelas da identidade de POR-04.2/§6 — emenda T13 (design §6).
+
+    - ``realized_pnl`` é **BRUTO** de custos (design §4.6): os custos entram
+      uma única vez, no termo próprio ``total_costs``. Um PnL líquido aqui
+      subtrairia custos duas vezes e a identidade fecharia errado por 2 x
+      custos — o erro que a definição bruta existe para evitar.
+    - ``unrealized_pnl`` usa o último close conhecido por ativo (POR-02.2),
+      incluindo a posição TRAVADA por deslistagem (POR-02.3).
+    """
+
+    initial_equity: float
+    final_equity: float
+    realized_pnl: float
+    unrealized_pnl: float
+    total_costs: float
+
+    @property
+    def reconciles(self) -> bool:
+        """Identidade de §6: ``final - inicial ≡ Σ realizado + Σ não-realizado - Σ custos``.
+
+        `math.isclose(rel_tol=1e-9)`, conforme RNF-08 — nunca igualdade exata:
+        dinheiro é float e os dois lados percorrem caminhos de arredondamento
+        diferentes.
+        """
+        left = self.final_equity - self.initial_equity
+        right = self.realized_pnl + self.unrealized_pnl - self.total_costs
+        return math.isclose(left, right, rel_tol=_RECONCILIATION_REL_TOL, abs_tol=1e-9)
+
+
+@dataclass(frozen=True, slots=True)
+class _IdentityParts:
+    """Parcelas brutas derivadas dos trades (realizado + custos + não-realizado)."""
+
+    realized: float
+    costs: float
+    unrealized: float
+
+
+def _identity_parts(result: BacktestResultMulti) -> _IdentityParts:
+    realized = sum(trade.realized_pnl for trade in result.portfolio.trades)
+    costs = sum(trade.total_cost for trade in result.portfolio.trades)
+    marks = result.portfolio.marks
+    unrealized = 0.0
+    for trade in result.portfolio.trades:
+        if not trade.is_open:
+            continue
+        mark = marks.get(trade.ticker)
+        if mark is None:
+            raise EngineError(
+                f"reconcile_multi: trade aberto em {trade.ticker} sem último close "
+                "conhecido (marks) — erro de programação (POR-02.2)."
+            )
+        unrealized += (mark - trade.entry_price) * trade.quantity
+    return _IdentityParts(realized=realized, costs=costs, unrealized=unrealized)
+
+
+def reconcile_multi(result: BacktestResultMulti) -> ReconciliationReport:
+    """Concilia o run multi-ativo (CA-04.2/§6, emenda T13).
+
+    A identidade soma sobre os **N ativos do run**, incluindo o nunca-
+    negociado (contribui zero — R2). `math.isclose(rel_tol=1e-9)` (RNF-08),
+    nunca igualdade exata.
+
+    Raises:
+        EngineError: trade aberto sem ``marks[ticker]`` (erro de programa —
+            o laço garante a pré-condição de `market_to_market` a cada barra).
+    """
+    parts = _identity_parts(result)
+    return ReconciliationReport(
+        initial_equity=result.initial_cash,
+        final_equity=result.final_equity,
+        realized_pnl=parts.realized,
+        unrealized_pnl=parts.unrealized,
+        total_costs=parts.costs,
+    )
+
+
+def contribution_per_asset(result: BacktestResultMulti) -> dict[str, float]:
+    """PnL por ativo (MET-01.1/CA-01.1, emenda T13).
+
+    Por ativo: realizado **bruto** - custos alocados por trade + não-
+    realizado pelo último close conhecido (inclui posição travada — POR-02.3).
+    TODOS os N ativos do run estão no dicionário — o nunca-negociado
+    contribui zero (SIZ-02.4/R2), sem buraco. A soma concilia com o PnL total
+    (a identidade de §6, fatiada por ticker).
+    """
+    contribution: dict[str, float] = {ticker: 0.0 for ticker in result.tickers}
+    for trade in result.portfolio.trades:
+        contribution[trade.ticker] += trade.realized_pnl - trade.total_cost
+    for trade in result.portfolio.trades:
+        if trade.is_open:
+            mark = result.portfolio.marks.get(trade.ticker)
+            if mark is None:
+                raise EngineError(
+                    f"contribution_per_asset: trade aberto em {trade.ticker} sem último close "
+                    "conhecido (marks) — erro de programação (POR-02.2)."
+                )
+            contribution[trade.ticker] += (mark - trade.entry_price) * trade.quantity
+    return contribution
