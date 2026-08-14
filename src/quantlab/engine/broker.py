@@ -1,4 +1,4 @@
-"""`Broker` e modelo de custo — C4, design §4.4.
+"""`Broker`, modelo de custo e ordens — C4/§4.4 da Fase 1 + §3.5/§3.8 da 2a.
 
 O broker é quem transforma **intenção** em **execução**: a estratégia disse
 `ENTER`, o broker decide quantas ações cabem e debita o custo. Essa fronteira
@@ -11,45 +11,158 @@ custo é debitado — silenciosamente, porque o número resultante ainda parece 
 número. A conta correta resolve `q*p + custo(q*p) <= caixa`, e a fixture
 `test_ignoring_the_cost_would_produce_negative_cash` existe só para provar que
 ela foi feita.
+
+**Fase 2a (T06):** `convert` aplica a sequência fixa de redução
+SIZING → CAP → INTEIRAS → CAIXA/CUSTOS (R1/CST-01.3) e devolve um
+`ConvertedOrder` **puro** — não toca o portfolio; a mutação é do laço (T11a).
+O custo ganha o mínimo `max(f + p·N, m)` (CA-01.1) com `m = 0` por default,
+preservando exatamente o comportamento da Fase 1. Nenhum `datetime`/`timezone`
+aqui (RNF-07): `decision_date` é `date` naive.
 """
 
+import math
 from dataclasses import dataclass
 from datetime import date
+from enum import StrEnum
 
+from quantlab.engine.conditional import ConditionalIntent, OrderKind
+from quantlab.engine.liquidity import participation_cap
 from quantlab.engine.portfolio import Portfolio, Position, Trade
+from quantlab.engine.sizing import Sizer, SizingInputs
+from quantlab.engine.strategy import Signal
 from quantlab.exceptions import EngineError
 from quantlab.logging import get_logger
 
-__all__ = ["Broker", "CostModel"]
+__all__ = ["Broker", "ConvertedOrder", "CostModel", "CutStage", "PendingOrder"]
 
 _log = get_logger(__name__)
 
 #: Decisão D2 do requirements: 1 bps sobre o notional + USD 1 fixo por trade.
 #: Corretoras de varejo nos EUA hoje cobram zero comissão, mas custo zero
 #: mascara estratégia de giro alto — o default conservador força a estratégia
-#: a pagar pelo giro.
+#: a pagar pelo giro. O mínimo `m = 0` (2a) mantém a Fase 1 intacta.
 _DEFAULT_FIXED = 1.0
 _DEFAULT_RATE = 0.0001
+_DEFAULT_MIN_COST = 0.0
+
+
+class CutStage(StrEnum):
+    """Etapa da sequência fixa que causou o corte da quantidade (CST-01.3/R1).
+
+    `SIZING` existe no domínio (uma política pode reduzir o alvo vs. all-in)
+    mas `FixedOneOverN` nunca corta no sizing — na prática o corte cai em
+    `CAP`, `INTEGER` ou `CASH`. `cut_reason` registra a **última** etapa que
+    reduziu (determinístico, sem ambiguidade — R1).
+    """
+
+    SIZING = "sizing"
+    CAP = "cap"
+    INTEGER = "integer"
+    CASH = "cash"
 
 
 @dataclass(frozen=True, slots=True)
 class CostModel:
-    """Custo de transação: valor fixo por trade + percentual sobre o notional."""
+    """Custo de transação: fixo + percentual sobre o notional, com mínimo (CA-01.1).
+
+    ``cost_for(N) = max(fixed + rate·N, min_cost)``. Default ``min_cost = 0``
+    reproduz exatamente o modelo da Fase 1 (D2: 1 bps + USD 1).
+    """
 
     fixed: float = _DEFAULT_FIXED
     rate: float = _DEFAULT_RATE
+    min_cost: float = _DEFAULT_MIN_COST
 
     def __post_init__(self) -> None:
-        if self.fixed < 0 or self.rate < 0:
-            raise EngineError(f"Custo não pode ser negativo: fixed={self.fixed}, rate={self.rate}.")
+        if self.fixed < 0 or self.rate < 0 or self.min_cost < 0:
+            raise EngineError(
+                f"Custo não pode ser negativo: fixed={self.fixed}, rate={self.rate}, "
+                f"min_cost={self.min_cost}."
+            )
 
     @property
     def is_zero(self) -> bool:
         """ENG-03.2 — o relatório precisa sinalizar que os números são irrealistas."""
-        return self.fixed == 0.0 and self.rate == 0.0
+        return self.fixed == 0.0 and self.rate == 0.0 and self.min_cost == 0.0
 
     def cost_for(self, notional: float) -> float:
-        return self.fixed + self.rate * notional
+        return max(self.fixed + self.rate * notional, self.min_cost)
+
+
+#: Tolerância de ponto flutuante na validação dos candidatos do caixa/custos.
+#: A desigualdade `q·p + custo <= cash` é resolvida com `//` (floor exato); a
+#: revalidação admite 1e-9 para não reprovar uma solução de fronteira.
+_FP_TOL = 1e-9
+
+
+def _affordable_quantity(cash: float, price: float, costs: CostModel) -> int:
+    """Reduce-until-fits em forma fechada (design §3.5, T06).
+
+    A desigualdade ``q·p + max(f + r·q·p, m) <= cash`` é linear por partes:
+
+    - região linear (``f + r·q·p >= m``): ``q <= (cash - f) / (p·(1+r))``;
+    - região do mínimo (custo = ``m``): ``q <= (cash - m) / p``.
+
+    Cada candidato é validado com o custo real — o máximo dos válidos é a
+    resposta exata do laço decremental, sem o custo O(q). `cash < 0` ⇒ 0
+    (o laço garante caixa não-negativo; aqui é só robustez).
+    """
+    if price <= 0:
+        raise EngineError(f"Preço de execução não positivo: {price}.")
+    if cash < 0:
+        return 0
+
+    candidates: list[int] = []
+    if cash >= costs.fixed:
+        candidates.append(int((cash - costs.fixed) // (price * (1.0 + costs.rate))))
+    if cash >= costs.min_cost:
+        candidates.append(int((cash - costs.min_cost) // price))
+
+    valid = [
+        q for q in candidates if q >= 0 and q * price + costs.cost_for(q * price) <= cash + _FP_TOL
+    ]
+    return max(valid, default=0)
+
+
+@dataclass(frozen=True, slots=True)
+class ConvertedOrder:
+    """Resultado da conversão (T06, design §3.5) — imutável, pronto para `place` (T07).
+
+    ``ref_price`` = último close conhecido na decisão (`inputs.last_close[ticker]`);
+    ``est_cost`` é a estimativa de custo nesse preço — o custo real sai na
+    execução (T08), com o preço de open + slippage. ``cut_reason`` é a última
+    etapa da sequência que reduziu a quantidade (None sse nenhum corte).
+    """
+
+    ticker: str
+    kind: OrderKind
+    limit: float | None
+    stop: float | None
+    qty: int
+    ref_price: float
+    decision_date: date
+    intent_seq: int
+    cut_reason: CutStage | None
+    est_cost: float
+    bracket: bool
+
+
+@dataclass(frozen=True, slots=True)
+class PendingOrder:
+    """Ordem pendente por ativo (design §3.5) — criada por `place` (T07).
+
+    `intent_seq` distingue intenções; o par de um bracket compartilha
+    `decision_date` e `intent_seq` (SIG-01.3).
+    """
+
+    ticker: str
+    kind: OrderKind
+    limit: float | None
+    stop: float | None
+    qty: int
+    decision_date: date
+    intent_seq: int
+    bracket: bool
 
 
 class Broker:
@@ -67,23 +180,14 @@ class Broker:
     def max_affordable_quantity(self, cash: float, price: float) -> int:
         """Maior quantidade inteira que cabe no caixa **depois do custo**.
 
-        Resolve ``q*p + fixed + rate*q*p <= cash``, ou seja
-        ``q <= (cash - fixed) / (p * (1 + rate))``. Fecha para baixo, porque
-        não há fracionário (premissa 3).
-
-        Faz a conta fechada em vez de iterar: `rate` é linear no notional, o
-        que torna a desigualdade solúvel direto. Um laço decrementando `q`
-        daria o mesmo número e seria O(q).
+        Resolve ``q·p + max(fixed + rate·q·p, min_cost) <= cash`` — o
+        reduce-until-fits em forma fechada (design §3.5, T06): a desigualdade
+        é linear por partes, então bastam os dois candidatos de trecho,
+        validados com o custo real. Fecha para baixo (premissa 3: sem
+        fracionário). Um laço decrementando `q` daria o mesmo número e seria
+        O(q) — mesmo princípio do texto original da Fase 1.
         """
-        if price <= 0:
-            raise EngineError(f"Preço de execução não positivo: {price}.")
-
-        affordable = cash - self._costs.fixed
-        if affordable <= 0:
-            return 0
-
-        quantity = int(affordable // (price * (1.0 + self._costs.rate)))
-        return max(quantity, 0)
+        return _affordable_quantity(cash, price, self._costs)
 
     def buy(
         self,
@@ -213,4 +317,142 @@ class Broker:
 
         raise EngineError(  # pragma: no cover - barrado por `sell`
             f"Posição em {ticker} sem `Trade` aberto correspondente."
+        )
+
+    def convert(
+        self,
+        intent: Signal | ConditionalIntent,
+        ticker: str,
+        inputs: SizingInputs,
+        sizer: Sizer,
+        adv: float | None,
+        cost_model: CostModel,
+        cap: float,
+        decision_date: date,
+        intent_seq: int,
+    ) -> ConvertedOrder | None:
+        """Converte a intenção de ENTRADA em ordem pronta para `place` (T06).
+
+        **SEQUÊNCIA FIXA (R1/CST-01.3):** SIZING → CAP (SLP-03) → INTEIRAS
+        (SIZ-01.2) → CAIXA/CUSTOS (CST-01.2). A última etapa que reduziu a
+        quantidade vira `cut_reason` (determinístico).
+
+        Função **pura**: não toca o portfolio nem o caixa — mutação é do laço
+        (T11a); `decision_date`/`intent_seq` vêm do laço (auditoria do
+        ENG-01.2, ORD-04.4/04.2). `ref_price` = último close conhecido na
+        decisão (`inputs.last_close[ticker]`); a execução real sai no open da
+        próxima barra do próprio ativo (ADR-0002, T08).
+
+        Returns:
+            `ConvertedOrder` com `qty >= 1`, ou `None` quando não sobra nem
+            uma ação (CST-01.2/SLP-03.5) — nesse caso o evento é logado.
+
+        Raises:
+            EngineError: intenção de saída, `ticker` sem last_close ou
+                `ref_price <= 0` (erro de programação — o laço não pergunta
+                por ativo sem barra, R2/SIZ-02.4).
+        """
+        if isinstance(intent, Signal):
+            if intent is not Signal.ENTER:
+                raise EngineError(
+                    "convert só recebe intenções de ENTER; EXIT passa por cancel_all "
+                    "e saída ao próximo open (T07)."
+                )
+            kind = OrderKind.MARKET
+            limit: float | None = None
+            stop: float | None = None
+            bracket = False
+        else:
+            if intent.signal is not Signal.ENTER:
+                raise EngineError(
+                    "convert só recebe intenções de ENTER; bracket de saída é ciclo de vida (T07)."
+                )
+            kind = intent.order_type
+            limit = intent.limit
+            # O par limite+stop vive na mesma intenção (SIG-01.2): para
+            # bracket, o stop protetor está em `bracket.stop` e o `stop`
+            # avulso é None — o ConvertedOrder carrega o valor do par.
+            stop = (
+                intent.stop
+                if intent.stop is not None
+                else (intent.bracket.stop if intent.bracket is not None else None)
+            )
+            bracket = intent.bracket is not None
+
+        if kind is OrderKind.STOP:
+            # P2: na 2a o único stop é o sell-stop protetor sobre posição
+            # aberta (saída — T08); buy-stop/entrada condicional é a 2b.
+            raise EngineError(
+                "convert: entrada com STOP (buy-stop) é escopo da Fase 2b (P2). "
+                "Na 2a o stop só aparece como sell-stop protetor (T08)."
+            )
+
+        ref_price = inputs.last_close.get(ticker)
+        if ref_price is None:
+            raise EngineError(
+                f"convert: {ticker} sem last_close — ativo sem barra na janela "
+                "nunca recebe alvo (R2/SIZ-02.4); erro do laço."
+            )
+        if ref_price <= 0:
+            raise EngineError(f"convert: ref_price {ref_price} não positivo para {ticker}.")
+
+        # SIZING — fração do patrimônio (SIZ-04.2) → quantidade alvo (float).
+        fraction = sizer.target_fraction(ticker, inputs)
+        qty = inputs.equity * fraction / ref_price
+        cut: CutStage | None = None
+
+        # CAP — teto de participação (SLP-03.3), mesmo helper da T02. O teto
+        # opera sobre a parte inteira do alvo (quantidades são discretas); se
+        # o teto reduz, o corte é CAP — e a comparação é em unidades inteiras.
+        if adv is not None:
+            capped = participation_cap(max(1, int(qty)), adv, cap)
+            if capped < int(qty):
+                qty = float(capped)
+                cut = CutStage.CAP
+
+        # INTEIRAS — conversão em quantidade inteira (SIZ-01.2).
+        whole = math.floor(qty)
+        if whole < qty:
+            cut = CutStage.INTEGER
+        qty = whole
+
+        if qty < 1:
+            _log.info(
+                "engine.order_below_one_share",
+                ticker=ticker,
+                date=decision_date.isoformat(),
+                qty=qty,
+                cut=cut.value if cut is not None else None,
+            )
+            return None
+
+        # CAIXA/CUSTOS — reduce-until-fits (CST-01.2), forma fechada.
+        fitted = _affordable_quantity(inputs.cash, ref_price, cost_model)
+        if fitted < 1:
+            _log.info(
+                "engine.insufficient_cash",
+                ticker=ticker,
+                date=decision_date.isoformat(),
+                cash=inputs.cash,
+                price=ref_price,
+            )
+            return None
+        if fitted < qty:
+            qty = fitted
+            cut = CutStage.CASH
+
+        notional = qty * ref_price
+        est_cost = cost_model.cost_for(notional)
+        return ConvertedOrder(
+            ticker=ticker,
+            kind=kind,
+            limit=limit,
+            stop=stop,
+            qty=qty,
+            ref_price=ref_price,
+            decision_date=decision_date,
+            intent_seq=intent_seq,
+            cut_reason=cut,
+            est_cost=est_cost,
+            bracket=bracket,
         )
