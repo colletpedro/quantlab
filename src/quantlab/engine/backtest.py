@@ -14,7 +14,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 
-from quantlab.engine.broker import BarSlice, Broker, CostModel
+from quantlab.engine.broker import BarSlice, Broker, CostModel, MechanismCounters
 from quantlab.engine.broker import PendingOrder as BrokerPendingOrder
 from quantlab.engine.calendar import UnionCalendar
 from quantlab.engine.conditional import ConditionalStrategy, OrderKind, Side
@@ -328,6 +328,9 @@ class BacktestResultMulti:
     #: terminou antes do fim da união. Marcadas pelo último close conhecido,
     #: nunca liquidadas; o relatório (T16) as reporta.
     delisted: tuple[str, ...]
+    #: MET-05/P6 (T16) — contadores de mecanismo, agregados pelo laço; o
+    #: relatório só reporta (design §3.8).
+    counters: MechanismCounters = field(default_factory=MechanismCounters)
 
     @property
     def final_equity(self) -> float:
@@ -415,6 +418,9 @@ def run_backtest_multi(
     exit_pending: dict[str, date] = {}
     equity_curve: list[float] = []
     intent_seq = 0
+    # MET-05/P6 (T16): contadores de mecanismo — stops/ambiguidades derivados
+    # dos fills, não-atendidas por caixa contadas no broker (convert/execução).
+    counters = MechanismCounters()
 
     for u in range(len(calendar.dates)):
         u_date = calendar.dates[u]
@@ -446,7 +452,7 @@ def run_backtest_multi(
                         origin=OrderKind.MARKET,
                     )
                 # EXIT sem posição (Q2) — consumido e logado pelo broker.
-            broker.execute_pending(
+            filled = broker.execute_pending(
                 store=portfolio.pending,
                 ticker=ticker,
                 bar=bar,
@@ -454,7 +460,13 @@ def run_backtest_multi(
                 cost_model=cost_model,
                 slippage=slippage_model,
                 adv=adv(series_x, i),
+                counters=counters,
             )
+            # MET-05 (T16): 1 trade de venda por stop disparado (origin=STOP,
+            # incluindo o stop do bracket ambíguo — T09) e 1 trade ambíguo por
+            # ocorrência (ADR-0007/D2).
+            counters.stops_triggered += sum(1 for t in filled if t.origin == OrderKind.STOP)
+            counters.intrabar_ambiguities += sum(1 for t in filled if t.ambiguous)
         portfolio.check_invariants(n)
 
         # ── 2. MARCAR a mercado pelo último close conhecido (POR-02.2) ──────
@@ -548,6 +560,7 @@ def run_backtest_multi(
                 cap,
                 decision_date=u_date,
                 intent_seq=intent_seq,
+                counters=counters,
             )
             if converted is not None:
                 broker.place(portfolio.pending, converted)
@@ -575,4 +588,5 @@ def run_backtest_multi(
         calendar=calendar,
         pending_dead=pending_dead,
         delisted=delisted,
+        counters=counters,
     )

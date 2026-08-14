@@ -234,6 +234,33 @@ class PendingBook:
         return tuple(self.orders.get(ticker, ()))
 
 
+@dataclass(slots=True)
+class MechanismCounters:
+    """Contadores de mecanismo do engine (MET-05/P6, emenda T16).
+
+    Bloco "contadores de mecanismo" do relatório — incrementados APENAS pelo
+    engine (design §3.8), nunca pelo relatório. `stops_triggered` e
+    `intrabar_ambiguities` são derivados pelo laço (T16) dos trades de
+    execução (``origin == OrderKind.STOP`` / ``ambiguous`` — 1 trade por
+    ocorrência, ADR-0007/D2); `unfilled_cash_orders` é incrementado aqui no
+    broker, onde o evento acontece: o `convert` (nem 1 ação após custos) e o
+    `execute_pending` (caixa insuficiente na barra de execução) — Q5/POR-01.2.
+    Mutável de propósito: é um acumulador do run; o resultado o carrega por
+    referência (``BacktestResultMulti.counters``).
+    """
+
+    stops_triggered: int = 0
+    intrabar_ambiguities: int = 0
+    unfilled_cash_orders: int = 0
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "stops_triggered": self.stops_triggered,
+            "intrabar_ambiguities": self.intrabar_ambiguities,
+            "unfilled_cash_orders": self.unfilled_cash_orders,
+        }
+
+
 class Broker:
     """Executa ordens a mercado ao preço dado, debitando custo do caixa."""
 
@@ -419,6 +446,7 @@ class Broker:
         cap: float,
         decision_date: date,
         intent_seq: int,
+        counters: MechanismCounters | None = None,
     ) -> ConvertedOrder | None:
         """Converte a intenção de ENTRADA em ordem pronta para `place` (T06).
 
@@ -518,6 +546,8 @@ class Broker:
         # CAIXA/CUSTOS — reduce-until-fits (CST-01.2), forma fechada.
         fitted = _affordable_quantity(inputs.cash, ref_price, cost_model)
         if fitted < 1:
+            if counters is not None:
+                counters.unfilled_cash_orders += 1
             _log.info(
                 "engine.insufficient_cash",
                 ticker=ticker,
@@ -627,6 +657,7 @@ class Broker:
         cost_model: CostModel,
         slippage: SlippageModel,
         adv: float | None,
+        counters: MechanismCounters | None = None,
     ) -> list[Trade]:
         """Executa as pendentes de X contra a barra do PRÓPRIO ativo (T08).
 
@@ -697,6 +728,7 @@ class Broker:
                         adv,
                         trades,
                         remaining,
+                        counters,
                     )
                 else:
                     self._execute_exit_bracket(
@@ -711,6 +743,7 @@ class Broker:
                         adv,
                         trades,
                         remaining,
+                        counters,
                     )
                 continue
 
@@ -724,6 +757,7 @@ class Broker:
                     cost_model,
                     slippage,
                     adv,
+                    counters=counters,
                 )
                 if executed is not None:
                     trades.append(executed)
@@ -829,6 +863,7 @@ class Broker:
         adv: float | None,
         trades: list[Trade],
         remaining: list[PendingOrder],
+        counters: MechanismCounters | None = None,
     ) -> None:
         """Bracket de ENTRADA (limite de compra L + sell-stop S) — ADR-0007/D2.
 
@@ -864,6 +899,7 @@ class Broker:
                 adv,
                 forced_price=limit_price,
                 ambiguous=True,
+                counters=counters,
             )
             if entry is not None:
                 closed = self.sell(
@@ -891,6 +927,7 @@ class Broker:
                 cost_model,
                 slippage,
                 adv,
+                counters=counters,
             )
             if entry is not None:
                 trades.append(entry)
@@ -913,6 +950,7 @@ class Broker:
         adv: float | None,
         trades: list[Trade],
         remaining: list[PendingOrder],
+        counters: MechanismCounters | None = None,
     ) -> None:
         """Bracket de SAÍDA (take-profit limite de venda TP + sell-stop S)
         sobre posição aberta — ADR-0007/D2.
@@ -1099,6 +1137,7 @@ class Broker:
         adv: float | None,
         forced_price: float | None = None,
         ambiguous: bool = False,
+        counters: MechanismCounters | None = None,
     ) -> Trade | None:
         """Executa uma entrada (BUY) — mercado ou limite — e a consome.
 
@@ -1149,6 +1188,8 @@ class Broker:
 
         qty = min(order.qty, _affordable_quantity(portfolio.cash, price, cost_model))
         if qty < 1:
+            if counters is not None:
+                counters.unfilled_cash_orders += 1
             _log.info(
                 "engine.insufficient_cash",
                 ticker=ticker,
