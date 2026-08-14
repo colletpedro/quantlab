@@ -14,6 +14,9 @@ import pytest
 from quantlab.exceptions import DataError
 from quantlab.ingestion.provider import RawCorporateActions
 from quantlab.ingestion.resilient_provider import ResilientProvider
+from quantlab.ingestion.yfinance_provider import _back_out_splits
+from quantlab.storage.adjustment import adjustment_factors
+from quantlab.storage.models import CorporateAction, CorporateActionKind
 from tests.support import FakeProvider
 
 _START = date(2024, 1, 1)
@@ -186,3 +189,103 @@ def test_retries_must_be_at_least_one() -> None:
     """retries=0 nunca chamaria o provedor — configuração sem sentido."""
     with pytest.raises(ValueError, match="retries"):
         ResilientProvider(FakeProvider(), retries=0)
+
+
+# ─── back-out dos splits (v0.10 — bug real de dupla contagem da Fase 2a) ───
+
+
+def _split_adj_frame(close: list[float]) -> pd.DataFrame:
+    """Frame split-ajustado no formato que o yfinance devolve (auto_adjust=False)."""
+    return pd.DataFrame(
+        {
+            "Open": close,
+            "High": [c * 1.01 for c in close],
+            "Low": [c * 0.99 for c in close],
+            "Close": close,
+            "Volume": [1_000] * len(close),
+        }
+    )
+
+
+@pytest.mark.unit
+def test_back_out_splits_recovers_raw_closed_form() -> None:
+    """Forma fechada: split 4:1 no meio — barras anteriores dobram de valor... 4x.
+
+    Split-ajustado [10, 11, 10, 11] (o yfinance já dividiu as duas primeiras
+    barras por 4); bruto recuperado [40, 44, 10, 11]; volume intacto.
+    """
+    prices = _split_adj_frame([10.0, 11.0, 10.0, 11.0])
+    splits = pd.Series([0.0, 0.0, 4.0, 0.0], index=prices.index)
+
+    raw = _back_out_splits(prices, splits)
+
+    assert list(raw["Close"]) == pytest.approx([40.0, 44.0, 10.0, 11.0])
+    assert list(raw["Open"]) == pytest.approx([40.0, 44.0, 10.0, 11.0])
+    assert list(raw["Volume"]) == [1_000] * 4  # volume é como negociado, intocado
+
+
+@pytest.mark.unit
+def test_back_out_splits_multiple_splits_apply_suffix_product() -> None:
+    """Dois splits (2:1 em d2, 4:1 em d3): o fator é o produto dos posteriores.
+
+    Bruto [80, 40, 10]; split-ajustado [10, 10, 10] (80/(2x4), 40/4, 10).
+    """
+    prices = _split_adj_frame([10.0, 10.0, 10.0])
+    splits = pd.Series([0.0, 2.0, 4.0], index=prices.index)
+
+    raw = _back_out_splits(prices, splits)
+
+    assert list(raw["Close"]) == pytest.approx([80.0, 40.0, 10.0])
+
+
+@pytest.mark.unit
+def test_back_out_splits_round_trips_with_storage_adjustment() -> None:
+    """Back-out e o ajuste do §3.7 são inversos exatos (round-trip a 1e-9).
+
+    O que o yfinance entregou (split-ajustado) entra; o que o engine consome
+    (ajustado por `get_series`) é igual ao original — a dupla contagem some.
+    """
+    from datetime import date as _date
+
+    dates = [_date(2024, 1, i) for i in range(1, 5)]
+    split_adj_close = [10.0, 11.0, 10.0, 11.0]
+    prices = _split_adj_frame(split_adj_close)
+    prices.index = dates
+    splits = pd.Series([0.0, 0.0, 4.0, 0.0], index=dates)
+
+    raw = _back_out_splits(prices, splits)
+    factors = adjustment_factors(
+        dates,
+        raw["Close"].to_numpy(dtype="float64"),
+        [
+            CorporateAction(
+                ticker="AAPL", date=_date(2024, 1, 3), kind=CorporateActionKind.SPLIT, ratio=4.0
+            )
+        ],
+    )
+    adjusted = raw["Close"].to_numpy(dtype="float64") * factors.price
+
+    assert list(adjusted) == pytest.approx(split_adj_close, rel=1e-9)
+
+
+@pytest.mark.unit
+def test_back_out_splits_without_splits_is_identity() -> None:
+    """Sem split (incluindo NaN na coluna), o frame sai intacto."""
+    prices = _split_adj_frame([10.0, 11.0, 12.0])
+    splits = pd.Series([0.0, float("nan"), 0.0], index=prices.index)
+
+    raw = _back_out_splits(prices, splits)
+
+    pd.testing.assert_frame_equal(raw, prices)
+
+
+@pytest.mark.unit
+def test_back_out_splits_does_not_mutate_input() -> None:
+    """Função pura: o frame de entrada fica intacto (RNF-01)."""
+    prices = _split_adj_frame([10.0, 11.0, 10.0, 11.0])
+    splits = pd.Series([0.0, 0.0, 4.0, 0.0], index=prices.index)
+    before = prices.copy(deep=True)
+
+    _back_out_splits(prices, splits)
+
+    pd.testing.assert_frame_equal(prices, before)
