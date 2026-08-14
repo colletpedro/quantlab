@@ -4,6 +4,16 @@ Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versioname
 
 ## 2026-08-14
 
+### fase-2b-requirements 0.2 — gate 1 aprovado
+
+Gate 1 da Fase 2b declarado **APROVADO** após checklist validado pelo tech lead do web.
+
+**Checklist (CONTRIBUTING.md)** — (a) todos os **54 CAs** da v0.2 são falseáveis, com teste nomeado por CA (tabela RF × CA × teste no formato de saída do gate 1; atenção aos novos: CA-03.4 aluguel nos dois lados, CA-04.3 short × dividendo em forma fechada, CA-01.5 margin_factor 1.0 exato, CA-02.3 métrica de seleção IS no MHT); (b) seção de questões abertas vazia (Q1–Q6 fechadas em D1–D7); (c) premissas e vieses declarados (aluguel ilimitado + configurável, long-only revogado, sem fracionário, moeda única, vieses de RF-MET-06).
+
+**Correção de contagem** — o total real de CAs é 54 (v0.1: 50; v0.2: +4 de R1/R2/R3/R5); o número "30" citado no checklist era contagem incorreta e foi corrigido no registro.
+
+Gate 2 (design v0.1 + ADRs 0009–0011) pode abrir.
+
 ### fase-2b-requirements 0.2 — em revisão
 
 v0.1 revisada pelo tech lead do web; resoluções **R1–R7** aplicadas e promovida de draft para em revisão.

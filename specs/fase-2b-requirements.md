@@ -1,9 +1,9 @@
 # Fase 2b — Venda a descoberto, margem e walk-forward — Requisitos
 
-**Status:** em revisão — v0.1 revisada pelo tech lead do web; resoluções R1–R7 aplicadas
+**Status:** 🟢 aprovada (gate 1 fechado)
 **Versão:** 0.2
 **Data:** 2026-08-14
-**Próximo gate:** aprovação do gate 1 (checklist: CAs falseáveis nomeados, questões abertas vazias, premissas e vieses declarados)
+**Próximo gate:** gate 2 (design v0.1 + ADRs 0009–0011)
 **Antecede:** Fase 3 (analytics e risco: Sortino, VaR, correlação, Black-Scholes, Monte Carlo)
 
 > **Nota de escopo.** A Fase 2 foi dividida em 2a e 2b. O critério da divisão é a
@@ -538,4 +538,5 @@ imposto, high-frequency, hard-to-borrow real).
 | Versão | Data | Mudança |
 |---|---|---|
 | 0.2 | 2026-08-14 | Revisão do gate 1 (tech lead do web): resoluções **R1–R7** aplicadas. R1: viés "disponibilidade de aluguel ilimitada" em RF-MET-06 + restrição configurável em RF-SHT-03 CA-03.4. R2: RF-SHT-04 CA-04.3 (PnL short através de data ex ≡ retorno do preço ajustado). R3: fator único de margem declarado como simplificação, alternativa de dois níveis descartada (§8.1), default 1.0 explícito (RF-MRG-01 CA-01.5). R4: warmup do OOS pela cauda do IS (RF-WFK-01 CA-01.3), alternativa descartada. R5: métrica de seleção IS = Sharpe anualizado rf=0 (RF-WFK-02 CA-02.3) e incluída no viés MHT (RF-MET-06). R6: fundo quebrado com métricas `None` explícito, nunca NaN (RF-MRG-03 CA-03.2). R7: Q6 fechada como D7 (rolling default, anchored configurável; decisão do autor). §9 vazia. Status draft → em revisão. |
+| 0.2 (aprovada) | 2026-08-14 | **Gate 1 APROVADO** — checklist do CONTRIBUTING.md validado item a item pelo tech lead do web: (a) os **54 CAs** da v0.2 têm teste nomeado que os quebraria (tabela RF × CA × teste, padrão da casa); (b) §9 vazia (Q1–Q6 fechadas em D1–D7, nada "deixa para depois"); (c) premissas e vieses declarados (aluguel ilimitado + configurável, long-only revogado, sem fracionário, moeda única, vieses de RF-MET-06). Status em revisão → 🟢 aprovada. Gate 2 (design) pode abrir. |
 | 0.1 | 2026-08-14 | Rascunho inicial, com decisões D1–D6 propostas e Q1–Q6 em aberto para o gate 1 |
