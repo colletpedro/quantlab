@@ -227,6 +227,39 @@ diferentes como sinais contraditórios, ou como evidência de que Sharpe "descob
 que CAGR não viu, seria ler ruído estrutural do próprio desenho da estratégia como
 informação nova.
 
+### Fase 2a — multi-ativo, benchmark 1/N (2026-08-14)
+
+**SMA cross 20/50 sobre o portfólio 1/N dos mesmos 20 tickers,
+2015-01-02 a 2026-08-05 (2.914 barras de união), contra benchmark 1/N
+buy-and-hold — custos (USD 1 + 1 bps), slippage (1 bps) e cap de
+participação (10% do ADV) idênticos nos dois lados (mesmo N, mesmas regras
+de entrada, S6).** Relatório completo em
+[`results/fase_2a_run_20_ativos.json`](results/fase_2a_run_20_ativos.json).
+
+| | Estratégia (SMA 20/50, 1/N) | Benchmark (1/N B&H) |
+|---|---:|---:|
+| Retorno acumulado | +217,93% | +2.509,09% |
+| CAGR | 10,50% | 32,50% |
+| Sharpe | 1,04 | 1,15 |
+| Max drawdown | 14,74% | 43,00% |
+| Trades | 618 | 20 |
+| Turnover anualizado | 2,69 | 0,01 |
+| Exposição média | 64,22% | 99,58% |
+
+**Mesma assinatura da Fase 1, agora multi-ativo:** a estratégia perde em
+retorno (618 trades × custos + tempo fora do mercado num mercado de alta
+prolongada) e ganha em drawdown (14,74% vs 43,00% — sair da posição corta
+risco junto com retorno; é o mesmo mecanismo do RF-CON-03 acima, agora
+medido uma única vez no portfólio em vez de por ticker). Nota de
+honestidade: 13 dos 20 tickers têm a série truncada pela ingestão (terminam
+2026-07-31; AAPL vai a 2026-08-05) e são reportados como "deslistados" —
+semântica de série terminada (POR-02.3), não deslistagem real de mercado.
+
+Nota de dados: durante este run foi encontrado e corrigido um bug real da
+ingestão da Fase 1 (dupla contagem de splits no raw — ver
+[docs/STATE.md](docs/STATE.md) e o CHANGELOG). O run da Fase 2a usou a base
+corrigida; os 20 relatórios por ticker da Fase 1, não.
+
 ### Interpretação
 
 Isto é o resultado esperado, não uma falha do engine. Mega caps americanas entre
