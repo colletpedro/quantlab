@@ -117,6 +117,10 @@ class OrderKind(Enum):
     LIMIT  = "limit"
     STOP   = "stop"
 
+class Side(Enum):                       # vocabulário de execução — T01 (conditional.py); §3.3 importa daqui
+    BUY = "buy"
+    SELL = "sell"
+
 @dataclass(frozen=True)
 class Bracket:
     limit: float    # limite de entrada
@@ -148,9 +152,7 @@ class ConditionalStrategy(Protocol): # opcional — retrocompatível (SIG-01.1)
 ### 3.3 Slippage e liquidez — `engine/slippage.py` + `engine/liquidity.py` (novos)
 
 ```python
-class Side(Enum):
-    BUY = "buy"
-    SELL = "sell"
+# Side (BUY/SELL) — definido em engine/conditional.py (§3.2); importado aqui.
 
 class SlippageModel(Protocol):
     def execution_price(self, ref: float, side: Side, qty: int, adv: float | None) -> float: ...
@@ -295,8 +297,8 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `UnionCalendar.build(series)` | `series` não vazio; datas de cada série ordenadas e sem duplicata | `dates` = união ordenada; `bar_index[X][u] = -1` sse X sem barra em `dates[u]`; `last_known` = último índice ≥ 0 à esquerda; arrays imutáveis (`writeable=False`) | — |
 | `UnionCalendar.has_bar/bar_index/last_close_index(ticker, u)` | `ticker ∈ series`; `0 ≤ u < len(dates)` | O(1); `bar_index` devolve índice do próprio array ou `None` (POR-05.1); `last_close_index` devolve `None` sse o ativo ainda não tem barra (POR-02.2) | `KeyError` se ticker fora do run |
 | `ConditionalStrategy.on_bar(view)` | `view.i ≥ warmup`; `view` contém apenas barras do próprio ativo (POR-02.4) | devolve `Signal`/`ConditionalIntent`/`None`; sem acesso a caixa/posição/trades (ENG-05.2); sem efeito colateral sobre a carteira | — |
-| `ConditionalIntent` | `LIMIT` ⇒ `limit` presente; `STOP` ⇒ `stop` presente; `bracket` ⇒ par `(limit, stop)` juntos (SIG-01.2) | ordens derivadas compartilham o `decision_date` da intenção (SIG-01.3) | `ValueError` se pré-condição violada (construtor) |
-| `Bracket` | `0 < stop < limit` (entrada: limite de compra acima do stop protetor) | — | `ValueError` se violado |
+| `ConditionalIntent` | `LIMIT` ⇔ `limit` presente; `STOP` ⇔ `stop` presente; `MARKET` ⇒ sem `limit`/`stop`; `bracket` ⇒ `order_type = LIMIT` e `limit = bracket.limit` (par na mesma intenção — SIG-01.2) | ordens derivadas compartilham o `decision_date` da intenção (SIG-01.3) | `EngineError` se pré-condição violada (construtor) |
+| `Bracket` | `0 < stop < limit` (entrada: limite de compra acima do stop protetor; saída: take-profit acima do stop — ADR-0007) | — | `EngineError` se violado |
 | `SlippageModel.execution_price(ref, side, qty, adv)` | `ref > 0`; `qty ≥ 1` | preço na direção desfavorável ao executor; aplicado SÓ a ordens a mercado e a stops convertidos (SLP-04.1/04.4); limite nunca violado (SLP-04.2); custos fora do preço (SLP-04.3) | — |
 | `FixedBps` | `bps ≥ 0` | `ref × (1 ± bps/10000)` (SLP-02.1) | `ValueError` se `bps < 0` |
 | `Participation` | `bps ≥ 0`; `k ≥ 0`; `adv > 0` ou `None` | `ref × (1 ± bps(1 + k·q/ADV)/10000)` (C2/ADR-0006); `adv is None` ⇒ comportamento de `FixedBps` + aviso (SLP-03.2) | `ValueError` se `k < 0` |
