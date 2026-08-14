@@ -1745,3 +1745,59 @@ seção 9 (Q1-Q5) seguem sem decisão fechada, e nenhuma linha de
 `engine/`/`strategies/` relativa a N-ativos foi escrita. Próximo passo real
 da Fase 2a é fechar o gate 1 (revisar §4-§6, decidir Q1-Q5) antes de
 qualquer design.
+
+> Desatualizado em 2026-08-14: a Fase 2a foi implementada ponta a ponta
+> (T01–T18) — ver a seção abaixo e `docs/STATE.md`.
+
+---
+
+## Fase 2a — implementação completa (2026-08-14)
+
+Implementação commit a commit (T01–T18, gates 1–3 fechados). O corpo e o
+resultado estão em `docs/STATE.md`, `specs/CHANGELOG.md` e
+`results/fase_2a_run_20_ativos.json`. Esta seção registra a lição que vale
+para as próximas fases — o mesmo papel do registro do ADR-0004 na v0.5 da
+Fase 1.
+
+### A lição: erro de fator constante × ruído errático
+
+O primeiro E2E do DoD (20 ativos × ~10 anos) entregou um benchmark 1/N que
+"comprou" **414.573 ações de NVDA (832× o capital)** a preço ajustado de
+US$ 0,012 e retornou ~870× — um número que não precisava de auditoria para
+ser impossível. Era **dupla contagem de splits**: o `YFinanceProvider` usava
+`auto_adjust=False`, que no yfinance **ainda aplica splits** ao OHLC (só
+exclui dividendos), e o ajuste do §3.7 aplicava o split de novo (÷40 duas
+vezes na NVDA).
+
+A diferença entre os dois bugs de dados reais desta linha de projeto:
+
+| | Ruído errático (NaN, F4) | Fator constante (splits, T18) |
+|---|---|---|
+| Sintoma | número inválido (`nan` no CAGR) — impossível de ignorar | número **plausível demais** (870×) — parece espetacular, não quebrado |
+| Efeito | quebra uma barra; corrompe só quem está posicionado nela | multiplica/divide **toda a série** por uma constante — nada quebra, tudo infla/defla junto |
+| Detecção | regra de validação por barra (ING-05.1) | **sanidade cruzada** (bruto × ajuste) — regra por barra não pega fator |
+| Armadilha | fácil de ver, fácil de corrigir | fácil de acreditar: "a estratégia é ruim, o mercado subiu" |
+
+Regra prática: **quando um resultado agregado for melhor (ou pior) do que o
+plausível, suspeite primeiro de fator constante antes de suspeitar da
+estratégia.** O "provável demais para ser verdade" é o sintoma
+característico — um erro de fator não produz outliers; produz uma série
+inteira deslocada de forma determinística.
+
+A sanidade cruzada que o ADR-0003 previa como risco (provedor entregando
+ajustado como bruto) aconteceu de verdade — e virou **guarda executável**:
+`make verify-raw` falha se a razão bruta colar em 1 (raw igual a ajustado
+num trecho com splits) ou se o ajustado saltar fora da data ex. Correção em
+três partes, spec-first (CLAUDE.md): emenda do design da Fase 1 (v0.10),
+back-out no provider com round-trip 1e-9 contra o ajuste do storage, e
+migração determinística de 9.030 barras (backup em `/tmp`, idempotente).
+
+### O que a Fase 2b herda
+
+- `engine/` multi-ativo completo (calendar/liquidity/slippage/sizing/
+  conditional/broker/portfolio/laço) — buy-stop e entradas condicionais
+  ficaram declaradamente fora da 2a e são o primeiro item da 2b.
+- `make verify-raw` como guarda de dados permanente (rodar antes de qualquer
+  E2E com dados reais).
+- Pendência registrada para decisão do autor: os 20 relatórios por ticker da
+  Fase 1 foram gerados com a base pré-correção e não foram regenerados.
