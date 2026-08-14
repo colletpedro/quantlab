@@ -249,15 +249,25 @@ class ConvertedOrder:               # resultado da conversão — T06 (emenda §
     bracket: bool                   # originado de bracket — T07 deriva o par stop (ADR-0007)
 
 @dataclass(frozen=True)
+class BarSlice:               # emenda T08 — barra de execução do PRÓPRIO ativo
+    date: date                # naive (RNF-07); gap = date − decision_date
+    open: float
+    high: float
+    low: float
+    close: float
+
+@dataclass(frozen=True)
 class PendingOrder:
     ticker: str
     kind: OrderKind
+    side: Side                  # BUY (entrada) | SELL (saída) — emenda T08
     limit: float | None       # presente sse LIMIT
     stop: float | None        # presente sse STOP
     qty: int
     decision_date: date       # base da auditoria do ENG-01.2 (ORD-04.4)
     intent_seq: int           # "última intenção vence" (ORD-04.2)
     bracket: bool             # originado de bracket (resolução de ambiguidade — ADR-0007)
+    cut_reason: CutStage | None  # etapa do corte no convert (CST-01.3) — emenda T08
 
 @dataclass
 class PendingBook:            # emenda T07 — o store de pendentes VIVE AQUI (broker.py),
@@ -288,15 +298,26 @@ class Broker:
            já, mas só ATIVA com posição aberta (ORD-02.2, T08) — D2/ADR-0007
            exige o stop vivo durante a barra de entrada para a ambiguidade
            intrabarra (abre em L e fecha no stop na MESMA barra)."""
-    def execute_pending(self, ticker: str, bar: BarSlice, adv: float | None) -> list[Trade]:
-        """Executa pendentes de X no open da barra do PRÓPRIO ativo (POR-05.3 — ADR-0002 por ativo):
-           - MARKET → open, com slippage de preço (SLP-04.1)
-           - LIMIT  → low ≤ L ? min(L, open) : não executa e CANCELA ao fim da barra (ORD-01.1/01.3)
-           - STOP   → (posição aberta) low ≤ S ? vira mercado a min(S, open) + slippage (ORD-02.1);
-                      sem posição aberta, nunca ativa (ORD-02.2)
-           - Ambiguidade intrabarra → pior caso (ADR-0007/D2), Trade.ambiguous = True
+    def execute_pending(self, store: PendingBook, ticker: str, bar: BarSlice,
+                        portfolio: Portfolio, cost_model: CostModel,
+                        slippage: SlippageModel, adv: float | None) -> list[Trade]:
+        """Executa pendentes de X contra a barra do PRÓPRIO ativo (emenda T08 —
+        POR-05.3/ADR-0002 por ativo; o portfolio vem por parâmetro, broker estático):
+           - MARKET (BUY) → open + slippage de preço (SLP-04.1); qty cortada para caber
+             no caixa (invariante cash ≥ 0); sem caixa p/ 1 ação ⇒ não preenche, logada
+           - LIMIT BUY  → low ≤ L ? min(L, open) : CANCELA ao fim da barra (ORD-01.1/01.3);
+             SEM slippage — limite nunca violado (SLP-04.2)
+           - LIMIT SELL (take-profit) → high ≥ L ? max(L, open) : CANCELA (ORD-01.2)
+           - STOP (SELL-stop, side=SELL) → SÓ com posição aberta (ORD-02.2): low ≤ S ?
+             vira mercado a min(S, open) + slippage (ORD-02.1/SLP-04.4); não disparado ⇒
+             PERMANECE pendente (persiste entre barras); sem posição ⇒ permanece (nunca ativa)
+           - Custos max(f+p·N, m) debitados do caixa, FORA do preço de execução (SLP-04.3);
+             gap = bar.date − decision_date no Trade (Fase 1); origin = OrderKind no Trade
+             (auditoria do ENG-01.2, ORD-04.4)
+           - Ambiguidade intrabarra (par limite+stop na MESMA barra) → pior caso
+             (ADR-0007/D2), Trade.ambiguous = True — T09
            - Caixa insuficiente para múltiplas ordens → atendimento alfabético por ticker,
-             não-atendida logada e contada (POR-01.2/MET-05)"""
+             não-atendida logada e contada (POR-01.2/MET-05) — T11b"""
     def cancel_all(self, store: PendingBook, ticker: str) -> None:
         """EXIT cancela TODAS as pendentes do ativo, incluindo stops (ORD-04.1)."""
 ```
@@ -364,7 +385,7 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `PendingBook.pending_for(ticker)` | — | tupla imutável com as pendentes do ativo (ordem de inserção) | — |
 | `Broker.place(store, order)` | ordem já convertida (`qty ≥ 1`); `bracket` ⇒ `kind = LIMIT` e `limit`/`stop` presentes | delega ao store: 1 pendente (sem bracket) ou o par limite+stop (bracket, mesmo `decision_date`/`intent_seq` — SIG-01.3); sem reserva de caixa (ORD-04.3) | `EngineError` se `bracket` sem `limit`/`stop` |
 | `Broker.cancel_all(store, ticker)` | — | delega ao store — todas as pendentes do ativo canceladas, incluindo stops (ORD-04.1) | — |
-| `Broker.execute_pending(ticker, bar, adv)` | `bar` é a próxima barra do próprio ativo (ADR-0002 por ativo, POR-05.3) | mercado ao open; limite a `min/max(L, open)` ou cancelado ao fim da barra (ORD-01.1/01.3); stop a `min(S, open)` com slippage (ORD-02.1); pior caso intrabarra registrado (ADR-0007); atendimento alfabético (POR-01.2); caixa nunca negativo | — |
+| `Broker.execute_pending(store, ticker, bar, portfolio, cost_model, slippage, adv)` | `bar` é a próxima barra do próprio ativo (ADR-0002 por ativo, POR-05.3); preços > 0 | mercado ao open + slippage (SLP-04.1); limite a `min/max(L, open)` ou cancelado ao fim da barra (ORD-01.1/01.3), nunca violado (SLP-04.2); stop a `min(S, open)` + slippage (ORD-02.1), só com posição, persiste quando não disparado (ORD-02.2); custos fora do preço (SLP-04.3); `origin` no Trade (ORD-04.4); caixa nunca negativo; consumidas/removidas do store | `EngineError` se preço ≤ 0 ou barra malformada |
 | `Broker.cancel_all(ticker)` | — | todas as pendentes do ativo canceladas, incluindo stops (ORD-04.1) | — |
 | `Portfolio.market_to_market(close_by_ticker)` | `close_by_ticker` cobre todos os ativos com posição (último close conhecido — POR-02.2) | equity consistente com a identidade de POR-04.1 | — |
 | `Trade` | campos obrigatórios preenchidos na criação | `origin`/`cut_reason`/`ambiguous` auditáveis (ORD-04.4/CST-01.3/ORD-03.1) | — |
@@ -381,7 +402,7 @@ Para cada índice-união `u` em `0..D-1` (em cada fase, ativos processados em **
 ```
 1. EXECUTAR — para cada X com bar_index[X][u] ≥ 0 (alfabético):
        i = bar_index[X][u]
-       trades += broker.execute_pending(X, barra_i, adv(X, i))
+       trades += broker.execute_pending(book, X, barra_i, portfolio, cost_model, slippage, adv(X, i))
        # limite não preenchido cancela ao fim da barra (Q2/ORD-01.3)
        # decisão da barra i de X executa no open[i+1] de X (ADR-0002 por ativo — POR-05.3)
 
