@@ -1,27 +1,27 @@
 {
   "ticker": "AAPL",
   "strategy": {
-    "cumulative_return": 15.028189940363205,
-    "cagr": 0.2708315793069511,
-    "sharpe": 0.43343810341304523,
+    "cumulative_return": 3.0258988514512595,
+    "cagr": 0.12769431564097222,
+    "sharpe": 0.7085565180844546,
     "max_drawdown": {
-      "magnitude": 0.28008968303055676,
+      "magnitude": 0.2800420769323069,
       "peak_date": "2022-08-17",
       "trough_date": "2023-03-01",
       "recovery_date": "2024-06-12"
     },
     "num_trades": 33,
-    "hit_rate": 0.46875
+    "hit_rate": 0.5
   },
   "benchmark": {
-    "cumulative_return": 42.79108429649968,
-    "cagr": 0.3929066046816805,
-    "sharpe": 0.5387973800642613,
+    "cumulative_return": 9.319138061621901,
+    "cagr": 0.22632735033001739,
+    "sharpe": 0.8538318552379985,
     "max_drawdown": {
-      "magnitude": 0.3851587008293833,
+      "magnitude": 0.38673094246808726,
       "peak_date": "2018-10-03",
       "trough_date": "2019-01-03",
-      "recovery_date": "2019-10-10"
+      "recovery_date": "2019-10-11"
     },
     "num_trades": 1,
     "hit_rate": null
@@ -44,8 +44,8 @@
     "Sem correção para múltiplas hipóteses — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas."
   ],
   "provenance": {
-    "series_hash": "8a9a9c7ad47a4158d6142e097acde4f4897ebb9dd1f202c42e58efd538dde079",
-    "last_ingested_at": "2026-08-04T05:31:16.852000+00:00"
+    "series_hash": "095c85a84175877580bdd2e11c771b61ae85ea0bdbe0acc0e90f57db8b7400d0",
+    "last_ingested_at": "2026-08-06T03:42:28.097000+00:00"
   },
   "run": {
     "strategy": {
@@ -56,8 +56,8 @@
       }
     },
     "initial_capital": 100000.0,
-    "bars_consumed": 2911,
+    "bars_consumed": 2914,
     "effective_start": "2015-01-02",
-    "effective_end": "2026-07-31"
+    "effective_end": "2026-08-05"
   }
 }

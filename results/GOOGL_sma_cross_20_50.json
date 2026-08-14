@@ -1,27 +1,27 @@
 {
   "ticker": "GOOGL",
   "strategy": {
-    "cumulative_return": 3.94091270301669,
-    "cagr": 0.14798672699896165,
-    "sharpe": 0.7482256729660709,
+    "cumulative_return": 4.349890501232701,
+    "cagr": 0.1559006906829461,
+    "sharpe": 0.7849549678011319,
     "max_drawdown": {
-      "magnitude": 0.45253289514283657,
+      "magnitude": 0.4070813375778398,
       "peak_date": "2021-09-01",
       "trough_date": "2023-02-24",
-      "recovery_date": "2025-08-29"
+      "recovery_date": "2025-08-08"
     },
-    "num_trades": 28,
-    "hit_rate": 0.6428571428571429
+    "num_trades": 29,
+    "hit_rate": 0.6206896551724138
   },
   "benchmark": {
-    "cumulative_return": 256.64937859033586,
-    "cagr": 0.6273370974569101,
-    "sharpe": 0.3453144192862242,
+    "cumulative_return": 11.881322988940804,
+    "cagr": 0.25040465836592274,
+    "sharpe": 0.9132683443398093,
     "max_drawdown": {
-      "magnitude": 0.31659566840489706,
-      "peak_date": "2022-08-15",
+      "magnitude": 0.44319220537193843,
+      "peak_date": "2021-11-18",
       "trough_date": "2022-11-03",
-      "recovery_date": "2023-05-18"
+      "recovery_date": "2024-01-25"
     },
     "num_trades": 1,
     "hit_rate": null
@@ -44,7 +44,7 @@
     "Sem correção para múltiplas hipóteses — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas."
   ],
   "provenance": {
-    "series_hash": "2c3a6a340607321efe3d2e30ef89edbe64e819929b9262feeeaf7ca0a3aa120c",
+    "series_hash": "5379950109bf24e702d58c0b8091acd50eb30ce1bece038f18ff1bcb06137189",
     "last_ingested_at": "2026-08-04T05:31:21.371000+00:00"
   },
   "run": {

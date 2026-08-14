@@ -1,24 +1,24 @@
 {
   "ticker": "NEE",
   "strategy": {
-    "cumulative_return": 6.457564021732557,
-    "cagr": 0.1895486975482954,
-    "sharpe": 0.36571909632241084,
+    "cumulative_return": 0.5318681438611355,
+    "cagr": 0.03753073860259981,
+    "sharpe": 0.29932982871071,
     "max_drawdown": {
-      "magnitude": 0.3295917780938261,
-      "peak_date": "2021-01-25",
+      "magnitude": 0.3547499351360721,
+      "peak_date": "2020-03-04",
       "trough_date": "2022-05-02",
-      "recovery_date": "2024-05-31"
+      "recovery_date": null
     },
-    "num_trades": 30,
-    "hit_rate": 0.5172413793103449
+    "num_trades": 31,
+    "hit_rate": 0.5
   },
   "benchmark": {
-    "cumulative_return": 17.052419473739405,
-    "cagr": 0.28585305368870007,
-    "sharpe": 0.45918274963893924,
+    "cumulative_return": 3.0428204664156073,
+    "cagr": 0.1272964980881539,
+    "sharpe": 0.6112790370834352,
     "max_drawdown": {
-      "magnitude": 0.44969704597315463,
+      "magnitude": 0.4496771213858951,
       "peak_date": "2021-12-31",
       "trough_date": "2023-10-09",
       "recovery_date": "2025-10-14"
@@ -44,7 +44,7 @@
     "Sem correção para múltiplas hipóteses — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas."
   ],
   "provenance": {
-    "series_hash": "0a3fe67a6acad3f4a6f4cb35c76c24e04428b9219e4b29a816e248cc1d7638c7",
+    "series_hash": "5288f63f026b8d654e9de32206e0fe82a8370c170b81f0a541a4e9bd772075aa",
     "last_ingested_at": "2026-08-04T05:31:45.252000+00:00"
   },
   "run": {

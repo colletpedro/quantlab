@@ -1,24 +1,24 @@
 {
   "ticker": "NVDA",
   "strategy": {
-    "cumulative_return": 2515.830128006903,
-    "cagr": 0.9669539960252578,
-    "sharpe": 0.519336720774936,
+    "cumulative_return": 45.31337231431519,
+    "cagr": 0.39282851721581435,
+    "sharpe": 1.0669246655909461,
     "max_drawdown": {
-      "magnitude": 0.6478772399913417,
+      "magnitude": 0.6480888865687622,
       "peak_date": "2021-11-29",
       "trough_date": "2022-12-28",
       "recovery_date": "2023-08-29"
     },
-    "num_trades": 30,
-    "hit_rate": 0.6
+    "num_trades": 29,
+    "hit_rate": 0.5862068965517241
   },
   "benchmark": {
-    "cumulative_return": 14353.612690097652,
-    "cagr": 1.3239922555158778,
-    "sharpe": 0.5908778493555535,
+    "cumulative_return": 345.29776518411757,
+    "cagr": 0.6748439516205424,
+    "sharpe": 1.3069767245544541,
     "max_drawdown": {
-      "magnitude": 0.6633509046035121,
+      "magnitude": 0.6635935985104746,
       "peak_date": "2021-11-29",
       "trough_date": "2022-10-14",
       "recovery_date": "2023-05-25"
@@ -44,7 +44,7 @@
     "Sem correção para múltiplas hipóteses — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas."
   ],
   "provenance": {
-    "series_hash": "f95c2df6e3a6c346dd4d320a940f0ab8af5b145c3934faf031b38393c70274ee",
+    "series_hash": "6490f63f380b399ae291bad17f3ea01809188fddae125b12c80555bd755ee9f4",
     "last_ingested_at": "2026-08-04T05:31:20.090000+00:00"
   },
   "run": {

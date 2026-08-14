@@ -1,27 +1,27 @@
 {
   "ticker": "AMZN",
   "strategy": {
-    "cumulative_return": 2.5837826213377215,
-    "cagr": 0.11657697665252287,
-    "sharpe": 0.5709550278006464,
+    "cumulative_return": 2.5491908691722696,
+    "cagr": 0.11564179208514647,
+    "sharpe": 0.5742586820324093,
     "max_drawdown": {
-      "magnitude": 0.5664598440685625,
+      "magnitude": 0.5489123607180995,
       "peak_date": "2020-09-02",
-      "trough_date": "2022-06-14",
+      "trough_date": "2023-04-12",
       "recovery_date": null
     },
     "num_trades": 28,
-    "hit_rate": 0.5
+    "hit_rate": 0.4642857142857143
   },
   "benchmark": {
-    "cumulative_return": 292.5888377294479,
-    "cagr": 0.6462965709216866,
-    "sharpe": 0.3463829936205142,
+    "cumulative_return": 13.678944320298175,
+    "cagr": 0.26497866098976974,
+    "sharpe": 0.8775571182771467,
     "max_drawdown": {
-      "magnitude": 0.4420335749836761,
+      "magnitude": 0.5614500688457205,
       "peak_date": "2021-07-08",
-      "trough_date": "2022-05-24",
-      "recovery_date": "2022-06-06"
+      "trough_date": "2022-12-28",
+      "recovery_date": "2024-04-11"
     },
     "num_trades": 1,
     "hit_rate": null
@@ -44,7 +44,7 @@
     "Sem correção para múltiplas hipóteses — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas."
   ],
   "provenance": {
-    "series_hash": "6b926038ba0febfadbb55fc69ad2ed0d88b587e90bdfd95e9bce5842514966c6",
+    "series_hash": "cb0b57b21b10f4da6651f9749fc5a886c0047384555796e30a4f556878c4851b",
     "last_ingested_at": "2026-08-04T05:31:23.959000+00:00"
   },
   "run": {
