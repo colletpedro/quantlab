@@ -13,15 +13,18 @@ import pytest
 from structlog.typing import EventDict
 
 from quantlab.engine.broker import (
+    BarSlice,
     Broker,
     ConvertedOrder,
     CostModel,
     CutStage,
     PendingBook,
+    PendingOrder,
 )
-from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind
-from quantlab.engine.portfolio import Portfolio
+from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind, Side
+from quantlab.engine.portfolio import Portfolio, Trade
 from quantlab.engine.sizing import FixedOneOverN, SizingInputs
+from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
 from quantlab.exceptions import EngineError
 
@@ -660,3 +663,320 @@ def test_pending_lifecycle_domain_errors() -> None:
     with pytest.raises(EngineError):
         broker.place(book, malformed)
     assert book.pending_for(_TICKER) == ()
+
+
+# ─── T08 — execução mercado/limite/stop (RF-ORD-01/02, RF-SLP-04) ────────────
+
+_EXEC = date(2024, 1, 4)  # gap 2 dias vs _DECIDED (2024-01-02)
+
+
+def _bar(*, open_: float = 10.0, high: float = 11.0, low: float = 9.0) -> BarSlice:
+    return BarSlice(date=_EXEC, open=open_, high=high, low=low, close=10.5)
+
+
+def _pending(
+    kind: OrderKind = OrderKind.MARKET,
+    *,
+    side: Side = Side.BUY,
+    limit: float | None = None,
+    stop: float | None = None,
+    qty: int = 100,
+    seq: int = 1,
+) -> PendingOrder:
+    return PendingOrder(
+        ticker=_TICKER,
+        kind=kind,
+        side=side,
+        limit=limit,
+        stop=stop,
+        qty=qty,
+        decision_date=_DECIDED,
+        intent_seq=seq,
+        bracket=False,
+    )
+
+
+def _run(
+    broker: Broker,
+    book: PendingBook,
+    portfolio: Portfolio,
+    bar: BarSlice,
+    *,
+    cost_model: CostModel | None = None,
+    slippage: FixedBps | None = None,
+) -> list[Trade]:
+    return broker.execute_pending(
+        store=book,
+        ticker=_TICKER,
+        bar=bar,
+        portfolio=portfolio,
+        cost_model=cost_model or CostModel(),
+        slippage=slippage or FixedBps(),
+        adv=None,
+    )
+
+
+@pytest.mark.unit
+def test_market_executes_at_open_with_slippage() -> None:
+    """SLP-04.1 — compra a mercado ao open com slippage (forma fechada).
+
+    open 10.00, FixedBps(1.0) ⇒ 10.001 (1 bps = 0,01%); custo
+    1 + 1e-4·1000.10 = 1.10001 debitado do caixa; gap 2 dias corridos
+    (2024-01-02 → 2024-01-04).
+    """
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(qty=100))
+
+    trades = _run(broker, book, portfolio, _bar())
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.entry_price == pytest.approx(10.001)
+    assert trade.entry_cost == pytest.approx(1.10001)
+    assert trade.origin is OrderKind.MARKET
+    assert trade.entry_gap_days == 2
+    assert portfolio.cash == pytest.approx(2_000.0 - 1_000.1 - 1.10001)
+    assert portfolio.positions[_TICKER].quantity == 100
+    assert book.pending_for(_TICKER) == ()  # consumida
+
+
+@pytest.mark.unit
+def test_limit_fills_at_min_of_limit_and_open_and_cancels_otherwise() -> None:
+    """ORD-01.1/01.3 — compra a limite: low ≤ L ⇒ min(L, open), SEM slippage;
+    senão cancela ao fim da barra (nada fica no book)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(OrderKind.LIMIT, limit=9.5, qty=100))
+
+    # low 9.40 ≤ 9.50 ⇒ preenche a 9.50 — preço exato, sem bps (limite intacto).
+    trades = _run(broker, book, portfolio, _bar(low=9.4))
+    assert len(trades) == 1
+    assert trades[0].entry_price == pytest.approx(9.5)
+    assert trades[0].origin is OrderKind.LIMIT
+
+    # low 9.60 > 9.50 ⇒ cancela: sem trade, sem posição, book vazio.
+    book2 = PendingBook()
+    portfolio2 = Portfolio(cash=2_000.0)
+    book2.place(_pending(OrderKind.LIMIT, limit=9.5, qty=100))
+    trades2 = _run(broker, book2, portfolio2, _bar(low=9.6, open_=10.0))
+    assert trades2 == []
+    assert portfolio2.positions == {}
+    assert book2.pending_for(_TICKER) == ()
+
+
+@pytest.mark.unit
+def test_limit_never_violated_on_either_side() -> None:
+    """SLP-04.2 — preço de preenchimento ≤ L na compra e ≥ L na venda
+    (take-profit); nunca ultrapassa o limite, em nenhuma direção."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(OrderKind.LIMIT, limit=9.5, qty=100))
+
+    # Gap de compra: open 10.00 > L, low toca 9.4 ⇒ preenche a 9.50 (nunca 10.01).
+    trades = _run(broker, book, portfolio, _bar(open_=10.0, low=9.4))
+    assert trades[0].entry_price == pytest.approx(9.5)
+    assert trades[0].entry_price <= 9.5
+
+    # Venda (take-profit): abre posição, LIMIT de venda L=12, high toca 12.5 ⇒
+    # preenche a max(12, open 11) = 12.00 — nunca abaixo de L.
+    book2 = PendingBook()
+    portfolio2 = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio2,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_EXEC,
+        decision_date=_DECIDED,
+    )
+    book2.place(_pending(OrderKind.LIMIT, side=Side.SELL, limit=12.0, qty=100))
+    trades2 = _run(broker, book2, portfolio2, _bar(open_=11.0, high=12.5))
+    assert len(trades2) == 1
+    exit_price = trades2[0].exit_price
+    assert exit_price is not None
+    assert exit_price == pytest.approx(12.0)
+    assert exit_price >= 12.0
+    assert trades2[0].origin is OrderKind.LIMIT
+    assert portfolio2.positions == {}  # saída integral (D3)
+
+
+@pytest.mark.unit
+def test_sell_stop_triggers_at_min_of_stop_and_open_with_slippage() -> None:
+    """ORD-02.1/SLP-04.4 — stop com posição: low ≤ S ⇒ vira mercado a
+    min(S, open) COM slippage (venda mais barata)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    book.place(_pending(OrderKind.STOP, side=Side.SELL, stop=9.0, qty=1_000))
+
+    # low 8.50 <= 9.00 ⇒ ref = min(9.0, open 9.5) = 9.0 ⇒ vende a 9.0x(1-1e-4).
+    trades = _run(broker, book, portfolio, _bar(open_=9.5, low=8.5))
+    assert len(trades) == 1
+    assert trades[0].exit_price == pytest.approx(9.0 * (1 - 1e-4))
+    assert trades[0].origin is OrderKind.STOP
+    assert portfolio.positions == {}  # stop vende a posição inteira (D3)
+    assert book.pending_for(_TICKER) == ()  # disparado ⇒ consumido
+
+
+@pytest.mark.unit
+def test_stop_does_not_activate_without_position() -> None:
+    """ORD-02.2 — stop sem posição aberta NUNCA ativa e permanece pendente."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(OrderKind.STOP, side=Side.SELL, stop=9.0))
+
+    trades = _run(broker, book, portfolio, _bar(open_=9.5, low=8.5))
+    assert trades == []
+    assert book.pending_for(_TICKER) == (_pending(OrderKind.STOP, side=Side.SELL, stop=9.0),)
+
+
+@pytest.mark.unit
+def test_stop_persists_when_not_triggered() -> None:
+    """Stop não disparado (low > S) PERMANECE pendente — persiste entre barras."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    book.place(_pending(OrderKind.STOP, side=Side.SELL, stop=9.0))
+
+    trades = _run(broker, book, portfolio, _bar(open_=10.0, low=9.5))  # low > S
+    assert trades == []
+    assert len(book.pending_for(_TICKER)) == 1
+    assert portfolio.positions[_TICKER].quantity > 0
+
+
+@pytest.mark.unit
+def test_costs_debited_from_cash_not_in_execution_price() -> None:
+    """SLP-04.3 — o preço do Trade é LIMPO (10.001, sem custo embutido); o
+    custo 1.10001 sai do caixa em etapa própria."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(qty=100))
+
+    trades = _run(broker, book, portfolio, _bar())
+    trade = trades[0]
+    assert trade.entry_price == pytest.approx(10.001)  # preço limpo, sem custo embutido
+    assert trade.entry_cost == pytest.approx(1.10001)
+    expected_debit = 100 * 10.001 + 1.10001
+    assert portfolio.cash == pytest.approx(2_000.0 - expected_debit)
+
+
+@pytest.mark.unit
+def test_execution_is_deterministic() -> None:
+    """RNF-01 — mesma entrada (book/portfolio/barra) ⇒ mesmos trades."""
+    broker = Broker()
+
+    def run_once() -> tuple[list[Trade], float]:
+        book = PendingBook()
+        portfolio = Portfolio(cash=2_000.0)
+        book.place(_pending(OrderKind.LIMIT, limit=9.5, qty=100))
+        trades = _run(broker, book, portfolio, _bar(open_=10.0, low=9.4))
+        return trades, portfolio.cash
+
+    first_trades, first_cash = run_once()
+    second_trades, second_cash = run_once()
+    assert first_trades == second_trades
+    assert first_cash == pytest.approx(second_cash)
+
+
+@pytest.mark.unit
+def test_execution_domain_errors_raise_engine_error() -> None:
+    """§3.8 — preço não positivo e MARKET de venda são EngineError."""
+    broker = Broker()
+
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(qty=100))
+    with pytest.raises(EngineError):
+        _run(broker, book, portfolio, _bar(open_=0.0))
+
+    book2 = PendingBook()
+    portfolio2 = Portfolio(cash=2_000.0)
+    book2.place(_pending(OrderKind.MARKET, side=Side.SELL, qty=100))
+    with pytest.raises(EngineError):
+        _run(broker, book2, portfolio2, _bar())
+
+    # Barra malformada (high < low) e ordens sem preço são erro de programa.
+    book3 = PendingBook()
+    portfolio3 = Portfolio(cash=2_000.0)
+    book3.place(_pending(qty=100))
+    with pytest.raises(EngineError):
+        _run(broker, book3, portfolio3, _bar(high=8.0, low=9.0))
+
+    book4 = PendingBook()
+    portfolio4 = Portfolio(cash=2_000.0)
+    book4.place(_pending(OrderKind.STOP, side=Side.SELL))  # stop sem preço
+    with pytest.raises(EngineError):
+        _run(broker, book4, portfolio4, _bar(low=8.0))
+
+    book5 = PendingBook()
+    portfolio5 = Portfolio(cash=2_000.0)
+    book5.place(_pending(OrderKind.LIMIT, side=Side.SELL))  # limite sem preço
+    with pytest.raises(EngineError):
+        _run(broker, book5, portfolio5, _bar())
+
+    book6 = PendingBook()
+    portfolio6 = Portfolio(cash=2_000.0)
+    book6.place(_pending(OrderKind.LIMIT))  # limite de compra sem preço
+    with pytest.raises(EngineError):
+        _run(broker, book6, portfolio6, _bar())
+
+
+@pytest.mark.unit
+def test_enter_with_open_position_is_ignored_and_consumed(
+    log_events: list[EventDict],
+) -> None:
+    """ENG-05 (Fase 1) — ENTER com posição aberta é ignorado e logado;
+    a pendente é consumida (não pode executar depois)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    book.place(_pending(qty=100))
+
+    trades = _run(broker, book, portfolio, _bar())
+    assert trades == []
+    assert book.pending_for(_TICKER) == ()
+    assert any(event["event"] == "engine.enter_with_open_position" for event in log_events)
+
+
+@pytest.mark.unit
+def test_insufficient_cash_at_execution_leaves_order_unfilled(
+    log_events: list[EventDict],
+) -> None:
+    """CST-01.2 na execução — sem caixa para 1 ação ao preço da barra ⇒ a
+    ordem não preenche, é consumida e o evento é logado."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=1.0)  # custo fixo 1.0 consome tudo
+    book.place(_pending(qty=100))
+
+    trades = _run(broker, book, portfolio, _bar())
+    assert trades == []
+    assert portfolio.positions == {}
+    assert book.pending_for(_TICKER) == ()
+    assert any(event["event"] == "engine.insufficient_cash" for event in log_events)

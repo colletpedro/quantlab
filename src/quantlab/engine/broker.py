@@ -25,15 +25,16 @@ from dataclasses import dataclass, field
 from datetime import date
 from enum import StrEnum
 
-from quantlab.engine.conditional import ConditionalIntent, OrderKind
+from quantlab.engine.conditional import ConditionalIntent, OrderKind, Side
 from quantlab.engine.liquidity import participation_cap
 from quantlab.engine.portfolio import Portfolio, Position, Trade
 from quantlab.engine.sizing import Sizer, SizingInputs
+from quantlab.engine.slippage import SlippageModel
 from quantlab.engine.strategy import Signal
 from quantlab.exceptions import EngineError
 from quantlab.logging import get_logger
 
-__all__ = ["Broker", "ConvertedOrder", "CostModel", "CutStage", "PendingOrder"]
+__all__ = ["BarSlice", "Broker", "ConvertedOrder", "CostModel", "CutStage", "PendingOrder"]
 
 _log = get_logger(__name__)
 
@@ -148,21 +149,43 @@ class ConvertedOrder:
 
 
 @dataclass(frozen=True, slots=True)
+class BarSlice:
+    """Barra de execução do PRÓPRIO ativo (T08, emenda §3.5).
+
+    `date` é naive (RNF-07): o gap de pregões no Trade é `bar.date -
+    decision_date`, em dias corridos, como na Fase 1 (ENG-01.5).
+    Pré-condição: preços > 0 (validados pelo `Validator` na ingestão;
+    o broker rejeita preço ≤ 0 com `EngineError`).
+    """
+
+    date: date
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+@dataclass(frozen=True, slots=True)
 class PendingOrder:
     """Ordem pendente por ativo (design §3.5) — criada por `Broker.place` (T07).
 
     `intent_seq` distingue intenções; o par de um bracket compartilha
-    `decision_date` e `intent_seq` (SIG-01.3).
+    `decision_date` e `intent_seq` (SIG-01.3). `side` (emenda T08) define
+    compra vs venda — necessário porque um LIMIT pode ser entrada (BUY) ou
+    take-profit (SELL). `cut_reason` carrega do convert para o Trade
+    (CA-01.3).
     """
 
     ticker: str
     kind: OrderKind
+    side: Side
     limit: float | None
     stop: float | None
     qty: int
     decision_date: date
     intent_seq: int
     bracket: bool
+    cut_reason: CutStage | None = None
 
 
 @dataclass(slots=True)
@@ -298,8 +321,13 @@ class Broker:
         price: float,
         execution_date: date,
         decision_date: date,
+        origin: OrderKind | None = None,
     ) -> Trade | None:
-        """ENG-02.2 + decisão D3 — liquida a posição inteira, volta a 100% caixa."""
+        """ENG-02.2 + decisão D3 — liquida a posição inteira, volta a 100% caixa.
+
+        `origin` (2a, T08): MARKET/LIMIT/STOP — auditoria do ENG-01.2
+        (ORD-04.4); `None` preserva o caminho da Fase 1.
+        """
         position = portfolio.positions.get(ticker)
         if position is None:
             raise EngineError(
@@ -319,6 +347,7 @@ class Broker:
             cost=cost,
             execution_date=execution_date,
             decision_date=decision_date,
+            origin=origin,
         )
         portfolio.check_invariants()
         return closed
@@ -332,12 +361,14 @@ class Broker:
         cost: float,
         execution_date: date,
         decision_date: date,
+        origin: OrderKind | None = None,
     ) -> Trade:
         """Substitui o `Trade` aberto pela versão fechada.
 
         `Trade` é congelado (design §4.5), então fechar é criar outro e trocar
         na lista — não mutar. Guardar o índice em vez de anexar mantém a ordem
         cronológica dos trades, que é o que o relatório e `hit_rate` esperam.
+        `origin` (2a, T08) é o tipo de ordem que fechou a posição.
         """
         for index in range(len(portfolio.trades) - 1, -1, -1):
             candidate = portfolio.trades[index]
@@ -355,6 +386,9 @@ class Broker:
                     exit_cost=cost,
                     exit_gap_days=(execution_date - decision_date).days,
                     exit_decision_date=decision_date,
+                    origin=origin,
+                    cut_reason=candidate.cut_reason,
+                    ambiguous=candidate.ambiguous,
                 )
                 portfolio.trades[index] = closed
                 return closed
@@ -527,24 +561,28 @@ class Broker:
                 PendingOrder(
                     ticker=order.ticker,
                     kind=OrderKind.LIMIT,
+                    side=Side.BUY,
                     limit=order.limit,
                     stop=None,
                     qty=order.qty,
                     decision_date=order.decision_date,
                     intent_seq=order.intent_seq,
                     bracket=True,
+                    cut_reason=order.cut_reason,
                 )
             )
             store.place(
                 PendingOrder(
                     ticker=order.ticker,
                     kind=OrderKind.STOP,
+                    side=Side.SELL,
                     limit=None,
                     stop=order.stop,
                     qty=order.qty,
                     decision_date=order.decision_date,
                     intent_seq=order.intent_seq,
                     bracket=True,
+                    cut_reason=order.cut_reason,
                 )
             )
             return
@@ -553,12 +591,14 @@ class Broker:
             PendingOrder(
                 ticker=order.ticker,
                 kind=order.kind,
+                side=Side.BUY,
                 limit=order.limit,
                 stop=order.stop,
                 qty=order.qty,
                 decision_date=order.decision_date,
                 intent_seq=order.intent_seq,
                 bracket=False,
+                cut_reason=order.cut_reason,
             )
         )
 
@@ -566,3 +606,220 @@ class Broker:
         """EXIT cancela TODAS as pendentes do ativo, incluindo stops (ORD-04.1)."""
 
         store.cancel_all(ticker)
+
+    def execute_pending(
+        self,
+        store: PendingBook,
+        ticker: str,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+    ) -> list[Trade]:
+        """Executa as pendentes de X contra a barra do PRÓPRIO ativo (T08).
+
+        Regras de preço (design §3.5, emenda T08):
+
+        - MARKET (BUY): ``open`` + slippage (SLP-04.1); a quantidade é
+          cortada para caber no caixa (invariante ``cash >= 0``); sem caixa
+          para 1 ação ⇒ não preenche, logada e consumida;
+        - LIMIT BUY: ``low <= L`` ⇒ preenche a ``min(L, open)``; senão
+          CANCELA ao fim da barra (ORD-01.1/01.3) — SEM slippage, o limite
+          nunca é violado (SLP-04.2);
+        - LIMIT SELL (take-profit): ``high >= L`` ⇒ preenche a
+          ``max(L, open)``; senão cancela (ORD-01.2);
+        - STOP (SELL-stop): só com posição aberta (ORD-02.2); ``low <= S`` ⇒
+          vira mercado a ``min(S, open)`` + slippage (ORD-02.1/SLP-04.4),
+          vende a posição inteira (D3); não disparado ⇒ PERMANECE pendente
+          (persiste entre barras); sem posição ⇒ permanece (nunca ativa).
+
+        Custos debitados do caixa, FORA do preço de execução (SLP-04.3);
+        `origin` no Trade (auditoria do ENG-01.2, ORD-04.4); gap de pregões
+        = ``bar.date - decision_date`` (Fase 1). A ambiguidade intrabarra
+        (par limite+stop na mesma barra) e o atendimento alfabético entre
+        ativos são de T09/T11b.
+
+        Returns:
+            Trades criados (entradas e saídas executadas nesta barra).
+
+        Raises:
+            EngineError: preço não positivo ou barra malformada.
+        """
+        if bar.open <= 0 or bar.high <= 0 or bar.low <= 0 or bar.close <= 0:
+            raise EngineError(f"execute_pending: barra com preço não positivo em {ticker}.")
+        if bar.high < bar.low:
+            raise EngineError(f"execute_pending: barra malformada (high < low) em {ticker}.")
+
+        trades: list[Trade] = []
+        remaining: list[PendingOrder] = []
+
+        for order in store.pending_for(ticker):
+            if order.side is Side.BUY:
+                executed = self._execute_entry(
+                    store,
+                    ticker,
+                    order,
+                    bar,
+                    portfolio,
+                    cost_model,
+                    slippage,
+                    adv,
+                )
+                if executed is not None:
+                    trades.append(executed)
+                # Entrada é consumida: preencheu ou foi cancelada/descartada.
+                continue
+
+            # side == SELL
+            if order.kind is OrderKind.STOP:
+                stop_price = order.stop
+                if stop_price is None:
+                    raise EngineError(
+                        f"execute_pending: stop pendente sem preço em {ticker} — "
+                        "ordem malformada (programming error)."
+                    )
+                position = portfolio.positions.get(ticker)
+                if position is None:
+                    # ORD-02.2: sem posição aberta, o stop NUNCA ativa — e
+                    # permanece pendente (protege a entrada quando ela encher).
+                    remaining.append(order)
+                    continue
+                if bar.low <= stop_price:
+                    ref = min(stop_price, bar.open)
+                    price = slippage.execution_price(ref, Side.SELL, position.quantity, adv)
+                    closed = self.sell(
+                        portfolio,
+                        ticker=ticker,
+                        price=price,
+                        execution_date=bar.date,
+                        decision_date=order.decision_date,
+                        origin=OrderKind.STOP,
+                    )
+                    assert closed is not None  # posição existe — sell nunca devolve None aqui
+                    trades.append(closed)
+                    # Stop disparado é consumido.
+                else:
+                    remaining.append(order)  # persiste entre barras
+                continue
+
+            if order.kind is OrderKind.LIMIT:
+                limit_price = order.limit
+                if limit_price is None:
+                    raise EngineError(
+                        f"execute_pending: limite de venda sem preço em {ticker} — "
+                        "ordem malformada (programming error)."
+                    )
+                if bar.high >= limit_price:
+                    price = max(limit_price, bar.open)  # ORD-01.2, sem slippage
+                    closed = self.sell(
+                        portfolio,
+                        ticker=ticker,
+                        price=price,
+                        execution_date=bar.date,
+                        decision_date=order.decision_date,
+                        origin=OrderKind.LIMIT,
+                    )
+                    assert closed is not None  # posição existe — sell nunca devolve None aqui
+                    trades.append(closed)
+                # Senão cancela ao fim da barra (Q2/ORD-01.3) — consumida.
+                continue
+
+            # kind == MARKET com side SELL não existe na 2a (EXIT vai por
+            # cancel_all + venda ao open — T11); se chegar, é erro de programa.
+            raise EngineError(f"execute_pending: MARKET de venda em {ticker} não existe na 2a.")
+
+        store.orders[ticker] = remaining
+        return trades
+
+    def _execute_entry(
+        self,
+        store: PendingBook,
+        ticker: str,
+        order: PendingOrder,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+    ) -> Trade | None:
+        """Executa uma entrada (BUY) — mercado ou limite — e a consome.
+
+        Preço: MARKET ⇒ ``open`` + slippage (SLP-04.1); LIMIT ⇒
+        ``min(L, open)`` quando ``low <= L``, senão cancela ao fim da barra
+        (ORD-01.1/01.3) sem slippage (SLP-04.2). A quantidade é cortada para
+        caber no caixa após o custo (``cash >= 0``); se o corte acontece
+        aqui, o `cut_reason` vira CASH (a última etapa que cortou).
+        """
+        if ticker in portfolio.positions:
+            # ENG-05 da Fase 1: ENTER com posição aberta é ignorado e logado.
+            _log.info(
+                "engine.enter_with_open_position",
+                ticker=ticker,
+                date=bar.date.isoformat(),
+            )
+            return None
+
+        if order.kind is OrderKind.MARKET:
+            price = slippage.execution_price(bar.open, Side.BUY, order.qty, adv)
+        elif order.kind is OrderKind.LIMIT:
+            limit_price = order.limit
+            if limit_price is None:
+                raise EngineError(
+                    f"execute_pending: limite de compra sem preço em {ticker} — "
+                    "ordem malformada (programming error)."
+                )
+            if bar.low > limit_price:
+                _log.info(
+                    "engine.limit_not_filled_cancelled",
+                    ticker=ticker,
+                    date=bar.date.isoformat(),
+                    limit=limit_price,
+                    low=bar.low,
+                )
+                return None
+            price = min(limit_price, bar.open)  # SLP-04.2: preço <= L
+        else:
+            raise EngineError(  # pragma: no cover - barrado por convert (buy-stop)
+                f"execute_pending: entrada {order.kind} inválida em {ticker}."
+            )
+
+        qty = min(order.qty, _affordable_quantity(portfolio.cash, price, cost_model))
+        if qty < 1:
+            _log.info(
+                "engine.insufficient_cash",
+                ticker=ticker,
+                date=bar.date.isoformat(),
+                cash=portfolio.cash,
+                price=price,
+            )
+            return None
+
+        cut_reason = order.cut_reason
+        if qty < order.qty:
+            cut_reason = CutStage.CASH  # o corte de caixa na execução é o último
+
+        notional = qty * price
+        cost = cost_model.cost_for(notional)
+        portfolio.cash -= notional + cost
+        portfolio.positions[ticker] = Position(
+            ticker=ticker,
+            quantity=qty,
+            entry_price=price,
+            entry_date=bar.date,
+        )
+        trade = Trade(
+            ticker=ticker,
+            entry_date=bar.date,
+            entry_price=price,
+            entry_decision_date=order.decision_date,
+            quantity=qty,
+            entry_cost=cost,
+            entry_gap_days=(bar.date - order.decision_date).days,
+            origin=order.kind,
+            cut_reason=cut_reason,
+            ambiguous=False,
+        )
+        portfolio.trades.append(trade)
+        portfolio.check_invariants()
+        return trade

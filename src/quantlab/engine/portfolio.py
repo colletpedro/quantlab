@@ -1,4 +1,4 @@
-"""`Trade`, `Position` e `Portfolio` — C3, design §4.4 e §4.5.
+"""`Trade`, `Position` e `Portfolio` — C3, design §4.4 e §4.5 (+ 2a §3.6).
 
 `Portfolio` modela **N posições desde já** (decisão D4 do requirements), com
 N=1 exercitado na Fase 1. O custo marginal de modelar o dicionário agora é
@@ -9,12 +9,24 @@ como **erro de programação, não condição de mercado**: violação levanta
 `EngineError`. Um backtest long-only sem alavancagem (premissas 2 e 3) não
 tem caminho legítimo para caixa negativo; se apareceu, o cálculo de tamanho
 ignorou o custo, que é precisamente o erro que design §4.4 manda vigiar.
+
+**Fase 2a (T08):** `Trade` ganha `origin`/`cut_reason`/`ambiguous` (design
+§3.6) — auditoria do ENG-01.2 (ORD-04.4), motivo do corte (CST-01.3) e
+ambiguidade intrabarra (ORD-03/ADR-0007). Os defaults preservam os trades
+criados pelos caminhos da Fase 1 (`buy`/`sell`).
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from typing import TYPE_CHECKING
 
+from quantlab.engine.conditional import OrderKind
 from quantlab.exceptions import EngineError
+
+if TYPE_CHECKING:  # mypy apenas — evita ciclo broker ⇄ portfolio em runtime
+    from quantlab.engine.broker import CutStage
 
 __all__ = ["Portfolio", "Position", "Trade"]
 
@@ -43,6 +55,12 @@ class Trade:
     exit_cost: float = 0.0
     exit_gap_days: int | None = None
     exit_decision_date: date | None = None
+    #: Fase 2a (§3.6, T08): origem da execução (auditoria ENG-01.2/ORD-04.4),
+    #: etapa do corte no sizing (CST-01.3/R1) e ambiguidade intrabarra
+    #: (ORD-03/ADR-0007). Defaults preservam os caminhos da Fase 1.
+    origin: OrderKind | None = None
+    cut_reason: CutStage | None = None
+    ambiguous: bool = False
 
     @property
     def is_open(self) -> bool:
