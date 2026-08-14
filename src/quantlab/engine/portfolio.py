@@ -14,6 +14,13 @@ ignorou o custo, que é precisamente o erro que design §4.4 manda vigiar.
 §3.6) — auditoria do ENG-01.2 (ORD-04.4), motivo do corte (CST-01.3) e
 ambiguidade intrabarra (ORD-03/ADR-0007). Os defaults preservam os trades
 criados pelos caminhos da Fase 1 (`buy`/`sell`).
+
+**Fase 2a (T10):** `Portfolio` vira multi-ativo de verdade: caixa ÚNICO
+compartilhado (POR-01.1), `pending: PendingBook` por ativo (emenda T07),
+`marks` (último close conhecido por ativo — POR-02.2) alimentando a
+identidade de equity (POR-04.1) e `check_invariants(n)` com o ``k <= N``
+(POR-04.3/SIZ-04.3). A Fase 1 continua intacta: `equity(prices)` e
+`check_invariants()` sem argumento preservam a assinatura antiga.
 """
 
 from __future__ import annotations
@@ -26,7 +33,7 @@ from quantlab.engine.conditional import OrderKind
 from quantlab.exceptions import EngineError
 
 if TYPE_CHECKING:  # mypy apenas — evita ciclo broker ⇄ portfolio em runtime
-    from quantlab.engine.broker import CutStage
+    from quantlab.engine.broker import CutStage, PendingBook
 
 __all__ = ["Portfolio", "Position", "Trade"]
 
@@ -109,16 +116,34 @@ class Position:
 
 @dataclass(slots=True)
 class Portfolio:
-    """Caixa, posições e trades. Mutável de propósito — é o estado do backtest."""
+    """Caixa, posições, trades, pendentes e marcas. Mutável de propósito — é o estado do backtest.
+
+    Multi-ativo (2a, T10): um caixa ÚNICO compartilhado (POR-01.1 — nada de
+    caixa por ativo), `pending` por ativo (emenda T07: `PendingBook` de
+    broker.py) e `marks` = último close conhecido por ativo (POR-02.2). A
+    identidade de equity (POR-04.1) deriva de `marks` quando `equity()` é
+    chamado sem argumento; a assinatura da Fase 1 (`equity(prices)`) fica
+    preservada.
+    """
 
     cash: float
     positions: dict[str, Position] = field(default_factory=dict)
     trades: list[Trade] = field(default_factory=list)
+    pending: PendingBook = field(init=False, repr=False)  # composto da T07 (broker.py)
+    marks: dict[str, float] = field(default_factory=dict)  # último close conhecido (POR-02.2)
 
     def __post_init__(self) -> None:
         if self.cash < 0:
             raise EngineError(f"Capital inicial negativo: {self.cash}.")
         self._initial_cash = self.cash
+        # Import deferido de propósito: broker.py importa este módulo em
+        # runtime (assinaturas do Broker), então um import de topo de
+        # `PendingBook` fecharia um ciclo de importação. O store vive em
+        # broker.py (emenda T07); aqui só se CONSTRÓI o default — e qualquer
+        # construção de Portfolio acontece com os dois módulos carregados.
+        from quantlab.engine.broker import PendingBook
+
+        self.pending = PendingBook()
 
     #: Guardado na construção para a identidade de conciliação de §4.6.
     _initial_cash: float = field(default=0.0, init=False, repr=False)
@@ -127,21 +152,58 @@ class Portfolio:
     def initial_cash(self) -> float:
         return self._initial_cash
 
-    def equity(self, prices: dict[str, float]) -> float:
-        """ENG-04.1 — `equity = caixa + soma(posição * preço de fechamento)`."""
+    def equity(self, prices: dict[str, float] | None = None) -> float:
+        """ENG-04.1/POR-04.1 — `equity = caixa + soma(posição * preço de fechamento)`.
+
+        Fase 1 preservada: com `prices` explícito, usa exatamente esses
+        preços. Sem argumento (2a, T10), deriva de `marks` — o último close
+        conhecido por ativo (POR-02.2), alimentado por `market_to_market` — e
+        cobre os ativos com posição, incluindo o deslistado (marca travada).
+        """
+        if prices is None:
+            prices = self.marks
         holdings = sum(
             position.market_value(prices[ticker]) for ticker, position in self.positions.items()
         )
         return self.cash + holdings
 
-    def check_invariants(self) -> None:
-        """ENG-04.4 — checada a cada barra pelo laço.
+    def market_to_market(self, close_by_ticker: dict[str, float]) -> None:
+        """POR-02.2 — atualiza `marks` (último close conhecido por ativo).
+
+        O laço (T11a/T11b) chama uma vez por data-união passando o último
+        close conhecido de CADA ativo (o calendário deriva `last_known`);
+        para ativo sem barra na data, é o close da última barra válida —
+        nunca barra fabricada. Deslistagem = marca travada no último close.
+
+        Pré-condição (erro de programa, não condição de mercado): o mapa
+        cobre TODOS os ativos com posição aberta — sem isso a equity
+        silenciosamente ignora uma posição (POR-04.1 quebra). Preços não
+        positivos são erro de domínio.
+        """
+        missing = sorted(set(self.positions) - set(close_by_ticker))
+        if missing:
+            raise EngineError(
+                f"market_to_market: faltou último close conhecido para {missing} — "
+                "o laço deve passar o last_known de todos os ativos com posição (POR-02.2)."
+            )
+        bad = sorted(t for t, c in close_by_ticker.items() if c <= 0)
+        if bad:
+            raise EngineError(f"market_to_market: close não positivo em {bad}.")
+        self.marks.update(close_by_ticker)
+
+    def check_invariants(self, n: int | None = None) -> None:
+        """ENG-04.4/POR-04.3 — checada a cada barra pelo laço.
 
         Erro de programação, não condição de mercado: `Position` já barra
         quantidade não positiva na construção, então o que sobra aqui é o
-        caixa. Caixa negativo num backtest sem alavancagem só acontece se o
-        cálculo de tamanho ignorou o custo (design §4.4).
+        caixa e o ``k <= N`` (com `n`, o número de posições abertas não pode
+        exceder o N do run — SIZ-04.3). Caixa negativo num backtest sem
+        alavancagem só acontece se o cálculo de tamanho ignorou o custo
+        (design §4.4). A Fase 1 continua intacta: `check_invariants()` sem
+        argumento pula o ``k <= N``.
         """
+        if n is not None and n < 1:
+            raise EngineError(f"check_invariants: N do run inválido: {n}.")
         if self.cash < 0:
             raise EngineError(
                 f"Caixa negativo: {self.cash}. Num backtest long-only sem alavancagem "
@@ -151,6 +213,11 @@ class Portfolio:
         for ticker, position in self.positions.items():
             if position.quantity <= 0:
                 raise EngineError(f"Posição não positiva em {ticker}: {position.quantity}.")
+        if n is not None and len(self.positions) > n:
+            raise EngineError(
+                f"Número de posições abertas {len(self.positions)} excede o N do run {n} "
+                "(k <= N, SIZ-04.3) — erro de programação do laço."
+            )
 
     @property
     def open_trade(self) -> Trade | None:

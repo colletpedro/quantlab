@@ -14,12 +14,32 @@ from datetime import date
 
 import pytest
 
+from quantlab.engine.broker import Broker, ConvertedOrder
+from quantlab.engine.conditional import OrderKind
 from quantlab.engine.portfolio import Portfolio, Position, Trade
 from quantlab.exceptions import EngineError
 
 _TICKER = "TEST"
 _ENTRY = date(2024, 1, 2)
 _EXIT = date(2024, 1, 10)
+
+
+def _converted(
+    kind: OrderKind = OrderKind.MARKET, *, qty: int = 10, seq: int = 1
+) -> ConvertedOrder:
+    return ConvertedOrder(
+        ticker=_TICKER,
+        kind=kind,
+        limit=None,
+        stop=None,
+        qty=qty,
+        ref_price=100.0,
+        decision_date=date(2024, 1, 1),
+        intent_seq=seq,
+        cut_reason=None,
+        est_cost=0.0,
+        bracket=False,
+    )
 
 
 def _open_trade(quantity: int = 10, entry_price: float = 100.0) -> Trade:
@@ -261,3 +281,186 @@ def test_open_trade_is_none_when_every_trade_is_closed() -> None:
     )
 
     assert portfolio.open_trade is None
+
+
+# ─── Portfolio: 2a T10 — multi-ativo (POR-01.1, POR-02.2, POR-04.1, POR-04.3) ─
+
+
+@pytest.mark.unit
+def test_shared_cash_single_pool() -> None:
+    """POR-01.1 — um caixa ÚNICO compartilhado (nada de caixa por ativo):
+    BBB enxerga o pool já debitado pela entrada de AAA, e o crédito de
+    fechar AAA reabastece o MESMO pool que BBB depois usa."""
+    broker = Broker()
+    portfolio = Portfolio(cash=100_000.0)
+    first = broker.buy(
+        portfolio, ticker="AAA", price=100.0, execution_date=_ENTRY, decision_date=date(2024, 1, 1)
+    )
+    assert first is not None
+    assert portfolio.cash == pytest.approx(100_000.0 - 100.0 * first.quantity - first.entry_cost)
+    drained = portfolio.cash
+
+    # AAA foi all-in (Fase 1): o pool está drenado — BBB não cabe 1 ação a 200.
+    assert (
+        broker.buy(
+            portfolio,
+            ticker="BBB",
+            price=200.0,
+            execution_date=_ENTRY,
+            decision_date=date(2024, 1, 1),
+        )
+        is None
+    )
+    assert portfolio.cash == pytest.approx(drained)  # tentativa sem efeito
+
+    # Fechar AAA credita o MESMO pool; BBB então preenche.
+    closed = broker.sell(
+        portfolio, ticker="AAA", price=110.0, execution_date=_EXIT, decision_date=date(2024, 1, 9)
+    )
+    assert closed is not None
+    second = broker.buy(
+        portfolio, ticker="BBB", price=200.0, execution_date=_ENTRY, decision_date=date(2024, 1, 1)
+    )
+    assert second is not None
+    assert portfolio.cash == pytest.approx(
+        drained
+        + 110.0 * closed.quantity
+        - closed.exit_cost
+        - 200.0 * second.quantity
+        - second.entry_cost
+    )
+
+
+@pytest.mark.unit
+def test_market_to_market_with_last_known_close() -> None:
+    """POR-02.2 — marks atualizados pelo último close conhecido; o último
+    vence, e ativo sem barra na data mantém o mark anterior (aqui: coberto
+    pelo mapa que o laço passa com o last_known)."""
+    portfolio = Portfolio(cash=500.0)
+    portfolio.positions["AAA"] = Position(
+        ticker="AAA", quantity=10, entry_price=100.0, entry_date=_ENTRY
+    )
+    portfolio.positions["BBB"] = Position(
+        ticker="BBB", quantity=5, entry_price=200.0, entry_date=_ENTRY
+    )
+
+    portfolio.market_to_market({"AAA": 110.0, "BBB": 205.0})
+    portfolio.market_to_market({"AAA": 112.0, "BBB": 205.0})  # AAA tem barra nova
+
+    assert portfolio.marks == {"AAA": 112.0, "BBB": 205.0}
+    # Identidade POR-04.1 com os últimos closes conhecidos.
+    assert portfolio.equity() == pytest.approx(500.0 + 10 * 112.0 + 5 * 205.0)
+
+
+@pytest.mark.unit
+def test_market_to_market_missing_position_raises() -> None:
+    """Pré-condição (§3.8) — o mapa tem que cobrir TODOS os ativos com
+    posição; faltou um, a equity silenciosamente ignoraria uma posição."""
+    portfolio = Portfolio(cash=500.0)
+    portfolio.positions["AAA"] = Position(
+        ticker="AAA", quantity=10, entry_price=100.0, entry_date=_ENTRY
+    )
+
+    with pytest.raises(EngineError, match="faltou último close"):
+        portfolio.market_to_market({"BBB": 205.0})
+
+
+@pytest.mark.unit
+def test_market_to_market_non_positive_close_raises() -> None:
+    portfolio = Portfolio(cash=500.0)
+    with pytest.raises(EngineError, match="não positivo"):
+        portfolio.market_to_market({"AAA": 0.0})
+
+
+@pytest.mark.unit
+def test_equity_identity_multi_asset() -> None:
+    """CA-04.1/POR-04.1 — equity = caixa + soma qty_i x último_close_i sobre
+    posições múltiplas, derivada de marks (equity() sem argumento)."""
+    portfolio = Portfolio(cash=100.0)
+    portfolio.positions["AAA"] = Position(
+        ticker="AAA", quantity=10, entry_price=10.0, entry_date=_ENTRY
+    )
+    portfolio.positions["BBB"] = Position(
+        ticker="BBB", quantity=5, entry_price=20.0, entry_date=_ENTRY
+    )
+    portfolio.market_to_market({"AAA": 12.0, "BBB": 30.0})
+
+    # Sem argumento ⇒ marks; com argumento explícito ⇒ Fase 1 preservada.
+    assert portfolio.equity() == pytest.approx(100.0 + 120.0 + 150.0)
+    assert portfolio.equity({"AAA": 13.0, "BBB": 30.0}) == pytest.approx(100.0 + 130.0 + 150.0)
+
+
+@pytest.mark.unit
+def test_cash_and_quantity_never_negative_multi() -> None:
+    """CA-04.3/POR-04.3 — os guards multi-ativo: caixa negativo e posição
+    corrompida são erro de programação, com dois ativos abertos."""
+    portfolio = Portfolio(cash=100.0)
+    portfolio.positions["AAA"] = Position(
+        ticker="AAA", quantity=10, entry_price=10.0, entry_date=_ENTRY
+    )
+    portfolio.positions["BBB"] = Position(
+        ticker="BBB", quantity=5, entry_price=20.0, entry_date=_ENTRY
+    )
+
+    portfolio.check_invariants()  # saudável
+
+    portfolio.cash = -0.01
+    with pytest.raises(EngineError, match="custo"):
+        portfolio.check_invariants()
+    portfolio.cash = 100.0
+
+    object.__setattr__(portfolio.positions["BBB"], "quantity", 0)
+    with pytest.raises(EngineError, match="não positiva"):
+        portfolio.check_invariants()
+
+
+@pytest.mark.unit
+def test_k_bounded_by_n() -> None:
+    """POR-04.3/SIZ-04.3 — k ≤ N: mais posições abertas que o N do run é
+    erro de programação; N < 1 também é erro de domínio."""
+    portfolio = Portfolio(cash=100.0)
+    portfolio.positions["AAA"] = Position(
+        ticker="AAA", quantity=10, entry_price=10.0, entry_date=_ENTRY
+    )
+    portfolio.positions["BBB"] = Position(
+        ticker="BBB", quantity=5, entry_price=20.0, entry_date=_ENTRY
+    )
+
+    portfolio.check_invariants(n=2)  # k == N: ok
+    with pytest.raises(EngineError, match="excede o N do run"):
+        portfolio.check_invariants(n=1)
+    with pytest.raises(EngineError, match="N do run inválido"):
+        portfolio.check_invariants(n=0)
+
+
+@pytest.mark.unit
+def test_pending_book_composed_into_portfolio() -> None:
+    """Emenda T07 — o Portfolio carrega um PendingBook por ativo; place não
+    debita caixa (ORD-04.3 — sem reserva)."""
+    broker = Broker()
+    portfolio = Portfolio(cash=2_000.0)
+
+    broker.place(portfolio.pending, _converted(qty=50))
+
+    pending = portfolio.pending.pending_for(_TICKER)
+    assert len(pending) == 1
+    assert pending[0].qty == 50
+    assert portfolio.cash == pytest.approx(2_000.0)  # nada debitado
+
+
+@pytest.mark.unit
+def test_multi_asset_equity_is_deterministic() -> None:
+    """RNF-01 — mesma entrada ⇒ mesma equity, marcas e invariantes."""
+
+    def run_once() -> tuple[float, dict[str, float], int]:
+        portfolio = Portfolio(cash=100.0)
+        portfolio.positions["AAA"] = Position(
+            ticker="AAA", quantity=10, entry_price=10.0, entry_date=_ENTRY
+        )
+        portfolio.market_to_market({"AAA": 12.0, "BBB": 30.0})
+        portfolio.check_invariants(n=2)
+        return portfolio.equity(), dict(portfolio.marks), len(portfolio.trades)
+
+    first = run_once()
+    second = run_once()
+    assert first == second
