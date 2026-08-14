@@ -21,7 +21,7 @@ aqui (RNF-07): `decision_date` é `date` naive.
 """
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from enum import StrEnum
 
@@ -186,6 +186,8 @@ class PendingOrder:
     intent_seq: int
     bracket: bool
     cut_reason: CutStage | None = None
+    #: ordem sintética do rebalance (SIZ-03/T11a); MARKET SELL só existe aqui
+    rebalance: bool = False
 
 
 @dataclass(slots=True)
@@ -367,6 +369,7 @@ class Broker:
         decision_date: date,
         origin: OrderKind | None = None,
         ambiguous: bool | None = None,
+        rebalance: bool | None = None,
     ) -> Trade:
         """Substitui o `Trade` aberto pela versão fechada.
 
@@ -396,6 +399,7 @@ class Broker:
                     origin=origin,
                     cut_reason=candidate.cut_reason,
                     ambiguous=ambiguous if ambiguous is not None else candidate.ambiguous,
+                    rebalance=rebalance if rebalance is not None else candidate.rebalance,
                 )
                 portfolio.trades[index] = closed
                 return closed
@@ -780,9 +784,34 @@ class Broker:
                 # Senão cancela ao fim da barra (Q2/ORD-01.3) — consumida.
                 continue
 
-            # kind == MARKET com side SELL não existe na 2a (EXIT vai por
-            # cancel_all + venda ao open — T11); se chegar, é erro de programa.
-            raise EngineError(f"execute_pending: MARKET de venda em {ticker} não existe na 2a.")
+            # kind == MARKET com side SELL: na 2a só existe como ordem
+            # SINTÉTICA do rebalance (SIZ-03/T11a) — venda parcial ao open com
+            # slippage (SLP-04.1), custos fora do preço (SLP-04.3). De sinal,
+            # MARKET de venda não existe (EXIT vai por cancel_all + saída ao
+            # open — T11); se chegar, é erro de programa.
+            if not order.rebalance:
+                raise EngineError(
+                    f"execute_pending: MARKET de venda em {ticker} sem rebalance "
+                    "não existe na 2a (EXIT vai por cancel_all + saída ao open — T11)."
+                )
+            position = portfolio.positions.get(ticker)
+            if position is not None:
+                price = slippage.execution_price(bar.open, Side.SELL, position.quantity, adv)
+                closed = self._close_partial(
+                    portfolio,
+                    ticker=ticker,
+                    qty=order.qty,
+                    price=price,
+                    execution_date=bar.date,
+                    decision_date=order.decision_date,
+                    origin=OrderKind.MARKET,
+                    rebalance=True,
+                )
+                if closed is not None:
+                    trades.append(closed)
+            # sem posição (já saiu por stop/EXIT no mesmo barra): consumida,
+            # nada a vender
+            continue
 
         store.orders[ticker] = remaining
         return trades
@@ -957,6 +986,107 @@ class Broker:
         if stop_order is not None:
             remaining.append(stop_order)
 
+    def _close_partial(
+        self,
+        portfolio: Portfolio,
+        *,
+        ticker: str,
+        qty: int,
+        price: float,
+        execution_date: date,
+        decision_date: date,
+        origin: OrderKind | None = None,
+        rebalance: bool = True,
+    ) -> Trade | None:
+        """Venda PARCIAL da posição aberta (rebalance — SIZ-03, T11a).
+
+        O modelo de Trade da Fase 1 é round-trip com quantidade fixa; a venda
+        parcial divide a operação em dois trades: o trecho VENDIDO fecha agora
+        (entry/exit completos, custos rateados pelo trecho) e o trecho restante
+        continua aberto com a quantidade reduzida (``dataclasses.replace`` na
+        lista de trades + substituição da `Position` no dicionário — os dois
+        objetos são frozen, o estado mutável é o portfolio).
+
+        `qty` maior que a posição vende a posição inteira (clamp); `qty < 1`
+        ou posição inexistente ⇒ ``None`` (ordem consumida sem efeito).
+        Custos debitados do caixa, fora do preço (SLP-04.3).
+        """
+        position = portfolio.positions.get(ticker)
+        if position is None or qty < 1:
+            return None
+        qty = min(qty, position.quantity)
+
+        open_index = next(
+            (
+                i
+                for i in range(len(portfolio.trades) - 1, -1, -1)
+                if portfolio.trades[i].ticker == ticker and portfolio.trades[i].is_open
+            ),
+            None,
+        )
+        if open_index is None:
+            raise EngineError(
+                f"_close_partial: posição em {ticker} sem trade aberto correspondente "
+                "— erro de programação (invariante do portfolio)."
+            )
+        open_trade = portfolio.trades[open_index]
+
+        notional = qty * price
+        cost = self._costs.cost_for(notional)
+        portfolio.cash += notional - cost
+
+        remaining = position.quantity - qty
+        if remaining == 0:
+            # Ajuste cobre a posição inteira — fecha como a `sell` da Fase 1.
+            del portfolio.positions[ticker]
+            closed = self._close_trade(
+                portfolio,
+                ticker=ticker,
+                price=price,
+                cost=cost,
+                execution_date=execution_date,
+                decision_date=decision_date,
+                origin=origin,
+                rebalance=rebalance,
+            )
+        else:
+            portfolio.positions[ticker] = Position(
+                ticker=ticker,
+                quantity=remaining,
+                entry_price=position.entry_price,
+                entry_date=position.entry_date,
+            )
+            # Rateia o custo de entrada pelos dois trechos (identidade de
+            # conciliação fecha: soma dos entry_cost = total pago).
+            share = qty / (position.quantity or 1)
+            portfolio.trades[open_index] = replace(
+                open_trade,
+                quantity=remaining,
+                entry_cost=open_trade.entry_cost * (1.0 - share),
+            )
+            closed = Trade(
+                ticker=ticker,
+                entry_date=open_trade.entry_date,
+                entry_price=open_trade.entry_price,
+                entry_decision_date=open_trade.entry_decision_date,
+                quantity=qty,
+                entry_cost=open_trade.entry_cost * share,
+                entry_gap_days=open_trade.entry_gap_days,
+                exit_date=execution_date,
+                exit_price=price,
+                exit_cost=cost,
+                exit_gap_days=(execution_date - decision_date).days,
+                exit_decision_date=decision_date,
+                origin=origin,
+                cut_reason=open_trade.cut_reason,
+                ambiguous=open_trade.ambiguous,
+                rebalance=rebalance,
+            )
+            portfolio.trades.append(closed)
+
+        portfolio.check_invariants()
+        return closed
+
     def _execute_entry(
         self,
         store: PendingBook,
@@ -980,8 +1110,10 @@ class Broker:
         cortada para caber no caixa após o custo (``cash >= 0``); se o corte
         acontece aqui, o `cut_reason` vira CASH (a última etapa que cortou).
         """
-        if ticker in portfolio.positions:
+        if ticker in portfolio.positions and not order.rebalance:
             # ENG-05 da Fase 1: ENTER com posição aberta é ignorado e logado.
+            # Exceção: ordem SINTÉTICA de rebalance (SIZ-03/T11a) ajusta uma
+            # posição EXISTENTE — o guard não se aplica.
             _log.info(
                 "engine.enter_with_open_position",
                 ticker=ticker,
@@ -1050,6 +1182,7 @@ class Broker:
             origin=order.kind,
             cut_reason=cut_reason,
             ambiguous=ambiguous,
+            rebalance=order.rebalance,
         )
         portfolio.trades.append(trade)
         portfolio.check_invariants()

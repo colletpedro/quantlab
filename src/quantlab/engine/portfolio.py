@@ -68,6 +68,10 @@ class Trade:
     origin: OrderKind | None = None
     cut_reason: CutStage | None = None
     ambiguous: bool = False
+    #: Fase 2a (T11a): trade de rebalanceamento (SIZ-03.2/CA-03.2) — contado
+    #: separadamente dos trades de sinal no relatório (T16). Default preserva
+    #: os caminhos da Fase 1 e da T08/T09.
+    rebalance: bool = False
 
     @property
     def is_open(self) -> bool:

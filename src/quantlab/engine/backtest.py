@@ -10,18 +10,38 @@ Nenhuma dependência de banco: recebe uma `PriceSeries` já materializada
 """
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date
 
-from quantlab.engine.broker import Broker, CostModel
+from quantlab.engine.broker import BarSlice, Broker, CostModel
+from quantlab.engine.broker import PendingOrder as BrokerPendingOrder
+from quantlab.engine.calendar import UnionCalendar
+from quantlab.engine.conditional import ConditionalStrategy, OrderKind, Side
+from quantlab.engine.liquidity import adv
 from quantlab.engine.market_view import MarketView
 from quantlab.engine.portfolio import Portfolio, Trade
+from quantlab.engine.sizing import (
+    EqualWeightOpen,
+    FixedOneOverN,
+    Sizer,
+    SizingInputs,
+    rebalance_deviation_pp,
+)
+from quantlab.engine.slippage import FixedBps, SlippageModel
 from quantlab.engine.strategy import Signal, Strategy
 from quantlab.exceptions import EngineError
 from quantlab.logging import get_logger
 from quantlab.storage.series import PriceSeries
 
-__all__ = ["BacktestResult", "EquityPoint", "PendingOrder", "run_backtest"]
+__all__ = [
+    "BacktestResult",
+    "BacktestResultMulti",
+    "EquityPoint",
+    "PendingOrder",
+    "run_backtest",
+    "run_backtest_multi",
+]
 
 _log = get_logger(__name__)
 
@@ -275,4 +295,270 @@ def _execute(
         price=open_price,
         execution_date=execution_date,
         decision_date=order.decision_date,
+    )
+
+
+# ─── 2a (T11a): laço multi-ativo calendário-driven ───────────────────────────
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestResultMulti:
+    """Resultado do run multi-ativo (emenda T11a, design §3.6).
+
+    ``dates`` é a união do calendário (T05) — a ``equity_curve`` tem um ponto
+    por data-união, marcado a mercado após o passo 2 de cada `u` (POR-04.1).
+    ``portfolio`` carrega o estado final (caixa, posições, trades, marks e
+    pendentes); ``pending_dead`` conta as intenções mortas na última barra de
+    cada ativo (ENG-01.4 por ativo — C1).
+    """
+
+    dates: tuple[date, ...]
+    equity_curve: list[float]
+    portfolio: Portfolio
+    initial_cash: float
+    n: int
+    tickers: tuple[str, ...]
+    warmup: dict[str, int]
+    costs: CostModel
+    slippage: SlippageModel
+    cap: float
+    calendar: UnionCalendar
+    pending_dead: dict[str, int]
+
+    @property
+    def final_equity(self) -> float:
+        return self.equity_curve[-1] if self.equity_curve else self.initial_cash
+
+    @property
+    def n_bars(self) -> int:
+        return len(self.dates)
+
+
+def run_backtest_multi(
+    series: dict[str, PriceSeries],
+    strategies: Mapping[str, Strategy | ConditionalStrategy],
+    *,
+    initial_cash: float = 100_000.0,
+    costs: CostModel | None = None,
+    slippage: SlippageModel | None = None,
+    cap: float = 0.10,
+    sizer: Sizer | None = None,
+) -> BacktestResultMulti:
+    """Roda N estratégias (uma por ativo) sobre o calendário-união, barra a barra.
+
+    ────────────────────────────────────────────────────────────────────────
+    **INVARIANTE — a ordem das operações dentro de cada data-união `u`**
+    (extensão da §4.3 da Fase 1, preservada por ativo):
+
+      1. **Executar** as pendentes de X ao open da barra do PRÓPRIO ativo
+         (ADR-0002 por ativo — POR-05.3), e a saída pendente de um EXIT da
+         barra anterior de X (venda ao open, origin=MARKET);
+      2. **Marcar a mercado** pelo último close conhecido (POR-02.2) e
+         registrar a equity de `u`;
+      1b. **Rebalance** (só se sizer == EqualWeightOpen): k mudou ⇒ eventos
+         com limiar em pp (SIZ-03.3) para o próximo open do próprio ativo;
+      3. **Consultar** as estratégias por ÚLTIMO (i ≥ warmup), MarketView
+         só com barras do próprio ativo (POR-03.1/05.1).
+
+    **Por que a ordem importa (Fase 1 §4.3, estendido):** executar antes de
+    marcar garante que a equity de `u` reflete a posição real ao fim de `u`;
+    executar antes de consultar garante que nenhuma decisão de `u` executa em
+    `u` (ADR-0002 em código). Uma inversão em refatoração reintroduz lookahead
+    e o teste de mutação ENG-01.2 (T12) quebra. Entre marcar e consultar a
+    ordem é livre por ativo (consulta sem efeito colateral — ENG-05.2),
+    travada por teste. As fases rodam em ordem alfabética por ativo
+    (determinismo RNF-01 + caixa compartilhado POR-01.2).
+
+    **ENG-01.4 por ativo (C1):** intenção na ÚLTIMA barra da série de X morre
+    pendente (não existe "próxima barra de X") — ENTER não é colocada, EXIT
+    não agenda saída; contada em `pending_dead[X]` e reportada (T16).
+
+    **Rebalance (SIZ-03, emenda T11a):** só com `EqualWeightOpen`; dispara
+    quando `k` (posições abertas) muda dentro de `u`; alvo 1/k; para cada
+    ativo com |w - 1/k| >= threshold_pp gera ordem sintética (MARKET,
+    `rebalance=True`, side = sinal do delta) para o próximo open do próprio
+    ativo. Roda entre marcar e consultar: a intenção de estratégia do MESMO
+    `u` tem intent_seq maior e substitui o ajuste (última intenção vence).
+    Com `k = 0` (primeira entrada) a política `EqualWeightOpen` usa a fração
+    da default, `1/N` (decisão T11a — o alvo 1/0 é indefinido).
+    """
+    if not series:
+        raise EngineError("run_backtest_multi: universo vazio — precisa de ao menos um ativo.")
+    if not strategies:
+        raise EngineError("run_backtest_multi: nenhuma estratégia registrada — nada a rodar.")
+    unknown = sorted(set(strategies) - set(series))
+    if unknown:
+        raise EngineError(f"run_backtest_multi: estratégias para ativos fora do run: {unknown}.")
+    for ticker, strategy in strategies.items():
+        if strategy.warmup < 0:
+            raise EngineError(
+                f"run_backtest_multi: warmup negativo ({strategy.warmup}) em {ticker}."
+            )
+    if not 0.0 < cap <= 1.0:
+        raise EngineError(f"run_backtest_multi: cap fora de (0, 1]: {cap}.")
+
+    n = len(series)
+    tickers = tuple(sorted(series))
+    cost_model = costs or CostModel()
+    slippage_model = slippage or FixedBps()
+    sizer_model = sizer or FixedOneOverN(n)
+    broker = Broker(cost_model)
+    calendar = UnionCalendar.build(series)
+    portfolio = Portfolio(cash=initial_cash)
+
+    warmup: dict[str, int] = {t: strategies[t].warmup for t in tickers if t in strategies}
+    pending_dead: dict[str, int] = {t: 0 for t in tickers}
+    exit_pending: dict[str, date] = {}
+    equity_curve: list[float] = []
+    intent_seq = 0
+
+    for u in range(len(calendar.dates)):
+        u_date = calendar.dates[u]
+        k_before = len(portfolio.positions)
+
+        # ── 1. EXECUTAR (alfabético; ADR-0002 por ativo — POR-05.3) ────────
+        for ticker in tickers:
+            i = calendar.bar_index_at(ticker, u)
+            if i is None:
+                continue
+            series_x = series[ticker]
+            bar = BarSlice(
+                date=series_x.dates[i],
+                open=float(series_x.open[i]),
+                high=float(series_x.high[i]),
+                low=float(series_x.low[i]),
+                close=float(series_x.close[i]),
+            )
+            # Saída pendente (EXIT da barra anterior de X): vende ao open.
+            if ticker in exit_pending:
+                decision = exit_pending.pop(ticker)
+                if ticker in portfolio.positions:
+                    broker.sell(
+                        portfolio,
+                        ticker=ticker,
+                        price=float(series_x.open[i]),
+                        execution_date=bar.date,
+                        decision_date=decision,
+                        origin=OrderKind.MARKET,
+                    )
+                # EXIT sem posição (Q2) — consumido e logado pelo broker.
+            broker.execute_pending(
+                store=portfolio.pending,
+                ticker=ticker,
+                bar=bar,
+                portfolio=portfolio,
+                cost_model=cost_model,
+                slippage=slippage_model,
+                adv=adv(series_x, i),
+            )
+        portfolio.check_invariants(n)
+
+        # ── 2. MARCAR a mercado pelo último close conhecido (POR-02.2) ──────
+        close_by_ticker: dict[str, float] = {}
+        for ticker in tickers:
+            idx = calendar.bar_index_at(ticker, u)
+            if idx is None:
+                idx = calendar.last_known_index_at(ticker, u)
+            if idx is not None:
+                close_by_ticker[ticker] = float(series[ticker].close[idx])
+        portfolio.market_to_market(close_by_ticker)
+        equity_curve.append(portfolio.equity())
+        portfolio.check_invariants(n)
+
+        # ── 1b. REBALANCE (SIZ-03; só EqualWeightOpen; k mudou?) ────────────
+        k_now = len(portfolio.positions)
+        if isinstance(sizer_model, EqualWeightOpen) and k_now >= 1 and k_now != k_before:
+            equity_now = portfolio.equity()
+            target = 1.0 / k_now
+            for ticker, position in sorted(portfolio.positions.items()):
+                mark = portfolio.marks[ticker]
+                weight = position.quantity * mark / equity_now
+                if rebalance_deviation_pp(weight, k_now) >= sizer_model.threshold_pp:
+                    target_qty = int(target * equity_now / mark)
+                    delta = target_qty - position.quantity
+                    if delta != 0:
+                        intent_seq += 1
+                        portfolio.pending.place(
+                            BrokerPendingOrder(
+                                ticker=ticker,
+                                kind=OrderKind.MARKET,
+                                side=Side.BUY if delta > 0 else Side.SELL,
+                                limit=None,
+                                stop=None,
+                                qty=abs(delta),
+                                decision_date=u_date,
+                                intent_seq=intent_seq,
+                                bracket=False,
+                                rebalance=True,
+                            )
+                        )
+
+        # ── 3. CONSULTAR (alfabético; MarketView do próprio ativo) ──────────
+        for ticker in tickers:
+            if ticker not in strategies:
+                continue
+            i = calendar.bar_index_at(ticker, u)
+            if i is None:
+                continue
+            if i < warmup[ticker]:
+                continue
+            intent = strategies[ticker].on_bar(MarketView(series[ticker], i))
+            if intent is None:
+                continue
+            is_last_bar = i == len(series[ticker]) - 1
+            # `Signal` da Fase 1 É o enum (sem atributo `.signal`); o
+            # `ConditionalIntent` carrega `.signal`. Dispatch por tipo.
+            signal = intent if isinstance(intent, Signal) else intent.signal
+            if signal is Signal.EXIT:
+                broker.cancel_all(portfolio.pending, ticker)
+                if is_last_bar:
+                    pending_dead[ticker] += 1  # ENG-01.4 — não há próxima barra p/ a saída
+                else:
+                    exit_pending[ticker] = u_date
+                continue
+            if is_last_bar:
+                pending_dead[ticker] += 1  # ENG-01.4 — intenção morre pendente
+                continue
+            intent_seq += 1
+            # Seed da primeira entrada com EqualWeightOpen (k = 0 ⇒ 1/k é
+            # indefinido): a fração é a da política default, 1/N (decisão
+            # T11a — documentada na docstring do laço).
+            effective_sizer = (
+                FixedOneOverN(n)
+                if isinstance(sizer_model, EqualWeightOpen) and not portfolio.positions
+                else sizer_model
+            )
+            converted = broker.convert(
+                intent,
+                ticker,
+                SizingInputs(
+                    equity=portfolio.equity(),
+                    cash=portfolio.cash,
+                    n=n,
+                    positions={t: p.quantity for t, p in portfolio.positions.items()},
+                    last_close=dict(portfolio.marks),
+                ),
+                effective_sizer,
+                adv(series[ticker], i),
+                cost_model,
+                cap,
+                decision_date=u_date,
+                intent_seq=intent_seq,
+            )
+            if converted is not None:
+                broker.place(portfolio.pending, converted)
+
+    return BacktestResultMulti(
+        dates=calendar.dates,
+        equity_curve=equity_curve,
+        portfolio=portfolio,
+        initial_cash=initial_cash,
+        n=n,
+        tickers=tickers,
+        warmup=warmup,
+        costs=cost_model,
+        slippage=slippage_model,
+        cap=cap,
+        calendar=calendar,
+        pending_dead=pending_dead,
     )

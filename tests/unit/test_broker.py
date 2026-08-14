@@ -1293,3 +1293,111 @@ def test_exit_bracket_malformed_raises_engine_error() -> None:
     book.place(_pending(OrderKind.LIMIT, side=Side.SELL, limit=12.0, seq=3, bracket=True))
     with pytest.raises(EngineError):
         _run(broker, book, portfolio, _bar(open_=11.0, high=12.5, low=8.5))
+
+
+@pytest.mark.unit
+def test_rebalance_market_sell_closes_partial() -> None:
+    """SIZ-03/T11a — ordem sintética de rebalance (MARKET SELL) faz venda
+    PARCIAL ao open com slippage (SLP-04.1): o trecho vendido fecha, o
+    restante fica aberto com quantidade reduzida e o custo de entrada é
+    rateado (identidade de conciliação preservada)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    opened = broker.buy(
+        portfolio, ticker=_TICKER, price=10.0, execution_date=_DECIDED, decision_date=_DECIDED
+    )
+    assert opened is not None
+    original_entry_cost = opened.entry_cost
+    book.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.MARKET,
+            side=Side.SELL,
+            limit=None,
+            stop=None,
+            qty=40,
+            decision_date=_DECIDED,
+            intent_seq=2,
+            bracket=False,
+            rebalance=True,
+        )
+    )
+
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=11.0, low=9.0))
+
+    assert len(trades) == 1
+    closed = trades[0]
+    assert closed.quantity == 40
+    assert closed.rebalance is True
+    assert closed.origin is OrderKind.MARKET
+    assert closed.entry_price == pytest.approx(10.0)
+    assert closed.exit_price == pytest.approx(11.0 * (1 - 1e-4))  # slippage na venda
+    remaining = portfolio.positions[_TICKER]
+    assert remaining.quantity == opened.quantity - 40
+    open_trade = portfolio.open_trade
+    assert open_trade is not None
+    assert open_trade.quantity == opened.quantity - 40
+    # Custo de entrada rateado: trecho vendido + restante = total pago.
+    assert closed.entry_cost + open_trade.entry_cost == pytest.approx(original_entry_cost)
+    # Caixa: sobra da compra + crédito da venda de 40 a ~11.0 menos o custo.
+    assert closed.exit_price is not None
+    assert portfolio.cash == pytest.approx(
+        (2_000.0 - opened.quantity * 10.0 - original_entry_cost)
+        + 40 * closed.exit_price
+        - closed.exit_cost
+    )
+
+
+@pytest.mark.unit
+def test_rebalance_market_sell_whole_position_and_consumed_without_position() -> None:
+    """SIZ-03/T11a — ajuste de rebalance que cobre a posição inteira fecha
+    como a `sell` da Fase 1 (rebalance=True); sem posição, a ordem é
+    consumida sem efeito."""
+    broker = Broker()
+
+    # Cobre a posição inteira (qty 999 > 100): fecha tudo.
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio, ticker=_TICKER, price=10.0, execution_date=_DECIDED, decision_date=_DECIDED
+    )
+    book.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.MARKET,
+            side=Side.SELL,
+            limit=None,
+            stop=None,
+            qty=999,
+            decision_date=_DECIDED,
+            intent_seq=2,
+            bracket=False,
+            rebalance=True,
+        )
+    )
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=11.0, low=9.0))
+    assert len(trades) == 1
+    assert trades[0].rebalance is True
+    assert portfolio.positions == {}  # flat
+
+    # Sem posição: consumida, nada a vender.
+    book2 = PendingBook()
+    portfolio2 = Portfolio(cash=2_000.0)
+    book2.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.MARKET,
+            side=Side.SELL,
+            limit=None,
+            stop=None,
+            qty=50,
+            decision_date=_DECIDED,
+            intent_seq=2,
+            bracket=False,
+            rebalance=True,
+        )
+    )
+    trades2 = _run(broker, book2, portfolio2, _bar())
+    assert trades2 == []
+    assert book2.pending_for(_TICKER) == ()

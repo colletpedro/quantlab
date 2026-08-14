@@ -12,14 +12,24 @@ import numpy as np
 import pytest
 from numpy.typing import NDArray
 
-from quantlab.engine.backtest import run_backtest
+from quantlab.engine.backtest import BacktestResultMulti, run_backtest, run_backtest_multi
 from quantlab.engine.broker import CostModel
+from quantlab.engine.conditional import ConditionalIntent, OrderKind
 from quantlab.engine.market_view import MarketView
+from quantlab.engine.sizing import EqualWeightOpen
+from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
 from quantlab.exceptions import EngineError
 from quantlab.storage.series import PriceSeries
+from quantlab.strategies.sma_cross import SmaCross
 
 _FREE = CostModel(fixed=0.0, rate=0.0)
+_NO_SLIP = FixedBps(bps=0.0)
+_D0 = date(2024, 1, 1)
+
+
+def _dates(n: int, start: date = _D0) -> list[date]:
+    return [start + timedelta(days=i) for i in range(n)]
 
 
 def _series(
@@ -549,3 +559,305 @@ def test_strategy_cannot_reach_cash_or_positions_through_the_view() -> None:
     view = captured[0]
     for forbidden in ("cash", "positions", "portfolio", "trades", "broker", "costs"):
         assert not hasattr(view, forbidden), forbidden
+
+
+# ─── 2a (T11a): laço multi-ativo calendário-driven ───────────────────────────
+
+
+@dataclass
+class ScriptedConditional:
+    """Emite intenções condicionais em índices fixos (SIG-01 no laço)."""
+
+    script: dict[int, Signal | ConditionalIntent]
+    warmup: int = 0
+
+    def on_bar(self, view: MarketView) -> Signal | ConditionalIntent | None:
+        return self.script.get(view.i)
+
+
+@dataclass
+class RecordingStrategy:
+    """Registra (ticker, data, índice) de cada consulta — prova do MarketView."""
+
+    warmup: int = 0
+    seen: list[tuple[str, date, int]] = field(default_factory=list)
+
+    def on_bar(self, view: MarketView) -> Signal | None:
+        self.seen.append((view.ticker, view.date, view.i))
+        return None
+
+
+@dataclass
+class LastCloseStrategy:
+    """Estratégia com estado — prova de instâncias independentes."""
+
+    warmup: int = 0
+    last_close: float = 0.0
+    series_length: int = 0
+
+    def on_bar(self, view: MarketView) -> Signal | None:
+        self.last_close = float(view.close[-1])
+        self.series_length = len(view)
+        return None
+
+
+@pytest.mark.unit
+def test_pending_order_executes_at_next_bar_of_own_asset() -> None:
+    """CA-05.3/POR-05.3 — ADR-0002 por ativo: a pendente de X executa no open
+    da PRÓXIMA barra de X, que pode estar várias datas-união depois (B não tem
+    barra em d1/d2; a ordem decide em d0 e executa em d3)."""
+    series = {
+        "A": _series([10, 11, 12, 13], [10, 11, 12, 13], ticker="A", dates=_dates(4)),
+        "B": _series([20, 24], [20, 24], ticker="B", dates=[_D0, _D0 + timedelta(days=3)]),
+    }
+    strategies = {"B": ScriptedStrategy({0: Signal.ENTER})}
+
+    result = run_backtest_multi(series, strategies, costs=_FREE, slippage=_NO_SLIP)
+
+    trades = [t for t in result.portfolio.trades if t.ticker == "B"]
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.entry_date == _D0 + timedelta(days=3)  # próxima barra DO PRÓPRIO ativo
+    assert trade.entry_price == pytest.approx(24.0)  # open de B em d3
+    assert trade.entry_decision_date == _D0
+    assert trade.entry_gap_days == 3
+    assert len(result.equity_curve) == 4  # união [d0, d1, d2, d3]
+
+
+@pytest.mark.unit
+def test_last_bar_intention_dies_pending_per_asset() -> None:
+    """ENG-01.4 por ativo (C1) — intenção na ÚLTIMA barra da série morre
+    pendente: ENTER não vira ordem, EXIT não agenda saída; contada e
+    reportada (não afeta a contabilidade)."""
+    series = {"A": _series([10, 11, 12], [10, 11, 12], ticker="A", dates=_dates(3))}
+
+    enter_last = run_backtest_multi(
+        series, {"A": ScriptedStrategy({2: Signal.ENTER})}, costs=_FREE, slippage=_NO_SLIP
+    )
+    assert enter_last.portfolio.trades == []
+    assert enter_last.portfolio.pending.pending_for("A") == ()
+    assert enter_last.pending_dead == {"A": 1}
+
+    exit_last = run_backtest_multi(
+        series,
+        {"A": ScriptedStrategy({0: Signal.ENTER, 2: Signal.EXIT})},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+    )
+    assert exit_last.pending_dead == {"A": 1}
+    assert "A" in exit_last.portfolio.positions  # a saída morreu — posição fica aberta
+    assert len(exit_last.portfolio.trades) == 1  # só a entrada
+
+
+@pytest.mark.unit
+def test_market_view_contains_only_own_asset_bars() -> None:
+    """CA-05.1/POR-02.4 — a estratégia de X só vê barras do PRÓPRIO ativo: a
+    sequência (data, índice) recebida é a da série de X, nunca a da união."""
+    series = {
+        "A": _series([10, 11, 12, 13], [10, 11, 12, 13], ticker="A", dates=_dates(4)),
+        "B": _series([20, 22], [20, 22], ticker="B", dates=[_D0, _D0 + timedelta(days=2)]),
+    }
+    rec_a = RecordingStrategy()
+    rec_b = RecordingStrategy()
+
+    run_backtest_multi(series, {"A": rec_a, "B": rec_b}, costs=_FREE)
+
+    assert all(t == "A" for t, _, _ in rec_a.seen)
+    assert [d for _, d, _ in rec_a.seen] == _dates(4)
+    assert [i for _, _, i in rec_a.seen] == [0, 1, 2, 3]
+    assert all(t == "B" for t, _, _ in rec_b.seen)
+    assert [d for _, d, _ in rec_b.seen] == [_D0, _D0 + timedelta(days=2)]
+    assert [i for _, _, i in rec_b.seen] == [0, 1]
+
+
+@pytest.mark.unit
+def test_n_independent_strategy_instances_each_see_own_asset() -> None:
+    """CA-03.1 — instâncias independentes: o estado de cada estratégia só
+    reflete o PRÓPRIO ativo (nada vaza entre elas)."""
+    series = {
+        "A": _series([10, 11, 12], [10, 11, 12], ticker="A", dates=_dates(3)),
+        "B": _series([20, 21, 22], [20, 21, 22], ticker="B", dates=_dates(3)),
+    }
+    last_a = LastCloseStrategy()
+    last_b = LastCloseStrategy()
+
+    run_backtest_multi(series, {"A": last_a, "B": last_b}, costs=_FREE)
+
+    assert last_a.last_close == pytest.approx(12.0)  # close de A
+    assert last_a.series_length == 3
+    assert last_b.last_close == pytest.approx(22.0)  # close de B
+    assert last_b.series_length == 3
+
+
+@pytest.mark.unit
+def test_fase1_strategy_runs_unchanged_multi_asset() -> None:
+    """SIG-01.1/CA-03.2 — SmaCross da Fase 1 roda no laço multi-ativo SEM
+    mudança: as decisões (datas e preços de entrada/saída) são idênticas às do
+    run single-asset; só o TAMANHO difere (sizing 1/N vs all-in da Fase 1)."""
+    # Closes que cruzam DENTRO da janela do SmaCross: ENTER em i=3 (fast 11 x
+    # slow 10.67, prev 0) e EXIT em i=6 (fast 11.5 x slow 11.67).
+    closes_a: list[float] = [10.0, 10.0, 10.0, 12.0, 12.0, 12.0, 11.0, 10.0]
+    series_a = _series(closes_a, closes_a, ticker="A", dates=_dates(8))
+    closes_b: list[float] = [20.0, 20.0, 20.0, 22.0, 22.0, 22.0, 21.0, 20.0]
+    series_b = _series(closes_b, closes_b, ticker="B", dates=_dates(8))
+    single = run_backtest(series_a, SmaCross(fast=2, slow=3), costs=_FREE)
+    multi = run_backtest_multi(
+        {"A": series_a, "B": series_b},
+        {"A": SmaCross(fast=2, slow=3)},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+    )
+
+    multi_a = [t for t in multi.portfolio.trades if t.ticker == "A"]
+    assert len(single.trades) >= 1  # a fixture cruza de verdade
+    assert len(multi_a) == len(single.trades)
+    for mt, st in zip(multi_a, single.trades, strict=True):
+        assert mt.entry_date == st.entry_date
+        assert mt.entry_price == pytest.approx(st.entry_price)
+        assert mt.exit_date == st.exit_date
+        assert mt.exit_price == pytest.approx(st.exit_price)
+    assert multi_a[0].quantity < single.trades[0].quantity  # 1/2 vs all-in
+
+
+@pytest.mark.unit
+def test_open_positions_never_exceed_n() -> None:
+    """SIZ-04.3 — com N=2 e os dois ativos entrando, k chega a N=2 sem violar
+    o invariante (checado a cada barra pelo laço, erro de programação)."""
+    series = {
+        "A": _series([10, 11, 12], [10, 11, 12], ticker="A", dates=_dates(3)),
+        "B": _series([20, 21, 22], [20, 21, 22], ticker="B", dates=_dates(3)),
+    }
+    strategies = {
+        "A": ScriptedStrategy({0: Signal.ENTER}),
+        "B": ScriptedStrategy({0: Signal.ENTER}),
+    }
+
+    result = run_backtest_multi(series, strategies, costs=_FREE, slippage=_NO_SLIP)
+
+    assert len(result.portfolio.positions) == 2  # k == N
+    result.portfolio.check_invariants(n=2)
+
+
+@pytest.mark.unit
+def test_no_rebalance_without_k_change() -> None:
+    """SIZ-03.1/03.4 — EqualWeightOpen: k mudou ⇒ evento de rebalance gerado
+    (CA-03.1); k estável com os preços se movendo ⇒ NENHUM rebalance (CA-03.4)."""
+    # N=2 para o seed 1/2 (N=1 seria all-in, peso ~1.0, desvio ~0).
+    series = {
+        "A": _series([10, 11, 12, 13, 14], [10, 11, 12, 13, 14], ticker="A", dates=_dates(5)),
+        "B": _series([20, 21, 22, 23, 24], [20, 21, 22, 23, 24], ticker="B", dates=_dates(5)),
+    }
+    strategies = {"A": ScriptedStrategy({0: Signal.ENTER})}
+
+    result = run_backtest_multi(
+        series, strategies, costs=_FREE, slippage=_NO_SLIP, sizer=EqualWeightOpen(threshold_pp=1.0)
+    )
+
+    # ENTER (1) + rebalance compra após k 0→1 (2). Depois k=1 estável e os
+    # preços sobem (marcação muda) — nenhum trade novo (CA-03.4).
+    assert [t.rebalance for t in result.portfolio.trades] == [False, True]
+    assert len(result.equity_curve) == 5
+    assert result.portfolio.positions["A"].quantity > 0
+
+
+@pytest.mark.unit
+def test_rebalance_threshold_pp_gates_adjustment() -> None:
+    """SIZ-03.3 — mesmo cenário, dois limiares: desvio 45 pp < 60 ⇒ nenhum
+    trade de rebalance; limiar 1 pp ⇒ trade de rebalance gerado."""
+    series = {
+        "A": _series([10, 11, 12, 13], [10, 11, 12, 13], ticker="A", dates=_dates(4)),
+        "B": _series([20, 21, 22, 23], [20, 21, 22, 23], ticker="B", dates=_dates(4)),
+    }
+    strategies = {"A": ScriptedStrategy({0: Signal.ENTER})}
+
+    gated = run_backtest_multi(
+        series, strategies, costs=_FREE, slippage=_NO_SLIP, sizer=EqualWeightOpen(threshold_pp=60.0)
+    )
+    active = run_backtest_multi(
+        series, strategies, costs=_FREE, slippage=_NO_SLIP, sizer=EqualWeightOpen(threshold_pp=1.0)
+    )
+
+    assert len(gated.portfolio.trades) == 1  # só a entrada
+    assert gated.portfolio.trades[0].rebalance is False
+    assert len(active.portfolio.trades) == 2  # entrada + rebalance
+    assert active.portfolio.trades[1].rebalance is True
+
+
+@pytest.mark.unit
+def test_multi_asset_run_is_deterministic() -> None:
+    """RNF-01 — mesma entrada ⇒ mesmo resultado: equity, trades, marcas e
+    pendentes mortas idênticas em dois runs independentes."""
+
+    def run_once() -> BacktestResultMulti:
+        series = {
+            "A": _series([10, 11, 12], [10, 11, 12], ticker="A", dates=_dates(3)),
+            "B": _series([20, 21, 22], [20, 21, 22], ticker="B", dates=_dates(3)),
+        }
+        return run_backtest_multi(
+            series, {"A": ScriptedStrategy({0: Signal.ENTER})}, costs=_FREE, slippage=_NO_SLIP
+        )
+
+    first = run_once()
+    second = run_once()
+    assert first.equity_curve == second.equity_curve
+    assert first.portfolio.trades == second.portfolio.trades
+    assert dict(first.portfolio.marks) == dict(second.portfolio.marks)
+    assert first.pending_dead == second.pending_dead
+
+
+@pytest.mark.unit
+def test_equity_of_bar_does_not_depend_on_signal_multi_asset() -> None:
+    """ENG-05.2 estendido — a consulta não tem efeito colateral: a equity da
+    barra de decisão é a mesma com ou sem sinal (o ENTER executa na PRÓXIMA
+    barra do próprio ativo — ADR-0002)."""
+    # open = close em d0/d1 (equity plana até a decisão); d2 fecha acima do
+    # open de execução — o ENTER de d1 compra no open[2]=12 e o close[2]=13
+    # muda a equity SÓ a partir da barra seguinte à decisão.
+    series = {"A": _series([10, 11, 12, 13], [10, 11, 13, 13], ticker="A", dates=_dates(4))}
+    with_signal = run_backtest_multi(
+        series, {"A": ScriptedStrategy({1: Signal.ENTER})}, costs=_FREE, slippage=_NO_SLIP
+    )
+    without = run_backtest_multi(
+        series, {"A": ScriptedStrategy({})}, costs=_FREE, slippage=_NO_SLIP
+    )
+
+    assert with_signal.equity_curve[:2] == without.equity_curve[:2]
+    assert with_signal.equity_curve[2] != without.equity_curve[2]  # só depois da execução
+
+
+@pytest.mark.unit
+def test_conditional_intent_flows_through_the_loop() -> None:
+    """SIG-01 no laço — ConditionalIntent(LIMIT) da estratégia vira pendente e
+    preenche a min(L, open) na próxima barra do próprio ativo (SLP-04.2)."""
+    series = {"A": _series([10, 11, 12, 12], [10, 11, 12, 12], ticker="A", dates=_dates(4))}
+    strategies = {
+        "A": ScriptedConditional(
+            {0: ConditionalIntent(signal=Signal.ENTER, order_type=OrderKind.LIMIT, limit=11.0)}
+        )
+    }
+
+    result = run_backtest_multi(series, strategies, costs=_FREE, slippage=_NO_SLIP)
+
+    trades = result.portfolio.trades
+    assert len(trades) == 1
+    assert trades[0].entry_date == _D0 + timedelta(days=1)
+    assert trades[0].entry_price == pytest.approx(11.0)  # min(11, open 11) — sem slippage
+    assert trades[0].origin is OrderKind.LIMIT
+
+
+@pytest.mark.unit
+def test_run_backtest_multi_domain_errors() -> None:
+    """§3.8 — pré-condições do laço: universo/estratégias vazios, ticker fora
+    do run, warmup negativo e cap fora de (0, 1] são EngineError."""
+    series = {"A": _series([10, 11, 12], [10, 11, 12], ticker="A", dates=_dates(3))}
+
+    with pytest.raises(EngineError, match="universo vazio"):
+        run_backtest_multi({}, {})
+    with pytest.raises(EngineError, match="nenhuma estratégia"):
+        run_backtest_multi(series, {})
+    with pytest.raises(EngineError, match="fora do run"):
+        run_backtest_multi(series, {"Z": ScriptedStrategy({})})
+    with pytest.raises(EngineError, match="warmup negativo"):
+        run_backtest_multi(series, {"A": ScriptedStrategy({}, warmup=-1)})
+    with pytest.raises(EngineError, match="cap fora"):
+        run_backtest_multi(series, {"A": ScriptedStrategy({})}, cap=0.0)
