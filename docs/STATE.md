@@ -13,8 +13,14 @@ integralmente atendido.
 `specs/fase-2a-requirements.md` — RF-CON-01, RF-CON-02, RF-CON-03. Design
 v0.9 (`specs/00-plataforma/fase-1-design.md`) precede o código. Ver
 [HANDOFF.md](../HANDOFF.md) §"Consolidação pré-Fase 2" para o detalhe.
-Fase 2a segue em gate 1 (requisitos em revisão) — nada do corpo da Fase 2a
-foi implementado nesta sessão, só a dívida herdada da Fase 1.
+
+**Fase 2a implementada ponta a ponta (2026-08-14, T01–T18).** Gates 1–3
+fechados (requirements v0.2, design v0.1, ADRs 0005–0008, tasks v0.1). DoD
+da v0.2 coberto: run multi-ativo de 20 ativos × ~10 anos, conciliação
+CA-04.2 fechando (isclose 1e-9), ENG-01.2 reformulado testado por mutação
+(ADR-0005), RNF-04 0,73 s < 30 s, cobertura 97,84% ≥ 85% (piso novo),
+resultado honesto vs benchmark 1/N persistido em
+`results/fase_2a_run_20_ativos.json`.
 
 | Bloco | Escopo | Estado |
 |---|---|---|
@@ -24,13 +30,15 @@ foi implementado nesta sessão, só a dívida herdada da Fase 1.
 | D | `strategies/` — SMA cross (D1) | ✅ |
 | E | `analytics/` — métricas (E1), benchmark (E2), relatório (E3) | ✅ |
 | F | CLI `backtest` + persistência (F1), gráfico (F2), RNF-04 + cobertura (F3), README + resultado honesto (F4) | ✅ |
+| 2a | `engine/` multi-ativo — conditional, liquidity, slippage, sizing, calendar, broker estendido, portfolio multi, laço calendário-driven | ✅ T01–T11 |
+| 2a | garantias — mutação ENG-01.2, conciliação multi, benchmark 1/N, relatório multi, harness RNF-04 + piso 85% | ✅ T12–T18 |
 
 CI: 3 jobs verdes em todo push a `main`. Último run verificado:
 [30881248393](https://github.com/colletpedro/quantlab/actions/runs/30881248393).
 
-**Próximo:** Fase 2 (não iniciada) — custos realistas, portfólio multi-ativo,
-walk-forward, analytics de risco, Redis, API, infra. Nenhuma spec de Fase 2
-escrita ainda; `specs/README.md` tem o roadmap de alto nível.
+**Próximo:** Fase 2b — short/margem, buy-stop e entradas condicionais
+(declarados fora da 2a), walk-forward, analytics de risco. Nenhuma spec de
+Fase 2b escrita ainda; `specs/README.md` tem o roadmap de alto nível.
 
 ## Números finais da Fase 1
 
@@ -54,19 +62,41 @@ abaixo. Os números originais do fechamento de F4 eram 367/333/60.)
   pregão do dia corrente, ainda em formação — no run anterior à correção do
   bug de preço não finito, ver abaixo).
 
+## Números finais da Fase 2a
+
+- **471 testes** (unitários offline; 60 de integração com `make up`).
+- Cobertura `make check`: **97.84%** total, escopo `engine/` + `analytics/`,
+  piso da 2a = **85%** (RNF-02 supersedido — `fail_under` 85 no pyproject).
+- **RNF-04 medido no run real completo** (20 ativos × ~10 anos): **0,73 s <
+  30 s** (meta). Harness de escopo declarado em `scripts/rnf04_harness.py`
+  (`make rnf04`) — mede só o cômputo (P5).
+- **Resultado honesto (E2E do DoD):** estratégia sma-cross 20/50 1/N
+  +217,93% (CAGR 10,50%; Sharpe 1,04; maxDD 14,74%; 618 trades; turnover
+  2,69) vs benchmark 1/N buy-and-hold +2.509,09% (CAGR 32,50%; Sharpe 1,15;
+  maxDD 43,00%; 20 trades; turnover 0,01) — mesma assinatura da Fase 1
+  (perde em retorno, ganha em drawdown), agora multi-ativo, com
+  custos/slippage/cap idênticos nos dois lados.
+- Contadores de mecanismo do run: `{stops: 0, ambiguidades: 0,
+  não-atendidas: 2}`; caixa ocioso final 85.269,19; 13 tickers com série
+  truncada pela ingestão (reportados como deslistados — semântica POR-02.3,
+  não deslistagem real).
+
 ## Invariantes que não são sugestões (ver CLAUDE.md e ADRs)
 
 - **ADR-0002** — execução no `open` do pregão seguinte.
-- **ADR-0003** — preço bruto persistido, ajuste em tempo de leitura.
+- **ADR-0003** — preço bruto persistido, ajuste em tempo de leitura. A
+  sanidade cruzada (bruto × ajuste) é guarda executável: `make verify-raw`
+  (Fase 1 v0.10).
 - **ADR-0004** — ajuste materializado sobre o histórico completo, depois
   fatiado. Errata datada ao fim do ADR corrige nomes de teste (não o corpo).
 - **ADR-0001** — MongoDB, índice composto `(ticker, date)`. `backtest_runs`
   ganhou índice `{ticker:1, "strategy.name":1, created_at:-1}` em F1.
 
-## Bug real encontrado e corrigido nesta sessão
+## Bugs reais encontrados e corrigidos
 
-**Preço não finito (`NaN`) escapava da validação (ING-05.1).** As regras de
-quarentena são comparações de desigualdade (`high < low`, fora de
+### (Fase 1, F4) Preço não finito (`NaN`) escapava da validação (ING-05.1)
+
+As regras de quarentena são comparações de desigualdade (`high < low`, fora de
 `[low, high]`, `preço ≤ 0`), e `NaN` não satisfaz nenhuma delas nem sua
 negação (IEEE 754) — uma barra com `close = nan` passava como válida.
 Encontrado rodando a ingestão real de F4: o yfinance devolveu `close = nan`
@@ -81,6 +111,36 @@ v1.1, design v0.8 — CLAUDE.md exige isso quando os dois mudam juntos). As
 (não há caminho automático: `upsert_bars` só grava `valid_bars`, não some
 com uma barra que era válida e passou a ser quarentenada) e a ingestão foi
 re-executada, confirmando a quarentena correta de todos os 20 casos.
+
+### (Fase 2a, T18) Dupla contagem de splits no raw — `auto_adjust=False` não é bruto
+
+**O sintoma era "provável demais para ser verdade".** No primeiro E2E do
+DoD (20 ativos × ~10 anos), o benchmark 1/N "comprou" 414.573 ações de NVDA
+(832× o capital) a preço ajustado de US$ 0,012 e retornou ~870× —
+impossível. Diagnóstico: **dupla contagem de splits** —
+`YFinanceProvider.fetch_prices` usava `auto_adjust=False`, que no yfinance
+**ainda aplica splits** ao OHLC (só exclui dividendos), e gravava o
+resultado em `bars` como se fosse bruto; o ajuste do §3.7 aplicava o split
+de novo (NVDA ÷40 duas vezes). Afetados exatamente os tickers com split
+dentro da janela: **AAPL, NVDA, GOOGL, AMZN, NEE**. A spec estava certa
+(ADR-0003: bruto persistido, ajuste em leitura); o código da Fase 1 a
+violava.
+
+Correção spec-first (CLAUDE.md), em três partes: emenda do design da Fase 1
+(v0.10 — §3.1 define "bruto" como pré-split, como negociado; §3.7 registra o
+bug e a correção), back-out dos splits no provider (`raw[t] = split_adj[t] ×
+Π rᵢ`, splits com ex estritamente posterior; round-trip com
+`adjustment_factors` fechando a 1e-9), e **migração determinística de 9.030
+barras** a partir do próprio `bars` (sem refetch, backup em `/tmp`,
+idempotente). A sanidade cruzada que o ADR-0003 previa (provedor entregando
+ajustado como bruto) virou **guarda executável**: `make verify-raw` falha se
+a razão bruta colar em 1 ou se o ajustado saltar fora da data ex.
+
+Consequência registrada: os 20 relatórios por ticker da Fase 1 foram
+gerados antes do back-out e **não foram regenerados** — para os 5 tickers
+afetados, a comparação estratégia × buy-and-hold de cada relatório
+permanece válida (mesma série dos dois lados), mas os níveis absolutos de
+preço/CAGR não.
 
 ## O que Bloco F entregou
 
@@ -174,7 +234,12 @@ todas fechadas: uma por errata do ADR-0004 (sessão anterior), três por v0.6
 do design (esta sessão — todas descritivas, nenhuma exigiu escolher entre
 comportamentos, código já implementava a única opção documentada).
 
-**Para a Fase 2, quando começar:** nenhuma spec escrita ainda. Ideias que já
+**Registrado para decisão do autor:** os 20 relatórios por ticker da Fase 1
+(F4) foram gerados com a base pré-correção (dupla contagem de splits). Não
+regenerados no fechamento da Fase 2a; regenerar é só rodar a ingestão/CLI de
+novo com a base corrigida.
+
+**Para a Fase 2b, quando começar:** nenhuma spec escrita ainda. Ideias que já
 apareceram ao longo da Fase 1 e vale revisitar então — não implementar agora:
 cache de ajuste em Redis (ADR-0003 já deixa isso escopado, condicionado a
 RNF-04 virar problema real — não virou), otimização de leitura de histórico
