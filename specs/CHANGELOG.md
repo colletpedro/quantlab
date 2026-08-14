@@ -4,6 +4,26 @@ Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versioname
 
 ## 2026-08-14
 
+### fase-2b-requirements 0.2 — em revisão
+
+v0.1 revisada pelo tech lead do web; resoluções **R1–R7** aplicadas e promovida de draft para em revisão.
+
+**R1 (RF-SHT/RF-MET-06)** — viés declarado "disponibilidade de aluguel ilimitada (otimista; sem hard-to-borrow)" na seção de vieses; restrição configurável com default ilimitado (RF-SHT-03 CA-03.4: short de ativo indisponível não executa e é logado/contado).
+
+**R2 (RF-SHT-04)** — CA-04.3 novo: PnL de posição short atravessando data ex-dividendo ≡ retorno do preço ajustado (consistência do modelo de ajuste para shorts).
+
+**R3 (RF-MRG-01)** — fator único de margem declarado como simplificação; alternativa de dois níveis (long × short) documentada como descartada (§8.1); default 1.0 explícito e configurável (CA-01.5).
+
+**R4 (RF-WFK-01)** — warmup do OOS pela cauda do IS (dados ≤ fronteira, sem lookahead; CA-01.3); alternativa de descartar as primeiras barras do OOS descartada.
+
+**R5 (RF-WFK-02/RF-MET-06)** — métrica de seleção IS declarada: Sharpe anualizado com rf=0 (CA-02.3), incluída no viés MHT com grid size × folds.
+
+**R6 (RF-MRG-03)** — fundo quebrado: métricas = `None` explícito + flag no relatório, nunca NaN (lição do ING-05.1; CA-03.2).
+
+**R7 (Q6/D7)** — ancoragem dos folds FECHADA pelo autor: rolling (janela IS fixa) como default, anchored configurável para medir a diferença; registrada na tabela de decisões §8 (D7).
+
+§9 Questões em aberto agora **vazia** (Q1–Q5 fechadas na v0.1; Q6 fechada na v0.2).
+
 ### fase-2b-requirements 0.1 — draft (em revisão)
 
 Abertura da Fase 2b: spec de requisitos v0.1 em draft, aguardando revisão do tech lead do web e do autor (gate 1).

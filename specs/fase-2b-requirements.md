@@ -1,9 +1,9 @@
 # Fase 2b — Venda a descoberto, margem e walk-forward — Requisitos
 
-**Status:** draft — aguardando revisão do tech lead do web e do autor (gate 1)
-**Versão:** 0.1
+**Status:** em revisão — v0.1 revisada pelo tech lead do web; resoluções R1–R7 aplicadas
+**Versão:** 0.2
 **Data:** 2026-08-14
-**Próximo gate:** revisão do gate 1 (Q1–Q6 fechadas ou escaladas ao autor)
+**Próximo gate:** aprovação do gate 1 (checklist: CAs falseáveis nomeados, questões abertas vazias, premissas e vieses declarados)
 **Antecede:** Fase 3 (analytics e risco: Sortino, VaR, correlação, Black-Scholes, Monte Carlo)
 
 > **Nota de escopo.** A Fase 2 foi dividida em 2a e 2b. O critério da divisão é a
@@ -58,6 +58,8 @@ sobrevive fora da amostra, com o viés de múltiplos testes declarado.
   (ADR-0008)
 - Empréstimo com colateral e gestão de garantias real (o modelo de margem da 2b é um
   modelo determinístico de backtest, não um sistema de clearing)
+- **Hard-to-borrow** — a disponibilidade de aluguel é ilimitada por default (premissa
+  declarada e viés em RF-MET-06; restrição configurável, RF-SHT-03 CA-03.4)
 
 ## 3. Glossário
 
@@ -65,18 +67,20 @@ sobrevive fora da amostra, com o viés de múltiplos testes declarado.
 |---|---|
 | **Short (venda a descoberto)** | Venda de um ativo que não se possui, abrindo quantidade negativa; o lucro vem da queda de preço. Cobertura = compra que zera a posição. |
 | **Borrow fee (custo de aluguel)** | Custo diário de manter uma posição short, proporcional ao notional short, anualizado e debitado do caixa em etapa própria (RF-SHT-03). |
+| **Disponibilidade de aluguel** | Premissa de que todo short encontra papel para alugar — **ilimitada por default** (otimista, sem hard-to-borrow); restrição configurável (RF-SHT-03 CA-03.4). |
 | **Margem** | Garantia exigida para manter posições alavancadas. Exigência = `Σᵢ |qtyᵢ| × closeᵢ × fator`; o invariante da 2b é `equity ≥ margem exigida` (RF-MRG-01). |
 | **Liquidação forçada (margin call)** | Fechamento determinístico de posições para restaurar a margem, detectado no close e executado a mercado no open seguinte (RF-MRG-02). |
-| **Fundo quebrado** | Estado em que, mesmo após liquidar todas as posições, a equity fica negativa (gap severo). O run congela, reporta o valor real e marca as métricas de retorno como indefinidas (RF-MRG-03). |
+| **Fundo quebrado** | Estado em que, mesmo após liquidar todas as posições, a equity fica negativa (gap severo). O run congela, reporta o valor real e marca as métricas de retorno como `None` (RF-MRG-03). |
 | **Buy-stop** | Ordem stop de compra: dispara quando `high ≥ gatilho` e executa a `max(gatilho, open)` com slippage; não disparada, permanece pendente (RF-ORD-05). |
 | **Bracket short** | Par de ordens sobre posição short: take-profit (buy-limit) + stop-loss (buy-stop), ambos derivados da mesma intenção (RF-ORD-06). |
 | **Walk-forward** | Divisão do histórico em folds (janela in-sample + janela out-of-sample); parâmetros otimizados no IS e avaliados no OOS do mesmo fold; o resultado honesto é a concatenação dos segmentos OOS (RF-WFK). |
 | **Fold** | Par (janela IS, janela OOS) de um walk-forward. |
 | **IS / OOS** | In-sample (dados usados para selecionar parâmetros) e out-of-sample (dados usados para avaliar). O IS nunca indexa séries OOS (RF-WFK-01). |
+| **Warmup do OOS** | Barras de aquecimento da estratégia no segmento OOS, tomadas da **cauda do IS** (dados ≤ fronteira, sem lookahead) — RF-WFK-01 CA-01.3. |
 | **Exposição gross** | Média diária de `(Σᵢ |qtyᵢ| × closeᵢ) / equity`. Pode exceder 100% (alavancada). |
 | **Exposição net** | Média diária de `(Σᵢ qtyᵢ × closeᵢ) / equity` — longs e shorts se cancelam; pode ser negativa. |
 | **Utilização de margem** | `margem_exigida / equity` — fração da garantia em uso (RF-MRG-04). |
-| **MHT (múltiplos testes)** | Viés de seleção: quanto mais parâmetros testados no IS, maior a chance de o melhor deles vencer por sorte no OOS. O relatório declara o tamanho da grade e o número de folds (RF-MET-06). |
+| **MHT (múltiplos testes)** | Viés de seleção: quanto mais parâmetros testados no IS, maior a chance de o melhor deles vencer por sorte no OOS. O relatório declara a métrica de seleção, o tamanho da grade e o número de folds (RF-MET-06). |
 
 ---
 
@@ -125,6 +129,10 @@ notional short: `diário = |qtyᵢ| × closeᵢ × fee_anual / 252`, com `fee_an
 execução — herda RF-SLP-04 CA-04.3 da 2a). Aparece no relatório em **categoria própria**
 e entra na conciliação no termo de custos (RF-POR-04 da 2a estendido).
 
+**Disponibilidade de aluguel** — default **ilimitada** (premissa declarada; viés em
+RF-MET-06). Com `aluguel_ilimitado = false`, um `ENTER_SHORT` de ativo indisponível na
+data não executa e o evento é logado e contado.
+
 - **CA-03.1** — *Dado* um short de 1.000 ações a $100 mantido por 10 pregões com
   `fee_anual = 0,50%`, *quando* o run termina, *então* o custo total de aluguel bate com a
   forma fechada `Σ_d |qty| × close_d × 0,005/252` (fixture de papel, RNF-03).
@@ -132,6 +140,10 @@ e entra na conciliação no termo de custos (RF-POR-04 da 2a estendido).
   pregões com posição short aberta (não sobre o dia em que a posição já foi coberta).
 - **CA-03.3** — *Dado* o relatório, *quando* há custos de aluguel, *então* eles aparecem
   em categoria própria, separados de corretagem/slippage.
+- **CA-03.4** — *Dado* `aluguel_ilimitado = true` (default), *quando* qualquer short é
+  emitido, *então* a disponibilidade nunca bloqueia a entrada. *Dado*
+  `aluguel_ilimitado = false` e ativo indisponível na data, *quando* o `ENTER_SHORT` é
+  convertido, *então* a ordem não executa e o evento é logado e contado (R1).
 
 **RF-SHT-04 — PnL algébrico com `qty < 0` (estende RF-POR-04 CA-04.2 da 2a)**
 A identidade de conciliação da 2a vale **sem nova fórmula** com quantidade negativa:
@@ -144,6 +156,10 @@ nos testes — nenhum termo novo além de custos (incluindo aluguel) no termo pr
 - **CA-04.2** — *Dado* um run long+short, *quando* a conciliação roda, *então*
   `Σ realizado + Σ não-realizado − Σ custos ≡ Δequity` fecha com `math.isclose(rel_tol=1e-9)`,
   com `qty` negativo no termo não-realizado.
+- **CA-04.3** — *Dado* um short aberto antes e coberto depois de uma data ex-dividendo,
+  *quando* o PnL é computado, *então* ele é idêntico ao retorno do preço **ajustado** no
+  período (forma fechada) — declara a consistência do modelo de ajuste (dividendos via
+  preço, premissa 7) para posições negativas (R2).
 
 **RF-SHT-05 — Deslistagem em posição short**
 Posição short cuja série termina antes do fim do run: **travada** no último close
@@ -163,7 +179,11 @@ Os invariantes `caixa ≥ 0` e `qty ≥ 0` são **relaxados** — o que exige AD
 (RNF-09 da 2a; ADR-0009 a escrever no gate 2). O invariante passa a ser:
 
 - `equity ≥ margem_exigida`, com `margem_exigida = Σᵢ |qtyᵢ| × closeᵢ × margin_factor`
-- `margin_factor` default **1.0**, configurável.
+- `margin_factor` default **1.0**, explícito e configurável (R3).
+
+**Nota (R3).** Um fator **único** para os dois lados (long e short) é uma **simplificação
+declarada**; a alternativa de dois níveis (fator long × fator short) foi documentada como
+alternativa descartada (§8.1).
 
 Com apenas longs e `factor = 1.0`, `margem_exigida = notional longo` e o invariante reduz
 a `caixa ≥ 0` — recupera exatamente o caso long-only. Violação fora da janela
@@ -179,6 +199,8 @@ close→open (RF-MRG-02) é erro de programação.
   persistir após o open seguinte, é erro de programação.
 - **CA-01.4** — *Dado* o relatório, *quando* há shorts ou alavancagem, *então* a
   utilização de margem (`margem_exigida / equity`) é reportada.
+- **CA-01.5** — *Dado* `margin_factor` configurado (default 1.0), *quando* a margem é
+  computada, *então* o valor segue exatamente `Σ|qtyᵢ| × closeᵢ × factor` (R3).
 
 **RF-MRG-02 — Liquidação forçada determinística (margin call)** *(D2)*
 Detectada na marcação a mercado do **close** (`equity < margem_exigida`). Ordem corretiva
@@ -205,15 +227,15 @@ RF-ORD-04 CA-04.1 da 2a). Cada liquidação é um Trade com `origin = MARGIN_CAL
 Se, após liquidar **todas** as posições, a equity ainda for `< 0` (gap severo), o run
 **congela**: nenhum trade adicional é gerado; a equity é reportada no valor negativo real;
 o relatório marca `fundo_quebrado = true`; métricas que assumem equity positiva (CAGR,
-Sharpe, turnover, exposição) são reportadas como **indefinidas** (nunca como zero ou
-número fabricado); e a conciliação **continua fechando** — o número negativo é honesto.
+Sharpe, turnover, exposição) são reportadas como **`None` explícito** (nunca `NaN` — lição
+do ING-05.1); e a conciliação **continua fechando** — o número negativo é honesto.
 
 - **CA-03.1** — *Dado* um gap que leva `equity < 0` mesmo após a liquidação total, *quando*
   o run prossegue, *então* nenhum novo trade é gerado e o relatório marca
   `fundo_quebrado = true`.
 - **CA-03.2** — *Dado* fundo quebrado, *quando* o relatório é emitido, *então* CAGR e
-  Sharpe aparecem como indefinidos e a conciliação fecha com a equity negativa real
-  (isclose 1e-9).
+  Sharpe aparecem como **`None` explícito** (nunca `NaN`, nunca zero fabricado) e a
+  conciliação fecha com a equity negativa real (isclose 1e-9) (R6).
 - **CA-03.3** — *Dado* fundo quebrado, *quando* o run termina, *então* o resultado carrega
   flag que o exclui de comparações automáticas com benchmark (a comparação exige decisão
   explícita de quem lê).
@@ -274,12 +296,17 @@ O pior caso (ADR-0007) é estendido a todos os brackets novos:
 
 ### 4.4 Walk-forward (RF-WFK)
 
-**RF-WFK-01 — Folds com isolamento estrito IS/OOS** *(D6; ancoragem = Q6)*
+**RF-WFK-01 — Folds com isolamento estrito IS/OOS** *(D6; ancoragem = D7)*
 O histórico é dividido em folds (janela IS + janela OOS). **Isolamento estrito**: o
 engine do IS nunca indexa séries OOS — cada fold constrói seus próprios
 `UnionCalendar`/`PriceSeries` truncados no fim do IS, e a série OOS não é passada a
-nenhum run IS. Ancoragem: **proposta rolling** (janela IS de tamanho fixo, deslizante) —
-a confirmar no gate 1 (Q6).
+nenhum run IS. Ancoragem: **rolling** (janela IS de tamanho fixo, deslizante) como
+**default**; **anchored** (janela IS crescente) configurável para medir a diferença
+(decisão D7, Q6).
+
+**Warmup do OOS (R4)** — a estratégia no segmento OOS é aquecida com a **cauda do IS**
+(últimas `warmup` barras ≤ fronteira, sem lookahead). A alternativa de descartar as
+primeiras barras do OOS foi descartada (§8.1).
 
 - **CA-01.1** — *Dado* um fold, *quando* o run IS roda, *então* qualquer acesso a barra
   além do fim do IS é erro (`EngineError`) — guard de fronteira testável (não basta
@@ -287,18 +314,24 @@ a confirmar no gate 1 (Q6).
 - **CA-01.2** — *Dado* o esquema de folds, *quando* os folds são construídos, *então* IS
   e OOS de cada fold são disjuntos e a união dos segmentos OOS cobre a janela avaliada
   sem sobreposição.
+- **CA-01.3** — *Dado* um fold, *quando* o segmento OOS é avaliado, *então* o warmup da
+  estratégia vem da cauda do IS (últimas `warmup` barras ≤ fronteira) — nunca de barras
+  OOS anteriores ao segmento; mutar o OOS não altera o warmup (R4).
 
 **RF-WFK-02 — Otimização determinística in-sample**
 Otimizador default: **busca em grade explícita** de parâmetros declarados (ex.: janelas
 do SmaCross ∈ {10, 20, …, 60}), **determinística** (RNF-01; otimizador estocástico só
-com seed travado e declarado). Critério de seleção IS: métrica declarada (default
-Sharpe in-sample). Os parâmetros selecionados no IS de um fold são exatamente os usados
-no OOS **do mesmo fold**.
+com seed travado e declarado). **Métrica de seleção IS: Sharpe anualizado com `rf = 0`**
+sobre a equity IS, declarada (R5) e incluída no viés MHT (RF-MET-06). Os parâmetros
+selecionados no IS de um fold são exatamente os usados no OOS **do mesmo fold**.
 
 - **CA-02.1** — *Dado* o grid declarado, *quando* o walk-forward roda duas vezes sobre o
   mesmo estado, *então* os parâmetros selecionados por fold são idênticos (RNF-01).
 - **CA-02.2** — *Dado* um fold, *quando* o OOS é avaliado, *então* os parâmetros usados
   são exatamente os selecionados no IS do mesmo fold (nunca os de outro fold).
+- **CA-02.3** — *Dado* um fold, *quando* a seleção IS roda, *então* a métrica de seleção é
+  o Sharpe anualizado com `rf = 0` sobre a equity IS — e a mesma métrica aparece declarada
+  no relatório (R5).
 
 **RF-WFK-03 — Resultado = concatenação dos segmentos OOS**
 O resultado honesto é a equity **concatenada dos segmentos OOS** (um por fold), com as
@@ -349,24 +382,27 @@ long-only explícito. Adicionalmente, o relatório compara o run long+short cont
 - **CA-05.2** — *Dado* o benchmark, *quando* a estratégia opera shorts, *então* o
   benchmark permanece long-only (nunca short).
 
-**RF-MET-06 — Vieses da 2b (estende RF-MET-03 da 2a)**
+**RF-MET-06 — Vieses da 2b (estende RF-MET-03 da 2a)** *(R1, R5)*
 Itens novos na seção fixa de vieses (constante literal no código, padrão Fase 1 §5.2):
 
 - custo de aluguel **não calibrado** — o default de 0,50% a.a. é premissa, não medida;
+- **disponibilidade de aluguel ilimitada** — sem hard-to-borrow; otimista para
+  estratégias que dependem de short (R1);
 - liquidação forçada alfabética é determinística, mas **qualquer regra de seleção é
   seleção com viés** (mesmo argumento do atendimento alfabético da 2a);
-- **MHT**: a seleção de parâmetros in-sample é otimista — o relatório declara o tamanho
-  da grade e o número de folds (o leitor julga o esforço de busca);
+- **MHT**: a seleção de parâmetros in-sample é otimista — o relatório declara a **métrica
+  de seleção (Sharpe anualizado, `rf = 0`)**, o **tamanho da grade** e o **número de
+  folds** (o leitor julga o esforço de busca) (R5);
 - "pior caso intrabarra" ampliado aos brackets com buy-stop (RF-ORD-06);
 - itens da 2a preservados (fill integral ao limite é otimista; slippage não calibrado;
   sem impacto permanente de mercado).
 
 - **CA-06.1** — *Dado* o relatório, *quando* os vieses são emitidos, *então* a seção
-  contém os itens novos (aluguel não calibrado, MHT com grid size e folds, liquidação
-  alfabética com viés) além dos da 2a.
-- **CA-06.2** — *Dado* o relatório, *quando* há walk-forward, *então* o tamanho da grade
-  e o número de folds aparecem na seção de run (reconstruível do JSON isolado — estende
-  RF-CON-02 da 2a).
+  contém os itens novos (aluguel não calibrado, aluguel ilimitado sem hard-to-borrow, MHT
+  com métrica/grid/folds, liquidação alfabética com viés) além dos da 2a.
+- **CA-06.2** — *Dado* o relatório, *quando* há walk-forward, *então* a métrica de
+  seleção, o tamanho da grade e o número de folds aparecem na seção de run
+  (reconstruível do JSON isolado — estende RF-CON-02 da 2a).
 
 ### 4.6 Herança de requisitos não funcionais (RF-RNF)
 
@@ -408,16 +444,20 @@ Itens novos na seção fixa de vieses (constante literal no código, padrão Fas
 ## 6. Premissas
 
 1. **Long-only REVOGADO** — a 2b opera long + short com margem.
-2. Alavancagem limitada pela margem (`margin_factor` default 1.0, configurável).
+2. Alavancagem limitada pela margem (`margin_factor` default 1.0, explícito e
+   configurável — R3).
 3. Sem fracionário — quantidades inteiras (RF-SIZ-01 da 2a mantido).
 4. Moeda única. Sem conversão cambial.
 5. Sem imposto.
 6. **Custo de aluguel entra como custo**; o default de 0,50% a.a. é premissa não calibrada
    — viés declarado no relatório (RF-MET-06).
-7. `rf = 0` e dividendos via ajuste de preço — herdados da Fase 1.
-8. Buy-stop executa com slippage; limite nunca violado — herdados da 2a (RF-SLP-04).
-9. Deslistagem em posição short: travada e reportada, passivo marcado (RF-SHT-05).
-10. Benchmark da 2b permanece **long-only 1/N** — isolar o efeito dos shorts exige
+7. **Disponibilidade de aluguel ilimitada** (default) — sem hard-to-borrow; restrição
+   configurável (RF-SHT-03 CA-03.4) — viés declarado (R1).
+8. `rf = 0` e dividendos via ajuste de preço — herdados da Fase 1; consistência para
+   shorts testada (RF-SHT-04 CA-04.3).
+9. Buy-stop executa com slippage; limite nunca violado — herdados da 2a (RF-SLP-04).
+10. Deslistagem em posição short: travada e reportada, passivo marcado (RF-SHT-05).
+11. Benchmark da 2b permanece **long-only 1/N** — isolar o efeito dos shorts exige
     benchmark long-only (RF-MET-05).
 
 ## 7. Legado verificado — baseline, não escopo novo
@@ -434,29 +474,38 @@ não reabre:
   `UnionCalendar` imutável (RF-POR-05), conciliação (RF-POR-04 CA-04.2) — são a base
   sobre a qual a 2b adiciona direção e margem, sem reescrever.
 
-## 8. Decisões da v0.1 (D1–D6)
+## 8. Decisões da v0.2 (D1–D7)
 
-| # | Decisão | Escolha da v0.1 | Razão | ADR |
+| # | Decisão | Escolha da v0.2 | Razão | ADR |
 |---|---|---|---|---|
-| D1 | Invariante de margem | `equity ≥ margem_exigida = Σ\|qtyᵢ\| × closeᵢ × factor` (factor default 1.0); caixa/qty podem ser negativos | Fórmula única, recupera long-only com factor 1.0; relaxamento exige ADR (RNF-09) | ADR-0009 (gate 2) |
+| D1 | Invariante de margem | `equity ≥ margem_exigida = Σ\|qtyᵢ\| × closeᵢ × factor` (factor default 1.0, explícito e configurável — R3); caixa/qty podem ser negativos | Fórmula única, recupera long-only com factor 1.0; relaxamento exige ADR (RNF-09) | ADR-0009 (gate 2) |
 | D2 | Liquidação forçada | Detectada no close; MARKET no open seguinte (ADR-0002); **integral por ativo, alfabética, repetida** até restaurar margem; cancela pendentes; `origin = MARGIN_CALL` | Integral por ativo preserva a semântica de PnL; alfabética é neutra e determinística | ADR-0010 (gate 2) |
 | D3 | Direção no contrato de sinal | `ENTER_SHORT`/`EXIT_SHORT` no `Signal`, opcionais e retrocompatíveis; sizer nunca decide direção | Direção é decisão da estratégia; sizer devolve magnitude (RF-SIZ-04 da 2a) — separação limpa de responsabilidades | — (contrato; RF-SHT-01) |
 | D4 | Fórmulas gross/net | Exposição gross e net reportadas lado a lado; turnover com `\|notional\|` (funciona com qty<0); alavancagem >100% explícita | O leitor vê o risco real (gross) e o direcional (net) sem adivinhar | — (RF-MRG-04) |
 | D5 | Buy-stop + ambiguidades | Buy-stop executa a `max(S, open)` com slippage; pior caso em brackets com buy-stop (RF-ORD-06) | Espelha o sell-stop e o ADR-0007 da 2a — consistência de semântica | — (RF-ORD-05/06; estende ADR-0007) |
-| D6 | Walk-forward | Grade determinística IS; isolamento estrito (OOS nunca indexado pelo IS); resultado = concatenação OOS; MHT declarado | O número honesto é o OOS concatenado; o IS é seleção, não resultado | ADR-0011 (gate 2, mutação OOS) |
+| D6 | Walk-forward | Grade determinística IS; isolamento estrito (OOS nunca indexado pelo IS); resultado = concatenação OOS; MHT declarado; métrica de seleção = Sharpe anualizado `rf=0` (R5) | O número honesto é o OOS concatenado; o IS é seleção, não resultado | ADR-0011 (gate 2, mutação OOS) |
+| D7 | Ancoragem dos folds (Q6) | **Rolling** (janela IS fixa deslizante) como **default**; **anchored** (janela IS crescente) configurável para medir a diferença | Rolling é o padrão da literatura e o mais comparável entre folds; anchored fica disponível para **medir**, não adivinhar (decisão do autor, 2026-08-14 — R7) | — (RF-WFK-01) |
+
+### 8.1 Notas e alternativas descartadas (v0.2)
+
+- **Fator de margem em dois níveis (long × short)** *(R3)* — descartado como default:
+  o fator único já limita a alavancagem e mantém a fórmula legível; a equivalência com
+  dois níveis é trivial (dois fatores configuráveis) e fica documentada para o ADR-0009.
+- **Warmup do OOS descartando as primeiras barras do OOS** *(R4)* — descartado: desperdiça
+  dados avaliáveis e abre buraco na concatenação dos segmentos; a cauda do IS
+  (≤ fronteira) é sem lookahead por construção.
+- **Anchored como default** *(R7)* — descartado como default: janelas IS de tamanho
+  variável entre folds prejudicam a comparabilidade; mantido configurável.
+- **Disponibilidade de aluguel com hard-to-borrow real** *(R1)* — descartado como default:
+  exigiria dados de disponibilidade/empréstimo não ingeridos; a premissa ilimitada é
+  declarada como viés e a restrição fica configurável.
 
 ## 9. Questões em aberto
 
-Fechar ou escalar no gate 1 (a seção fica **vazia** na aprovação — padrão da 2a):
-
-| # | Questão | Proposta da v0.1 | Status |
-|---|---|---|---|
-| Q1 | Direção no Signal vs sizer | Direção no `Signal` (`ENTER_SHORT`/`EXIT_SHORT`), sizer só magnitude | fechada como D3 — confirmar |
-| Q2 | Liquidação inteira vs parcial | Integral por ativo, parcial no agregado (alfabético até restaurar margem) | fechada como D2 — confirmar |
-| Q3 | Ordem de seleção da liquidação | Alfabética (neutra, nunca preço) | fechada como D2 — confirmar |
-| Q4 | Estado fundo quebrado | Congela, reporta o valor negativo real, métricas indefinidas, conciliação fecha | fechada como RF-MRG-03 — confirmar |
-| Q5 | Orçamento RNF-04 no WF | Por fold (30 s) + total (`n_folds × 30 s` + margem) — RF-WFK-05 | fechada como RF-WFK-05 — confirmar |
-| Q6 | Ancoragem dos folds | **Rolling** (janela IS fixa deslizante) — default da literatura | **em aberto** — decisão do autor |
+Nenhuma. Q1–Q5 foram fechadas na v0.1 como D1–D6; **Q6 foi fechada na v0.2 como D7**
+(ancoragem rolling como default, anchored configurável — decisão do autor, R7). Nada fica
+"para depois": o que não é da 2b está declarado no escopo (opções, fracionário, moedas,
+imposto, high-frequency, hard-to-borrow real).
 
 ## 10. Definition of Done
 
@@ -464,24 +513,29 @@ Fechar ou escalar no gate 1 (a seção fica **vazia** na aprovação — padrão
       benchmark 1/N long-only), universo de 20 ativos
 - [ ] Conciliação CA-04.2 **estendida** (RF-SHT-04) fechando com `isclose(1e-9)` no run
       real, com `qty` negativa e custos de aluguel no termo próprio
+- [ ] PnL de posição short atravessando data ex-dividendo ≡ retorno do preço ajustado,
+      em forma fechada (RF-SHT-04 CA-04.3)
 - [ ] Mutação ENG-01.2 estendida ao OOS (RF-WFK-04, ADR-0011) passando: mutar barras OOS
       não altera parâmetros selecionados no IS; mutar futuro do IS não altera intenções/
       execuções anteriores (incluindo shorts e buy-stop)
 - [ ] Liquidação forçada determinística testada (RF-MRG-02): seleção alfabética,
       `origin = MARGIN_CALL`, cancelamento de pendentes — incluindo o estado fundo
-      quebrado (RF-MRG-03)
+      quebrado com métricas `None` explícito (RF-MRG-03, R6)
 - [ ] Buy-stop e ambiguidades intrabarra novas testadas (RF-ORD-05/06): pior caso nos
       brackets long e short, sem "ambos executam", contagem nos contadores de mecanismo
 - [ ] Walk-forward com resultado honesto (concatenação OOS) comparado contra o 1/N
-      long-only e contra o run long-only da 2a (RF-MET-05)
+      long-only e contra o run long-only da 2a (RF-MET-05); warmup do OOS pela cauda do IS
+      (RF-WFK-01 CA-01.3)
 - [ ] ADRs 0009–0011 escritos (margem; liquidação forçada e fundo quebrado; fronteira de
       mutação IS/OOS)
 - [ ] Cobertura ≥ 85% com módulos novos (margin, walk-forward); CI verde; push a cada etapa
-- [ ] Resultado reportado honestamente, com os vieses da 2b (aluguel não calibrado, MHT
-      com grid size e folds, liquidação alfabética) na seção fixa do relatório
+- [ ] Resultado reportado honestamente, com os vieses da 2b (aluguel não calibrado,
+      aluguel ilimitado sem hard-to-borrow, MHT com métrica/grid/folds, liquidação
+      alfabética) na seção fixa do relatório
 
 ## 11. Histórico
 
 | Versão | Data | Mudança |
 |---|---|---|
+| 0.2 | 2026-08-14 | Revisão do gate 1 (tech lead do web): resoluções **R1–R7** aplicadas. R1: viés "disponibilidade de aluguel ilimitada" em RF-MET-06 + restrição configurável em RF-SHT-03 CA-03.4. R2: RF-SHT-04 CA-04.3 (PnL short através de data ex ≡ retorno do preço ajustado). R3: fator único de margem declarado como simplificação, alternativa de dois níveis descartada (§8.1), default 1.0 explícito (RF-MRG-01 CA-01.5). R4: warmup do OOS pela cauda do IS (RF-WFK-01 CA-01.3), alternativa descartada. R5: métrica de seleção IS = Sharpe anualizado rf=0 (RF-WFK-02 CA-02.3) e incluída no viés MHT (RF-MET-06). R6: fundo quebrado com métricas `None` explícito, nunca NaN (RF-MRG-03 CA-03.2). R7: Q6 fechada como D7 (rolling default, anchored configurável; decisão do autor). §9 vazia. Status draft → em revisão. |
 | 0.1 | 2026-08-14 | Rascunho inicial, com decisões D1–D6 propostas e Q1–Q6 em aberto para o gate 1 |
