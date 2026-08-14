@@ -1,0 +1,135 @@
+{
+  "universe": {
+    "n": 20,
+    "tickers": [
+      "AAPL",
+      "AMT",
+      "AMZN",
+      "BRK-B",
+      "CAT",
+      "CVX",
+      "GOOGL",
+      "HD",
+      "JNJ",
+      "JPM",
+      "KO",
+      "LIN",
+      "META",
+      "MSFT",
+      "NEE",
+      "NVDA",
+      "PG",
+      "UNH",
+      "UNP",
+      "XOM"
+    ],
+    "never_traded": [],
+    "delisted": [
+      "BRK-B",
+      "CVX",
+      "HD",
+      "JNJ",
+      "JPM",
+      "KO",
+      "LIN",
+      "META",
+      "NEE",
+      "PG",
+      "UNH",
+      "UNP",
+      "XOM"
+    ]
+  },
+  "strategy": {
+    "cumulative_return": 2.1793079962045354,
+    "cagr": 0.10495459570251131,
+    "sharpe": 1.0388029507469365,
+    "max_drawdown": {
+      "magnitude": 0.14741026081779143,
+      "peak_date": "2021-12-29",
+      "trough_date": "2022-09-26",
+      "recovery_date": "2023-07-12"
+    },
+    "num_trades": 618,
+    "hit_rate": 0.48841059602649006
+  },
+  "benchmark": {
+    "cumulative_return": 25.090898462183507,
+    "cagr": 0.32502364591177435,
+    "sharpe": 1.1468626937603095,
+    "max_drawdown": {
+      "magnitude": 0.4299750849518614,
+      "peak_date": "2021-11-29",
+      "trough_date": "2022-10-14",
+      "recovery_date": "2023-05-25"
+    },
+    "num_trades": 20,
+    "hit_rate": null
+  },
+  "assumptions": {
+    "risk_free_rate": 0.0,
+    "costs": {
+      "fixed": 1.0,
+      "rate": 0.0001,
+      "min_cost": 0.0
+    },
+    "slippage": "FixedBps(bps=1.0)",
+    "participation_cap": 0.1,
+    "dividend_treatment": "ajuste de preço na série (ADR-0003) — sem crédito em caixa"
+  },
+  "mechanism_counters": {
+    "stops_triggered": 0,
+    "intrabar_ambiguities": 0,
+    "unfilled_cash_orders": 2
+  },
+  "warnings": [],
+  "biases": [
+    "Survivorship bias — universo fixo de sobreviventes; retornos inflados por construção.",
+    "Sem slippage — execução integral ao open, sem desvio entre preço observado e preço pago.",
+    "Custos simplificados — modelo fixo + bps; sem spread, sem borrow, sem imposto.",
+    "Sem impacto de mercado — ordens não movem preço, qualquer tamanho executa.",
+    "Granularidade de posição fictícia — quantidades inteiras calculadas sobre preços ajustados, que não são os preços históricos reais (AAPL pré-split-4:1 aparece a ~1/4 do preço da época). A restrição de ação inteira, portanto, não corresponde à restrição que existia historicamente.",
+    "Sem correção para múltiplas hipóteses — parâmetros testados repetidamente contra a mesma amostra inflacionam métricas.",
+    "Ambiguidade intrabarra resolvida por pior caso — quando limite e stop tocam na mesma barra, o resultado registrado é o desfavorável (fills nos preços das ordens, sem slippage — ADR-0007).",
+    "Slippage modelado mas não calibrado contra execuções reais — o modelo (bps fixo + participação) é um parâmetro configurado, não uma medição.",
+    "Sem impacto permanente de mercado — o preço não reage ao volume negociado pelo próprio backtest.",
+    "Fill integral ao preço limite é otimista — a ordem pode não preencher ou preencher parcialmente (S2).",
+    "Atendimento alfabético com caixa insuficiente é determinístico e neutro, mas qualquer regra de atendimento é seleção com viés (Q5)."
+  ],
+  "run": {
+    "strategy": {
+      "name": "sma-cross",
+      "params": {
+        "fast": 20,
+        "slow": 50
+      }
+    },
+    "initial_capital": 100000.0,
+    "n_bars": 2914,
+    "effective_start": "2015-01-02",
+    "effective_end": "2026-08-05",
+    "idle_cash": 85269.18830758735,
+    "pending_dead": {
+      "AAPL": 0,
+      "AMT": 0,
+      "AMZN": 0,
+      "BRK-B": 0,
+      "CAT": 0,
+      "CVX": 0,
+      "GOOGL": 0,
+      "HD": 0,
+      "JNJ": 0,
+      "JPM": 0,
+      "KO": 0,
+      "LIN": 0,
+      "META": 0,
+      "MSFT": 0,
+      "NEE": 0,
+      "NVDA": 0,
+      "PG": 0,
+      "UNH": 0,
+      "UNP": 0,
+      "XOM": 0
+    }
+  }
+}
