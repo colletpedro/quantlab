@@ -96,10 +96,12 @@ class UnionCalendar:
     @staticmethod
     def build(series: dict[str, PriceSeries]) -> UnionCalendar: ...   # função pura, sem estado mutável
 
-    def has_bar(self, ticker: str, u: int) -> bool: ...            # O(1)
-    def bar_index(self, ticker: str, u: int) -> int | None: ...    # O(1); None sse -1 (POR-05.1)
-    def last_close_index(self, ticker: str, u: int) -> int | None: ...  # O(1); None sse o ativo ainda não tem barra
+    def has_bar_at(self, ticker: str, u: int) -> bool: ...            # O(1)
+    def bar_index_at(self, ticker: str, u: int) -> int | None: ...    # O(1); None sse -1 (POR-05.1)
+    def last_known_index_at(self, ticker: str, u: int) -> int | None: ...  # O(1); None sse o ativo ainda não tem barra
 ```
+
+> **Nomes dos métodos de consulta com sufixo `_at` (emenda T05):** o campo `bar_index` (dict de arrays) e uma consulta não podem dividir o mesmo nome numa classe Python — o método viraria o "default" do campo no dataclass (TypeError na construção). O acesso a campo (`bar_index[X][u]`, usado no fluxo de §4) permanece; as consultas são `has_bar_at`/`bar_index_at`/`last_known_index_at`.
 
 - **Pré-computado e imutável (D1):** os arrays são construídos uma vez por run, em uma passada de merge (algoritmo em §5); `frozen=True` + `flags.writeable = False` nos arrays, mesma política de imutabilidade da `PriceSeries` (design Fase 1 §3.7). **Não há ponteiros mutáveis**: o laço apenas lê índices.
 - **Complexidade por construção, não por disciplina:** não existe método que busque "data → ativo"; toda consulta é por índice de união. O guard de O(total) vira **teste de propriedade** (§10), não teste de sequência de chamadas (D1).
@@ -302,7 +304,7 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | Interface | Pré-condições | Pós-condições | Exceções |
 |---|---|---|---|
 | `UnionCalendar.build(series)` | `series` não vazio; datas de cada série ordenadas e sem duplicata | `dates` = união ordenada; `bar_index[X][u] = -1` sse X sem barra em `dates[u]`; `last_known` = último índice ≥ 0 à esquerda; arrays imutáveis (`writeable=False`) | `EngineError` se `series` vazio |
-| `UnionCalendar.has_bar/bar_index/last_close_index(ticker, u)` | `ticker ∈ series`; `0 ≤ u < len(dates)` | O(1); `bar_index` devolve índice do próprio array ou `None` (POR-05.1); `last_close_index` devolve `None` sse o ativo ainda não tem barra (POR-02.2) | `KeyError` se ticker fora do run; `EngineError` se `u` fora de `[0, len(dates))` |
+| `UnionCalendar.has_bar_at/bar_index_at/last_known_index_at(ticker, u)` | `ticker ∈ series`; `0 ≤ u < len(dates)` | O(1); `bar_index_at` devolve índice do próprio array ou `None` (POR-05.1); `last_known_index_at` devolve `None` sse o ativo ainda não tem barra (POR-02.2) | `KeyError` se ticker fora do run; `EngineError` se `u` fora de `[0, len(dates))` |
 | `ConditionalStrategy.on_bar(view)` | `view.i ≥ warmup`; `view` contém apenas barras do próprio ativo (POR-02.4) | devolve `Signal`/`ConditionalIntent`/`None`; sem acesso a caixa/posição/trades (ENG-05.2); sem efeito colateral sobre a carteira | — |
 | `ConditionalIntent` | `LIMIT` ⇔ `limit` presente; `STOP` ⇔ `stop` presente; `MARKET` ⇒ sem `limit`/`stop`; `bracket` ⇒ `order_type = LIMIT` e `limit = bracket.limit` (par na mesma intenção — SIG-01.2) | ordens derivadas compartilham o `decision_date` da intenção (SIG-01.3) | `EngineError` se pré-condição violada (construtor) |
 | `Bracket` | `0 < stop < limit` (entrada: limite de compra acima do stop protetor; saída: take-profit acima do stop — ADR-0007) | — | `EngineError` se violado |
