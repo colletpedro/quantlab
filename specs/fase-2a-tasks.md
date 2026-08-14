@@ -200,7 +200,7 @@ Médio — é a estrutura que RNF-04 depende. O teste de linearidade é de propr
 **Arquivos:** `src/quantlab/engine/broker.py` (estendido), `src/quantlab/engine/portfolio.py` (estendido — `Trade` com `origin`/`cut_reason`/`ambiguous`), `tests/unit/test_broker.py`, `tests/unit/test_portfolio.py`
 
 **Escopo**
-`PendingOrder` (ticker, kind, limit, stop, qty, `decision_date`, `intent_seq`, `bracket`); extensão de `Trade` com `origin`/`cut_reason`/`ambiguous`; `Broker.convert` aplicando a sequência fixa **SIZING → CAP (SLP-03) → INTEIRAS (SIZ-01.2) → CAIXA/CUSTOS (CST-01.2)** e registrando a etapa do corte em `cut_reason` (CST-01.3).
+`CutStage` (SIZING/CAP/INTEGER/CASH); `ConvertedOrder` (ticker, kind, limit/stop, qty, `ref_price`, `decision_date`, `intent_seq`, `cut_reason`, `est_cost`, `bracket`); `PendingOrder` (ticker, kind, limit, stop, qty, `decision_date`, `intent_seq`, `bracket`); extensão de `Trade` com `origin`/`cut_reason`/`ambiguous`; `CostModel` com `min_cost=0.0` e `cost_for = max(f + p×N, m)` (CA-01.1); `Broker.convert(intent, ticker, inputs, sizer, adv, cost_model, cap, decision_date, intent_seq) -> ConvertedOrder | None` (emenda §3.5: sizer/decision_date/intent_seq vêm do laço — função pura) aplicando a sequência fixa **SIZING → CAP (SLP-03) → INTEIRAS (SIZ-01.2) → CAIXA/CUSTOS (CST-01.2)** e registrando a última etapa do corte em `cut_reason` (CST-01.3); `ref_price = last_close[ticker]`.
 
 **Fora do escopo**
 Regras de preenchimento/limite/stop (T08); ciclo de vida de pendentes — `place`/`cancel_all` (T07); pior caso intrabarra (T09).

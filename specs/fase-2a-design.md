@@ -228,6 +228,26 @@ def rebalance_deviation_pp(weight_fraction: float, k: int) -> float:
 ### 3.5 Broker e ciclo de vida de ordens — `engine/broker.py` (estendido)
 
 ```python
+class CutStage(StrEnum):            # etapa da sequência que cortou (CST-01.3/R1)
+    SIZING = "sizing"
+    CAP    = "cap"
+    INTEGER = "integer"
+    CASH   = "cash"
+
+@dataclass(frozen=True)
+class ConvertedOrder:               # resultado da conversão — T06 (emenda §3.5)
+    ticker: str
+    kind: OrderKind
+    limit: float | None             # presente sse LIMIT
+    stop: float | None              # presente sse STOP
+    qty: int
+    ref_price: float                # = last_close[ticker] — estimativa na decisão (T06)
+    decision_date: date             # base da auditoria do ENG-01.2 (ORD-04.4)
+    intent_seq: int                 # "última intenção vence" (ORD-04.2) — do laço (T11a)
+    cut_reason: CutStage | None     # última etapa que reduziu; None sse nenhum corte
+    est_cost: float                 # custo estimado (max(f + p·N, m)) no ref_price
+    bracket: bool                   # originado de bracket — T07 deriva o par stop (ADR-0007)
+
 @dataclass(frozen=True)
 class PendingOrder:
     ticker: str
@@ -241,12 +261,15 @@ class PendingOrder:
 
 class Broker:
     def convert(self, intent: Signal | ConditionalIntent, ticker: str,
-                inputs: SizingInputs, adv: float | None,
-                cost_model: CostModel, cap: float) -> ConvertedOrder:
+                inputs: SizingInputs, sizer: Sizer, adv: float | None,
+                cost_model: CostModel, cap: float,
+                decision_date: date, intent_seq: int) -> ConvertedOrder | None:
         """SEQUÊNCIA FIXA (R1/CST-01.3):
            SIZING → CAP DE PARTICIPAÇÃO (SLP-03) → CONVERSÃO EM INTEIRAS (SIZ-01.2)
            → AJUSTE POR CAIXA/CUSTOS (CST-01.2).
-           A etapa que cortou é registrada no trade (cut_reason)."""
+           A etapa que cortou é registrada no trade (cut_reason).
+           Função PURA (não toca o portfolio); None ⇒ sem ordem (CST-01.2/SLP-03.5).
+           decision_date/intent_seq vêm do laço — convert permanece pura."""
     def place(self, order: ConvertedOrder) -> None:
         """Sem reserva de caixa (ORD-04.3): a ordem usa o caixa disponível na hora da execução.
            Última intenção vence (ORD-04.2): place substitui pendentes anteriores do ativo."""
@@ -262,6 +285,10 @@ class Broker:
     def cancel_all(self, ticker: str) -> None:
         """EXIT cancela TODAS as pendentes do ativo, incluindo stops (ORD-04.1)."""
 ```
+
+- **`CostModel` estendido (emenda T06):** o da Fase 1 (`fixed + rate×notional`) ganha `min_cost: float = 0.0` e `cost_for(N) = max(fixed + rate×N, min_cost)` — CA-01.1. Default `m = 0` preserva exatamente o comportamento da Fase 1 (D2: 1 bps + USD 1).
+- **`ref_price = last_close[ticker]` (escolha documentada, T06):** sizing, caixa e custo estimado usam o último close **conhecido na decisão**; a execução acontece no open da próxima barra do próprio ativo (ADR-0002) com slippage — o preço final é do T08, e o `est_cost` é estimativa. Preço de execução nunca negativo; `ref_price ≤ 0` ⇒ `EngineError`.
+- **Caixa/custos = reduce-until-fits em forma fechada (decisão T06):** a desigualdade `q·p + max(f + r·q·p, m) ≤ cash` é linear por partes; resolve-se nos dois candidatos (`⌊(cash−f)/(p(1+r))⌋` e `⌊(cash−m)/p⌋`, validados com o custo real) — mesmo resultado do laço decremental, sem risco de O(q) (mesmo princípio do `max_affordable_quantity` da Fase 1).
 
 ### 3.6 Portfolio e Trade — estendidos
 
@@ -314,7 +341,9 @@ Regra mantida na íntegra: **a classe `datetime` e o aparato de fuso (`timezone`
 | `adv(series, i, window=20)` | `0 ≤ i < len(series)`; `window ≥ 1` | média de volume dos últimos `window` pregões do próprio ativo terminando em `i`; `None` sse histórico insuficiente (SLP-03.1/03.2) | — |
 | `participation_cap(qty, adv, cap=0.10)` | `qty ≥ 1`; `adv > 0`; `0 < cap ≤ 1` | `min(qty, ⌊cap × adv⌋)`; resultado `< 1` ⇒ chamador não gera ordem e loga (SLP-03.5); nunca chamada para saídas (SLP-03.4) | — |
 | `Sizer.target_fraction(ticker, inputs)` | `ticker ∈ inputs.positions ∪ universo`; `inputs.n ≥ 1` | fração em `(0, 1]`; `FixedOneOverN` ⇒ `1/n`; conversão em quantidade é do broker (SIZ-01.2) | — |
-| `Broker.convert(intent, ticker, inputs, adv, cost_model, cap)` | intenção válida (3.2); `inputs` coerentes | aplica a sequência fixa SIZING → CAP → INTEIRAS → CAIXA/CUSTOS (R1/CST-01.3); `cut_reason` registra a etapa que cortou; sem reserva de caixa (ORD-04.3) | — (caixa insuficiente para 1 ação ⇒ sem ordem, logado — ENG-02.3/CST-01.2) |
+| `CostModel.cost_for(notional)` | `notional ≥ 0`; `fixed, rate, min_cost ≥ 0` | `max(fixed + rate×notional, min_cost)` (CST-01 CA-01.1) | `EngineError` se algum parâmetro < 0 |
+| `Broker.convert(intent, ticker, inputs, sizer, adv, cost_model, cap, decision_date, intent_seq)` | intenção de ENTRADA válida (3.2); `ticker ∈ inputs.last_close`; `ref_price > 0`; `inputs` coerentes | aplica a sequência fixa SIZING → CAP → INTEIRAS → CAIXA/CUSTOS (R1/CST-01.3); `cut_reason` = última etapa que reduziu; `ConvertedOrder | None` (None ⇒ sem ordem, logado — CST-01.2/SLP-03.5); função pura; sem reserva de caixa (ORD-04.3) | `EngineError` se `ticker` sem last_close, `ref_price ≤ 0` ou intenção de saída |
+| `ConvertedOrder` | campos coerentes com o `kind` (3.2) | `qty ≥ 1`; `est_cost` = custo no `ref_price`; imutável | — |
 | `Broker.place(order)` | ordem já convertida | pendente registrada por ativo; substitui pendentes anteriores do ativo (última intenção vence — ORD-04.2) | — |
 | `Broker.execute_pending(ticker, bar, adv)` | `bar` é a próxima barra do próprio ativo (ADR-0002 por ativo, POR-05.3) | mercado ao open; limite a `min/max(L, open)` ou cancelado ao fim da barra (ORD-01.1/01.3); stop a `min(S, open)` com slippage (ORD-02.1); pior caso intrabarra registrado (ADR-0007); atendimento alfabético (POR-01.2); caixa nunca negativo | — |
 | `Broker.cancel_all(ticker)` | — | todas as pendentes do ativo canceladas, incluindo stops (ORD-04.1) | — |
