@@ -11,12 +11,13 @@ from datetime import date, timedelta
 import numpy as np
 import pytest
 from numpy.typing import NDArray
+from structlog.typing import EventDict
 
 from quantlab.engine.backtest import BacktestResultMulti, run_backtest, run_backtest_multi
 from quantlab.engine.broker import CostModel
 from quantlab.engine.conditional import ConditionalIntent, OrderKind
 from quantlab.engine.market_view import MarketView
-from quantlab.engine.sizing import EqualWeightOpen
+from quantlab.engine.sizing import EqualWeightOpen, SizingInputs
 from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
 from quantlab.exceptions import EngineError
@@ -861,3 +862,159 @@ def test_run_backtest_multi_domain_errors() -> None:
         run_backtest_multi(series, {"A": ScriptedStrategy({}, warmup=-1)})
     with pytest.raises(EngineError, match="cap fora"):
         run_backtest_multi(series, {"A": ScriptedStrategy({})}, cap=0.0)
+
+
+# ─── 2a (T11b): último close conhecido, deslistagem e interação de caixa ─────
+
+
+@dataclass
+class FixedFractionSizer:
+    """Sizer de teste: fração fixa por ativo (SIZ-04.2) — controla o notional
+    para o teste de atendimento alfabético sem depender de preço."""
+
+    fraction: float
+
+    def target_fraction(self, ticker: str, inputs: SizingInputs) -> float:
+        return self.fraction
+
+
+@pytest.mark.unit
+def test_asset_without_bar_is_marked_with_last_close() -> None:
+    """CA-05.2/POR-02.2 — ativo sem barra na data-união é marcado pelo ÚLTIMO
+    CLOSE CONHECIDO (nada de preço inventado nem da data seguinte): em d2, B
+    não tem barra e a equity usa close_B(d1) = 21 (usar close(d3) = 22 daria
+    102.500, não 100.000)."""
+    series = {
+        "A": _series([10, 10, 10, 10], [10, 10, 10, 10], ticker="A", dates=_dates(4)),
+        # B NÃO tem barra em d2 — buraco no meio da união.
+        "B": _series(
+            [20, 21, 22],
+            [20, 21, 22],
+            ticker="B",
+            dates=[_D0, _D0 + timedelta(days=1), _D0 + timedelta(days=3)],
+        ),
+    }
+    strategies = {"B": ScriptedStrategy({0: Signal.ENTER})}
+
+    result = run_backtest_multi(series, strategies, costs=_FREE, slippage=_NO_SLIP)
+
+    # B: decide em d0 (ref 20), 1/2 do patrimônio ⇒ 2_500 ações; executa em
+    # d1 a 21 ⇒ caixa 47_500.
+    assert result.portfolio.positions["B"].quantity == 2_500
+    assert result.equity_curve[2] == pytest.approx(47_500.0 + 2_500 * 21.0)  # close de d1
+    assert result.equity_curve[3] == pytest.approx(47_500.0 + 2_500 * 22.0)  # barra de d3
+
+
+@pytest.mark.unit
+def test_delisted_position_is_locked_and_reported() -> None:
+    """POR-02.3 — série de B termina antes do fim da união com posição aberta:
+    posição TRAVADA (marcada pelo último close, nunca liquidada) e REPORTADA
+    em `result.delisted`; determinístico."""
+
+    def run_once() -> BacktestResultMulti:
+        series = {
+            "A": _series([10, 10, 10, 10, 10], [10, 10, 10, 10, 10], ticker="A", dates=_dates(5)),
+            # B deslista em d2 — a série termina antes do fim da união (d4).
+            "B": _series([20, 21, 22], [20, 21, 22], ticker="B", dates=_dates(3)),
+        }
+        return run_backtest_multi(
+            series, {"B": ScriptedStrategy({0: Signal.ENTER})}, costs=_FREE, slippage=_NO_SLIP
+        )
+
+    first = run_once()
+    second = run_once()
+    assert first.delisted == second.delisted  # determinismo (RNF-01)
+    assert first.delisted == ("B",)  # reportada; A (sem posição) não entra
+    position = first.portfolio.positions["B"]
+    assert position.quantity == 2_500
+    # Nunca liquidada: B não tem trade com saída e a posição segue aberta.
+    b_trades = [t for t in first.portfolio.trades if t.ticker == "B"]
+    assert len(b_trades) == 1
+    assert b_trades[0].exit_date is None
+    # Marcada pelo último close conhecido até o fim (22), não liquidada.
+    assert first.final_equity == pytest.approx(47_500.0 + 2_500 * 22.0)
+    assert first.portfolio.marks["B"] == pytest.approx(22.0)
+
+
+@pytest.mark.unit
+def test_second_entry_sees_cash_already_debited(
+    log_events: list[EventDict],
+) -> None:
+    """ORD-04.3 (gate 1) — duas entradas na mesma barra: a primeira (A,
+    alfabética) debita o caixa; a SEGUNDA vê o caixa já debitado e não
+    preenche (0 ações, evento logado). Rodar B sozinho prova que B
+    preencheria com o caixa cheio."""
+    # A: 9_000 x 10 = 90_000 (fração 0.9). B: 4 x 20_000 = 80_000 (0.9) —
+    # cabe com 100_000, mas NÃO com o caixa pós-A (10_000 < 20_000).
+    series = {
+        "A": _series([10, 10], [10, 10], ticker="A", dates=_dates(2)),
+        "B": _series([20_000, 20_000], [20_000, 20_000], ticker="B", dates=_dates(2)),
+    }
+    strategies = {
+        "A": ScriptedStrategy({0: Signal.ENTER}),
+        "B": ScriptedStrategy({0: Signal.ENTER}),
+    }
+
+    result = run_backtest_multi(
+        series, strategies, costs=_FREE, slippage=_NO_SLIP, sizer=FixedFractionSizer(0.9)
+    )
+
+    assert result.portfolio.positions["A"].quantity == 9_000  # atendida primeiro
+    assert "B" not in result.portfolio.positions  # não preencheu NADA
+    assert [t.ticker for t in result.portfolio.trades] == ["A"]
+    assert any(
+        e["event"] == "engine.insufficient_cash" and e.get("ticker") == "B" for e in log_events
+    )
+
+    # Prova do "já debitado": B sozinho, com o caixa cheio, preenche as 4.
+    solo = run_backtest_multi(
+        {"B": series["B"]},
+        {"B": ScriptedStrategy({0: Signal.ENTER})},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedFractionSizer(0.9),
+    )
+    assert solo.portfolio.positions["B"].quantity == 4
+
+
+@pytest.mark.unit
+def test_alphabetical_serving_with_insufficient_cash() -> None:
+    """CA-01.2/POR-01.2 — atendimento ALFABÉTICO com caixa insuficiente: o
+    primeiro ticker em ordem alfabética é servido; o segundo fica com o que
+    sobra. Runs espelhados (nomes trocados) provam que a regra é a ORDEM do
+    nome, não preço/tamanho."""
+    cheap = _series([10, 10], [10, 10], ticker="X", dates=_dates(2))  # alvo 9_000
+    expensive = _series([20_000, 20_000], [20_000, 20_000], ticker="Y", dates=_dates(2))  # alvo 4
+
+    # Run 1: barato = "A", caro = "B" → A serve 9_000 cheio; B não cabe (0).
+    run1 = run_backtest_multi(
+        {"A": cheap, "B": expensive},
+        {"A": ScriptedStrategy({0: Signal.ENTER}), "B": ScriptedStrategy({0: Signal.ENTER})},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedFractionSizer(0.9),
+    )
+    # Run 2: caro = "A", barato = "B" → A (caro) serve 4 cheio; B (barato)
+    # fica com o que sobra (1_000 a 10 com os 10_000 restantes).
+    run2 = run_backtest_multi(
+        {"A": expensive, "B": cheap},
+        {"A": ScriptedStrategy({0: Signal.ENTER}), "B": ScriptedStrategy({0: Signal.ENTER})},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedFractionSizer(0.9),
+    )
+
+    assert run1.portfolio.positions["A"].quantity == 9_000
+    assert "B" not in run1.portfolio.positions
+    assert run2.portfolio.positions["A"].quantity == 4  # servido por inteiro
+    # A deixou 20_000; B (barato) fica com o restante: 2_000 x 10 (corte CASH).
+    assert run2.portfolio.positions["B"].quantity == 2_000
+    # Quem ficou com o corte de CAIXA foi SEMPRE o segundo em ordem alfabética
+    # (o caro tem corte INTEGER na conversão: 4,5 -> 4 ações).
+    assert [t.cut_reason for t in run1.portfolio.trades] == [None]
+    assert sorted(
+        t.cut_reason.value if t.cut_reason is not None else "" for t in run2.portfolio.trades
+    ) == [
+        "cash",
+        "integer",
+    ]

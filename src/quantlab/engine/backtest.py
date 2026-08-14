@@ -324,6 +324,10 @@ class BacktestResultMulti:
     cap: float
     calendar: UnionCalendar
     pending_dead: dict[str, int]
+    #: POR-02.3 (T11b) — posições ABERTAS travadas por deslistagem: série
+    #: terminou antes do fim da união. Marcadas pelo último close conhecido,
+    #: nunca liquidadas; o relatório (T16) as reporta.
+    delisted: tuple[str, ...]
 
     @property
     def final_equity(self) -> float:
@@ -548,6 +552,15 @@ def run_backtest_multi(
             if converted is not None:
                 broker.place(portfolio.pending, converted)
 
+    # POR-02.3: posição aberta cuja série terminou antes do fim da união é
+    # travada — marcada pelo último close (passo 2 já usa last_known até o
+    # fim), nunca liquidada, reportada no resultado (determinístico: sorted).
+    last_union_date = calendar.dates[-1]
+    delisted = tuple(
+        sorted(
+            t for t in tickers if t in portfolio.positions and series[t].dates[-1] < last_union_date
+        )
+    )
     return BacktestResultMulti(
         dates=calendar.dates,
         equity_curve=equity_curve,
@@ -561,4 +574,5 @@ def run_backtest_multi(
         cap=cap,
         calendar=calendar,
         pending_dead=pending_dead,
+        delisted=delisted,
     )
