@@ -682,6 +682,7 @@ def _pending(
     stop: float | None = None,
     qty: int = 100,
     seq: int = 1,
+    bracket: bool = False,
 ) -> PendingOrder:
     return PendingOrder(
         ticker=_TICKER,
@@ -692,7 +693,7 @@ def _pending(
         qty=qty,
         decision_date=_DECIDED,
         intent_seq=seq,
-        bracket=False,
+        bracket=bracket,
     )
 
 
@@ -980,3 +981,315 @@ def test_insufficient_cash_at_execution_leaves_order_unfilled(
     assert portfolio.positions == {}
     assert book.pending_for(_TICKER) == ()
     assert any(event["event"] == "engine.insufficient_cash" for event in log_events)
+
+
+# ─── T09 — ambiguidade intrabarra por pior caso (ADR-0007/D2, RF-ORD-03) ─────
+
+
+def _bracket_order(qty: int = 100, seq: int = 1) -> ConvertedOrder:
+    """Ordem convertida de bracket de entrada (par L + S na mesma intenção)."""
+    return _converted(kind=OrderKind.LIMIT, limit=10.5, stop=9.5, qty=qty, seq=seq, bracket=True)
+
+
+@pytest.mark.unit
+def test_intrabar_ambiguity_entry_bracket_worst_case() -> None:
+    """ADR-0007/D2 — par L=10.5 + S=9.5, ambos tocados (low 9.0 ≤ S): abre em
+    L, fecha em S na mesma barra, flat, ambiguous=True.
+
+    Forma fechada: entrada 100 x 10.5 = 1_050 (custo 1.105); saída 100 x 9.5 =
+    950 (custo 1.095); caixa = 2_000 - 100 - 2.20 = 1_897.80; perda
+    realizada (S-L) x qty = -100, bruta de custos.
+    """
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _bracket_order())
+
+    trades = _run(broker, book, portfolio, _bar(open_=10.0, low=9.0, high=10.0))
+
+    assert len(trades) == 1  # só o fechado — o aberto foi substituído
+    trade = trades[0]
+    assert trade.entry_price == pytest.approx(10.5)  # abre em L (não min(L, open))
+    assert trade.exit_price is not None
+    assert trade.exit_price == pytest.approx(9.5)  # fecha em S, sem slippage
+    assert trade.ambiguous is True
+    assert trade.realized_pnl == pytest.approx(-100.0)  # (S - L) x qty
+    assert trade.entry_cost == pytest.approx(1.105)
+    assert trade.exit_cost == pytest.approx(1.095)
+    assert portfolio.positions == {}  # flat
+    assert portfolio.cash == pytest.approx(2_000.0 - 100.0 - 2.20)
+    assert book.pending_for(_TICKER) == ()  # par consumido — nunca "ambos executam"
+
+
+@pytest.mark.unit
+def test_intrabar_ambiguity_exit_bracket_worst_case() -> None:
+    """ADR-0007/D2 — take-profit TP=12 + stop S=9 sobre posição aberta, ambos
+    tocados (high 12.5 ≥ TP, low 8.5 ≤ S): o STOP preenche em S (pior que TP),
+    ambiguous=True; o TP NÃO preenche (sem dupla contagem)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    opened = portfolio.positions[_TICKER]
+    # Par de saída: LIMIT venda (take-profit) + STOP venda, mesma intenção;
+    # os DOIS membros do par carregam bracket=True (mesmo contrato do place).
+    book.place(_pending(OrderKind.LIMIT, side=Side.SELL, limit=12.0, seq=3, bracket=True))
+    book.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.STOP,
+            side=Side.SELL,
+            limit=None,
+            stop=9.0,
+            qty=opened.quantity,
+            decision_date=_DECIDED,
+            intent_seq=3,
+            bracket=True,
+        )
+    )
+
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=12.5, low=8.5))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.exit_price is not None
+    assert trade.exit_price == pytest.approx(9.0)  # o stop em S — não max(12, open)
+    assert trade.ambiguous is True
+    assert trade.origin is OrderKind.STOP
+    assert portfolio.positions == {}  # uma única saída — sem "ambos executam"
+    assert book.pending_for(_TICKER) == ()
+    # Caixa: uma venda só (qty x 9 - custo), não TP + stop.
+    expected = 2_000.0 - opened.quantity * 10.0 - (1 + 1e-4 * opened.quantity * 10.0)
+    expected += opened.quantity * 9.0 - (1 + 1e-4 * opened.quantity * 9.0)
+    assert portfolio.cash == pytest.approx(expected)
+
+
+@pytest.mark.unit
+def test_entry_bracket_limit_cancels_and_stop_leaves_with_it() -> None:
+    """Q2 + sem stop órfão — low > L: o limite da entrada cancela ao fim da
+    barra e o stop do MESMO par sai do book junto (a intenção morreu; nada
+    fica esperando uma posição que nunca abriu)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _bracket_order())  # L=10.5, S=9.5
+
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, low=10.8, high=11.0))
+
+    assert trades == []
+    assert portfolio.positions == {}
+    assert book.pending_for(_TICKER) == ()  # par inteiro consumido — sem stop órfão
+
+
+@pytest.mark.unit
+def test_entry_bracket_limit_only_fills_and_stop_survives() -> None:
+    """ORD-02.2 — só o limite toca (low ≤ L, low > S): entra em min(L, open)
+    e o stop do par PERMANECE protegendo a posição recém-aberta."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _bracket_order())  # L=10.5, S=9.5
+
+    trades = _run(broker, book, portfolio, _bar(open_=10.0, low=10.0, high=10.5))
+
+    assert len(trades) == 1
+    assert trades[0].entry_price == pytest.approx(10.0)  # min(10.5, open 10.0)
+    assert trades[0].ambiguous is False
+    assert portfolio.positions[_TICKER].quantity == 100
+    surviving = book.pending_for(_TICKER)
+    assert len(surviving) == 1
+    assert surviving[0].kind is OrderKind.STOP  # segue vivo
+    assert surviving[0].stop == pytest.approx(9.5)
+
+
+@pytest.mark.unit
+def test_intrabar_ambiguity_is_deterministic() -> None:
+    """RNF-01 — mesma entrada ⇒ mesmo resultado (pior caso fixo, sem sorteio)."""
+    broker = Broker()
+
+    def run_once() -> tuple[list[Trade], float]:
+        book = PendingBook()
+        portfolio = Portfolio(cash=2_000.0)
+        broker.place(book, _bracket_order())
+        trades = _run(broker, book, portfolio, _bar(open_=10.0, low=9.0, high=10.0))
+        return trades, portfolio.cash
+
+    first_trades, first_cash = run_once()
+    second_trades, second_cash = run_once()
+    assert first_trades == second_trades
+    assert first_cash == pytest.approx(second_cash)
+
+
+@pytest.mark.unit
+def test_bracket_malformed_raises_engine_error() -> None:
+    """§3.8 — par de bracket sem preços (limite ou stop) é EngineError."""
+    broker = Broker()
+
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(OrderKind.LIMIT, limit=10.5, seq=1, bracket=True))  # sem parceiro
+    with pytest.raises(EngineError):
+        _run(broker, book, portfolio, _bar(open_=10.0, low=9.0, high=10.0))
+
+
+@pytest.mark.unit
+def test_entry_bracket_ambiguity_without_cash_pair_dies() -> None:
+    """ADR-0007/D2 — pior caso sem caixa para 1 ação: nada abre, nada fecha,
+    e o par inteiro é consumido (a intenção morreu — sem stop órfão)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=1.0)  # nem 1 ação a 10.5 cabe
+    broker.place(book, _bracket_order())
+
+    trades = _run(broker, book, portfolio, _bar(open_=10.0, low=9.0, high=10.0))
+
+    assert trades == []
+    assert portfolio.positions == {}
+    assert book.pending_for(_TICKER) == ()
+
+
+@pytest.mark.unit
+def test_exit_bracket_only_tp_touched() -> None:
+    """ADR-0007/D2 — só o take-profit toca (high >= TP, low > S): preenche em
+    max(TP, open), sem ambiguidade; o stop sai junto (posição fechada)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    opened = portfolio.positions[_TICKER]
+    book.place(_pending(OrderKind.LIMIT, side=Side.SELL, limit=12.0, seq=3, bracket=True))
+    book.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.STOP,
+            side=Side.SELL,
+            limit=None,
+            stop=9.0,
+            qty=opened.quantity,
+            decision_date=_DECIDED,
+            intent_seq=3,
+            bracket=True,
+        )
+    )
+
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=12.5, low=9.5))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.exit_price == pytest.approx(12.0)  # max(TP, open), sem slippage
+    assert trade.ambiguous is False
+    assert trade.origin is OrderKind.LIMIT
+    assert portfolio.positions == {}
+    assert book.pending_for(_TICKER) == ()  # par completo — sem stop sobre posição fechada
+
+
+@pytest.mark.unit
+def test_exit_bracket_only_stop_touched() -> None:
+    """ADR-0007/D2 — só o stop toca (high < TP, low <= S): regra normal do
+    sell-stop (min(S, open) + slippage); o TP cancela ao fim da barra (Q2)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    opened = portfolio.positions[_TICKER]
+    book.place(_pending(OrderKind.LIMIT, side=Side.SELL, limit=12.0, seq=3, bracket=True))
+    book.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.STOP,
+            side=Side.SELL,
+            limit=None,
+            stop=9.0,
+            qty=opened.quantity,
+            decision_date=_DECIDED,
+            intent_seq=3,
+            bracket=True,
+        )
+    )
+
+    trades = _run(broker, book, portfolio, _bar(open_=9.4, high=11.0, low=8.5))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    # min(S, open) = min(9.0, 9.4) = 9.0, venda: 9.0 x (1 - 1e-4) = 8.9991
+    assert trade.exit_price == pytest.approx(9.0 * (1 - 1e-4))
+    assert trade.ambiguous is False
+    assert trade.origin is OrderKind.STOP
+    assert portfolio.positions == {}
+    assert book.pending_for(_TICKER) == ()  # TP cancelado, par completo
+
+
+@pytest.mark.unit
+def test_exit_bracket_none_touched_tp_cancels_stop_survives() -> None:
+    """Q2/ORD-01.3 — nenhum preço tocado: o take-profit CANCELA ao fim da
+    barra e o stop PERMANECE protegendo a posição aberta."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    opened = portfolio.positions[_TICKER]
+    book.place(_pending(OrderKind.LIMIT, side=Side.SELL, limit=12.0, seq=3, bracket=True))
+    book.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.STOP,
+            side=Side.SELL,
+            limit=None,
+            stop=9.0,
+            qty=opened.quantity,
+            decision_date=_DECIDED,
+            intent_seq=3,
+            bracket=True,
+        )
+    )
+
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=11.5, low=10.5))
+
+    assert trades == []
+    assert portfolio.positions[_TICKER].quantity == opened.quantity  # posição intacta
+    surviving = book.pending_for(_TICKER)
+    assert len(surviving) == 1
+    assert surviving[0].kind is OrderKind.STOP  # TP cancelado, stop vivo
+    assert surviving[0].stop == pytest.approx(9.0)
+
+
+@pytest.mark.unit
+def test_exit_bracket_malformed_raises_engine_error() -> None:
+    """§3.8 — par de SAÍDA sem o parceiro stop é EngineError."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.buy(
+        portfolio,
+        ticker=_TICKER,
+        price=10.0,
+        execution_date=_DECIDED,
+        decision_date=_DECIDED,
+    )
+    book.place(_pending(OrderKind.LIMIT, side=Side.SELL, limit=12.0, seq=3, bracket=True))
+    with pytest.raises(EngineError):
+        _run(broker, book, portfolio, _bar(open_=11.0, high=12.5, low=8.5))

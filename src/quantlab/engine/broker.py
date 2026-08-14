@@ -322,11 +322,14 @@ class Broker:
         execution_date: date,
         decision_date: date,
         origin: OrderKind | None = None,
+        ambiguous: bool | None = None,
     ) -> Trade | None:
         """ENG-02.2 + decisão D3 — liquida a posição inteira, volta a 100% caixa.
 
         `origin` (2a, T08): MARKET/LIMIT/STOP — auditoria do ENG-01.2
-        (ORD-04.4); `None` preserva o caminho da Fase 1.
+        (ORD-04.4). `ambiguous` (T09): ``None`` preserva o flag da entrada;
+        ``True``/``False`` força — a ambiguidade intrabarra é da SAÍDA
+        (ADR-0007). `None` preserva o caminho da Fase 1.
         """
         position = portfolio.positions.get(ticker)
         if position is None:
@@ -348,6 +351,7 @@ class Broker:
             execution_date=execution_date,
             decision_date=decision_date,
             origin=origin,
+            ambiguous=ambiguous,
         )
         portfolio.check_invariants()
         return closed
@@ -362,13 +366,16 @@ class Broker:
         execution_date: date,
         decision_date: date,
         origin: OrderKind | None = None,
+        ambiguous: bool | None = None,
     ) -> Trade:
         """Substitui o `Trade` aberto pela versão fechada.
 
         `Trade` é congelado (design §4.5), então fechar é criar outro e trocar
         na lista — não mutar. Guardar o índice em vez de anexar mantém a ordem
         cronológica dos trades, que é o que o relatório e `hit_rate` esperam.
-        `origin` (2a, T08) é o tipo de ordem que fechou a posição.
+        `origin` (2a, T08) é o tipo de ordem que fechou a posição; `ambiguous`
+        (T09) força o flag quando ``not None`` (a ambiguidade é da saída),
+        senão preserva o da entrada.
         """
         for index in range(len(portfolio.trades) - 1, -1, -1):
             candidate = portfolio.trades[index]
@@ -388,7 +395,7 @@ class Broker:
                     exit_decision_date=decision_date,
                     origin=origin,
                     cut_reason=candidate.cut_reason,
-                    ambiguous=candidate.ambiguous,
+                    ambiguous=ambiguous if ambiguous is not None else candidate.ambiguous,
                 )
                 portfolio.trades[index] = closed
                 return closed
@@ -636,9 +643,10 @@ class Broker:
 
         Custos debitados do caixa, FORA do preço de execução (SLP-04.3);
         `origin` no Trade (auditoria do ENG-01.2, ORD-04.4); gap de pregões
-        = ``bar.date - decision_date`` (Fase 1). A ambiguidade intrabarra
-        (par limite+stop na mesma barra) e o atendimento alfabético entre
-        ativos são de T09/T11b.
+        = ``bar.date - decision_date`` (Fase 1). Brackets (pares limite+stop
+        da mesma intenção) resolvem a ambiguidade intrabarra por pior caso
+        (ADR-0007/D2, `ambiguous=True`; sem stop órfão). O atendimento
+        alfabético entre ativos é de T11b.
 
         Returns:
             Trades criados (entradas e saídas executadas nesta barra).
@@ -653,8 +661,55 @@ class Broker:
 
         trades: list[Trade] = []
         remaining: list[PendingOrder] = []
+        consumed_seq: set[int] = set()
 
         for order in store.pending_for(ticker):
+            if order.intent_seq in consumed_seq:
+                continue  # par de bracket já resolvido acima
+
+            if order.bracket and order.kind is OrderKind.LIMIT:
+                # O par de bracket (mesma intenção) é resolvido JUNTO — a
+                # ambiguidade intrabarra (ADR-0007/D2) e o "sem stop órfão"
+                # dependem de enxergar os dois lados na mesma barra.
+                partner = next(
+                    (
+                        o
+                        for o in store.pending_for(ticker)
+                        if o.intent_seq == order.intent_seq and o.kind is OrderKind.STOP
+                    ),
+                    None,
+                )
+                consumed_seq.add(order.intent_seq)
+                if order.side is Side.BUY:
+                    self._execute_entry_bracket(
+                        store,
+                        ticker,
+                        order,
+                        partner,
+                        bar,
+                        portfolio,
+                        cost_model,
+                        slippage,
+                        adv,
+                        trades,
+                        remaining,
+                    )
+                else:
+                    self._execute_exit_bracket(
+                        store,
+                        ticker,
+                        order,
+                        partner,
+                        bar,
+                        portfolio,
+                        cost_model,
+                        slippage,
+                        adv,
+                        trades,
+                        remaining,
+                    )
+                continue
+
             if order.side is Side.BUY:
                 executed = self._execute_entry(
                     store,
@@ -732,6 +787,176 @@ class Broker:
         store.orders[ticker] = remaining
         return trades
 
+    def _execute_entry_bracket(
+        self,
+        store: PendingBook,
+        ticker: str,
+        limit_order: PendingOrder,
+        stop_order: PendingOrder | None,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+        trades: list[Trade],
+        remaining: list[PendingOrder],
+    ) -> None:
+        """Bracket de ENTRADA (limite de compra L + sell-stop S) — ADR-0007/D2.
+
+        - ``low <= S`` (⇒ ``low <= L``, pois ``S < L``): AMBIGUIDADE — a
+          posição **abre em L** e **fecha no stop S** na mesma barra (fills
+          nos preços das ordens, sem slippage — tabela D2); perda realizada
+          ``(L - S)`` x qty + custos, fica **flat**, `ambiguous=True`;
+        - só o limite tocado (``low <= L``, ``low > S``): entra em
+          ``min(L, open)`` (regra normal) e o stop PERMANECE vivo;
+        - ``low > L``: o limite CANCELA ao fim da barra (Q2) e o stop do
+          MESMO par sai junto — sem stop órfão (a intenção morreu).
+
+        O par é sempre consumido; nunca "ambos executam" (ORD-03.3).
+        """
+        limit_price = limit_order.limit
+        stop_price = stop_order.stop if stop_order is not None else None
+        if limit_price is None or stop_price is None:
+            raise EngineError(
+                f"execute_pending: bracket de entrada malformado em {ticker} — "
+                "par sem limite ou sem stop (programming error)."
+            )
+
+        if bar.low <= stop_price:
+            # Pior caso: abre em L, fecha em S na mesma barra.
+            entry = self._execute_entry(
+                store,
+                ticker,
+                limit_order,
+                bar,
+                portfolio,
+                cost_model,
+                slippage,
+                adv,
+                forced_price=limit_price,
+                ambiguous=True,
+            )
+            if entry is not None:
+                closed = self.sell(
+                    portfolio,
+                    ticker=ticker,
+                    price=stop_price,
+                    execution_date=bar.date,
+                    decision_date=limit_order.decision_date,
+                    origin=OrderKind.STOP,
+                    ambiguous=True,
+                )
+                assert closed is not None  # posição acabou de abrir
+                trades.append(closed)  # o fechado substituiu o aberto no portfolio
+            # Sem caixa para 1 ação: nada abre; o par morre igualmente.
+            return
+
+        if bar.low <= limit_price:
+            # Só o limite tocou: entrada normal; o stop segue protegendo.
+            entry = self._execute_entry(
+                store,
+                ticker,
+                limit_order,
+                bar,
+                portfolio,
+                cost_model,
+                slippage,
+                adv,
+            )
+            if entry is not None:
+                trades.append(entry)
+                if stop_order is not None:
+                    remaining.append(stop_order)
+            return
+
+        # low > L: limite cancela (Q2) — o par inteiro sai (sem stop órfão).
+
+    def _execute_exit_bracket(
+        self,
+        store: PendingBook,
+        ticker: str,
+        tp_order: PendingOrder,
+        stop_order: PendingOrder | None,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+        trades: list[Trade],
+        remaining: list[PendingOrder],
+    ) -> None:
+        """Bracket de SAÍDA (take-profit limite de venda TP + sell-stop S)
+        sobre posição aberta — ADR-0007/D2.
+
+        - ``high >= TP`` E ``low <= S``: AMBIGUIDADE — o **stop preenche em
+          S** (pior que o TP, preço da ordem, sem slippage), `ambiguous=True`;
+          o TP NÃO preenche (nunca ambos executam — ORD-03.3);
+        - só o TP tocado: preenche em ``max(TP, open)`` (ORD-01.2) e o stop
+          sai junto (posição fechada);
+        - só o stop tocado: dispara em ``min(S, open)`` + slippage (regra
+          normal, ORD-02.1) e o TP sai junto (cancela ao fim da barra, Q2);
+        - nenhum tocado: o TP cancela (Q2) e o stop PERMANECE protegendo.
+        """
+        tp_price = tp_order.limit
+        stop_price = stop_order.stop if stop_order is not None else None
+        if tp_price is None or stop_price is None:
+            raise EngineError(
+                f"execute_pending: bracket de saída malformado em {ticker} — "
+                "par sem limite ou sem stop (programming error)."
+            )
+
+        if bar.low <= stop_price and bar.high >= tp_price:
+            closed = self.sell(
+                portfolio,
+                ticker=ticker,
+                price=stop_price,
+                execution_date=bar.date,
+                decision_date=tp_order.decision_date,
+                origin=OrderKind.STOP,
+                ambiguous=True,
+            )
+            assert closed is not None  # posição aberta (pré-condição do par)
+            trades.append(closed)
+            return
+
+        if bar.high >= tp_price:
+            # Só o take-profit tocou: preenche; o par se completa (sem stop
+            # sobre posição já fechada).
+            closed = self.sell(
+                portfolio,
+                ticker=ticker,
+                price=max(tp_price, bar.open),
+                execution_date=bar.date,
+                decision_date=tp_order.decision_date,
+                origin=OrderKind.LIMIT,
+            )
+            assert closed is not None  # posição aberta (pré-condição do par)
+            trades.append(closed)
+            return
+
+        if bar.low <= stop_price:
+            # Só o stop tocou: regra normal do sell-stop (min(S, open) +
+            # slippage); o TP cancela ao fim da barra (Q2).
+            position = portfolio.positions.get(ticker)
+            assert position is not None  # posição aberta (pré-condição do par)
+            ref = min(stop_price, bar.open)
+            price = slippage.execution_price(ref, Side.SELL, position.quantity, adv)
+            closed = self.sell(
+                portfolio,
+                ticker=ticker,
+                price=price,
+                execution_date=bar.date,
+                decision_date=tp_order.decision_date,
+                origin=OrderKind.STOP,
+            )
+            assert closed is not None
+            trades.append(closed)
+            return
+
+        # Nenhum tocado: TP cancela (Q2); o stop persiste protegendo.
+        if stop_order is not None:
+            remaining.append(stop_order)
+
     def _execute_entry(
         self,
         store: PendingBook,
@@ -742,14 +967,18 @@ class Broker:
         cost_model: CostModel,
         slippage: SlippageModel,
         adv: float | None,
+        forced_price: float | None = None,
+        ambiguous: bool = False,
     ) -> Trade | None:
         """Executa uma entrada (BUY) — mercado ou limite — e a consome.
 
         Preço: MARKET ⇒ ``open`` + slippage (SLP-04.1); LIMIT ⇒
         ``min(L, open)`` quando ``low <= L``, senão cancela ao fim da barra
-        (ORD-01.1/01.3) sem slippage (SLP-04.2). A quantidade é cortada para
-        caber no caixa após o custo (``cash >= 0``); se o corte acontece
-        aqui, o `cut_reason` vira CASH (a última etapa que cortou).
+        (ORD-01.1/01.3) sem slippage (SLP-04.2). `forced_price` (T09) impõe
+        o preço da ordem na ambiguidade intrabarra (abre em L, ADR-0007);
+        `ambiguous` marca o trade (entrada do pior caso). A quantidade é
+        cortada para caber no caixa após o custo (``cash >= 0``); se o corte
+        acontece aqui, o `cut_reason` vira CASH (a última etapa que cortou).
         """
         if ticker in portfolio.positions:
             # ENG-05 da Fase 1: ENTER com posição aberta é ignorado e logado.
@@ -760,7 +989,9 @@ class Broker:
             )
             return None
 
-        if order.kind is OrderKind.MARKET:
+        if forced_price is not None:
+            price = forced_price
+        elif order.kind is OrderKind.MARKET:
             price = slippage.execution_price(bar.open, Side.BUY, order.qty, adv)
         elif order.kind is OrderKind.LIMIT:
             limit_price = order.limit
@@ -818,7 +1049,7 @@ class Broker:
             entry_gap_days=(bar.date - order.decision_date).days,
             origin=order.kind,
             cut_reason=cut_reason,
-            ambiguous=False,
+            ambiguous=ambiguous,
         )
         portfolio.trades.append(trade)
         portfolio.check_invariants()
