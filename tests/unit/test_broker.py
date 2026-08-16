@@ -22,6 +22,7 @@ from quantlab.engine.broker import (
     PendingOrder,
 )
 from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind, Side
+from quantlab.engine.margin import BrokenFundState, MarginCallOrder
 from quantlab.engine.portfolio import Portfolio, Position, Trade, TradeOrigin
 from quantlab.engine.sizing import FixedOneOverN, SizingInputs
 from quantlab.engine.slippage import FixedBps
@@ -1565,3 +1566,118 @@ def test_enter_short_with_open_long_is_ignored_and_consumed() -> None:
     assert trades == []
     assert portfolio.positions[_TICKER].quantity == 100  # long intacto
     assert book.pending_for(_TICKER) == ()  # consumida
+
+
+# ─── T05 — liquidação forçada e fundo quebrado (RF-MRG-02/03) ────────────────
+
+
+def _margin_call(ticker: str, side: Side, qty: int, seq: int = 1) -> MarginCallOrder:
+    return MarginCallOrder(
+        ticker=ticker,
+        side=side,
+        qty=qty,
+        decision_date=_DECIDED,
+        intent_seq=seq,
+    )
+
+
+def _run_margin_calls(
+    broker: Broker,
+    portfolio: Portfolio,
+    plan: tuple[MarginCallOrder, ...],
+    *,
+    bar: BarSlice | None = None,
+    cost_model: CostModel | None = None,
+) -> list[Trade]:
+    return broker.execute_margin_calls(
+        plan=plan,
+        bar=bar or _bar(),
+        portfolio=portfolio,
+        cost_model=cost_model or CostModel(),
+        slippage=FixedBps(),
+    )
+
+
+@pytest.mark.unit
+def test_execute_margin_call_long_sells_at_market_with_costs() -> None:
+    """CA-02.3/§3.5 — liquidação de LONG: venda a mercado no open com
+    slippage de venda e `origin == MARGIN_CALL` no trade."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(qty=100))  # long
+    _run(broker, book, portfolio, _bar())
+    assert portfolio.positions[_TICKER].quantity == 100
+    cash_before = portfolio.cash
+
+    trades = _run_margin_calls(broker, portfolio, (_margin_call(_TICKER, Side.SELL, 100),))
+
+    assert len(trades) == 1
+    closed = trades[0]
+    assert closed.origin == TradeOrigin.MARGIN_CALL
+    assert closed.exit_price == pytest.approx(10.0 * (1 - 0.0001))  # open x (1 - bps)
+    assert _TICKER not in portfolio.positions
+    notional = 100 * 10.0 * (1 - 0.0001)
+    assert portfolio.cash == pytest.approx(cash_before + notional - CostModel().cost_for(notional))
+
+
+@pytest.mark.unit
+def test_execute_margin_call_short_buys_to_cover() -> None:
+    """CA-02.3/§3.5 — liquidação de SHORT: cobertura integral a mercado com
+    slippage de compra e `origin == MARGIN_CALL`."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=100_000.0)
+    book.place(_pending(qty=1_000, side=Side.SELL))  # short
+    _run(broker, book, portfolio, _bar(open_=100.0))
+    assert portfolio.positions[_TICKER].quantity == -1_000
+    cash_before = portfolio.cash
+
+    trades = _run_margin_calls(
+        broker, portfolio, (_margin_call(_TICKER, Side.BUY, 1_000),), bar=_bar(open_=100.0)
+    )
+
+    assert len(trades) == 1
+    closed = trades[0]
+    assert closed.origin == TradeOrigin.MARGIN_CALL
+    assert closed.exit_price == pytest.approx(100.0 * (1 + 0.0001))  # open x (1 + bps)
+    assert _TICKER not in portfolio.positions
+    notional = 1_000 * 100.0 * (1 + 0.0001)
+    assert portfolio.cash == pytest.approx(cash_before - notional - CostModel().cost_for(notional))
+
+
+@pytest.mark.unit
+def test_margin_call_plan_validation_errors() -> None:
+    """§3.8 — plano malformado é erro de programa: ativo sem posição, qty não
+    integral ou side incoerente com o sinal."""
+    broker = Broker()
+    portfolio = Portfolio(cash=10_000.0)
+
+    with pytest.raises(EngineError):  # sem posição
+        _run_margin_calls(broker, portfolio, (_margin_call(_TICKER, Side.SELL, 100),))
+
+    portfolio.positions[_TICKER] = Position(
+        ticker=_TICKER, quantity=100, entry_price=10.0, entry_date=_DECIDED
+    )
+    with pytest.raises(EngineError):  # qty parcial (50 != 100)
+        _run_margin_calls(broker, portfolio, (_margin_call(_TICKER, Side.SELL, 50),))
+    with pytest.raises(EngineError):  # side incoerente (BUY sobre long)
+        _run_margin_calls(broker, portfolio, (_margin_call(_TICKER, Side.BUY, 100),))
+
+
+@pytest.mark.unit
+def test_margin_call_order_rejects_non_positive_qty() -> None:
+    """§3.8 — `MarginCallOrder` com qty <= 0 é erro de domínio (integral)."""
+    with pytest.raises(EngineError):
+        _margin_call(_TICKER, Side.SELL, 0)
+    with pytest.raises(EngineError):
+        _margin_call(_TICKER, Side.SELL, -10)
+
+
+@pytest.mark.unit
+def test_broken_fund_state_holds_negative_equity() -> None:
+    """R6/CA-03.2 — o estado fundo quebrado carrega o valor NEGATIVO real
+    (nunca zero fabricado, nunca NaN); métricas de retorno derivam None."""
+    state = BrokenFundState(broken=True, final_equity=-1_234.5)
+    assert state.broken is True
+    assert state.final_equity == pytest.approx(-1_234.5)

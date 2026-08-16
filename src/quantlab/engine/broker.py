@@ -27,7 +27,7 @@ from enum import StrEnum
 
 from quantlab.engine.conditional import ConditionalIntent, OrderKind, Side
 from quantlab.engine.liquidity import participation_cap
-from quantlab.engine.margin import BorrowFeeModel
+from quantlab.engine.margin import BorrowFeeModel, MarginCallOrder
 from quantlab.engine.portfolio import Portfolio, Position, Trade, TradeOrigin
 from quantlab.engine.sizing import Sizer, SizingInputs
 from quantlab.engine.slippage import SlippageModel
@@ -1443,6 +1443,72 @@ class Broker:
             decision_date=order.decision_date,
             origin=origin,
         )
+
+    def execute_margin_calls(
+        self,
+        plan: tuple[MarginCallOrder, ...],
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+    ) -> list[Trade]:
+        """Executa a liquidação forçada do ativo no open do PRÓPRIO ativo
+        (2b, T05 — RF-MRG-02/D2, ADR-0002/ADR-0009).
+
+        Cada ordem do plano vira trade com ``origin = MARGIN_CALL``
+        (CA-02.3): long ⇒ SELL a mercado (slippage de venda), short ⇒ BUY a
+        mercado (cobertura integral, slippage de compra). Liquidação é
+        INTEGRAL por ativo (`qty == |posição|` — MRG-02). Custos fora do
+        preço (SLP-04.3). Determinístico (CA-02.4 — o plano vem pronto do
+        laço, em ordem alfabética; aqui só a execução).
+
+        Raises:
+            EngineError: ativo sem posição, `qty` ≠ |posição| (não-integral)
+                ou `side` incoerente com o sinal — erro de programação (§3.8).
+        """
+        if bar.open <= 0:
+            raise EngineError(f"execute_margin_calls: open não positivo em {bar.date}.")
+        trades: list[Trade] = []
+        for order in plan:
+            position = portfolio.positions.get(order.ticker)
+            if position is None:
+                raise EngineError(
+                    f"execute_margin_calls: {order.ticker} sem posição aberta — "
+                    "plano de liquidação malformado (programming error)."
+                )
+            if order.qty != abs(position.quantity):
+                raise EngineError(
+                    f"execute_margin_calls: {order.ticker} plano {order.qty} ≠ "
+                    f"|posição| {abs(position.quantity)} — liquidação é INTEGRAL (MRG-02)."
+                )
+            expected = Side.SELL if position.quantity > 0 else Side.BUY
+            if order.side is not expected:
+                raise EngineError(
+                    f"execute_margin_calls: side {order.side} incoerente com a posição "
+                    f"{position.quantity} em {order.ticker} (programming error)."
+                )
+            price = slippage.execution_price(bar.open, order.side, order.qty, None)
+            if position.quantity > 0:
+                closed = self.sell(
+                    portfolio,
+                    ticker=order.ticker,
+                    price=price,
+                    execution_date=bar.date,
+                    decision_date=order.decision_date,
+                    origin=TradeOrigin.MARGIN_CALL,
+                )
+            else:
+                closed = self.cover(
+                    portfolio,
+                    ticker=order.ticker,
+                    price=price,
+                    execution_date=bar.date,
+                    decision_date=order.decision_date,
+                    origin=TradeOrigin.MARGIN_CALL,
+                )
+            assert closed is not None  # posição existia — nunca None aqui
+            trades.append(closed)
+        return trades
 
     def cover(
         self,

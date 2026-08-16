@@ -18,14 +18,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
+from quantlab.engine.conditional import Side
 from quantlab.exceptions import EngineError
 
 if TYPE_CHECKING:  # mypy apenas — evita ciclo em runtime
     from quantlab.engine.portfolio import Position
 
-__all__ = ["BorrowFeeModel", "MarginModel", "margin_requirement", "margin_utilization"]
+__all__ = [
+    "BorrowFeeModel",
+    "BrokenFundState",
+    "MarginCallOrder",
+    "MarginModel",
+    "margin_requirement",
+    "margin_utilization",
+]
 
 
 @dataclass(frozen=True)
@@ -89,6 +97,45 @@ def margin_utilization(equity: float, requirement: float) -> float | None:
     if equity <= 0:
         return None
     return requirement / equity
+
+
+@dataclass(frozen=True)
+class MarginCallOrder:
+    """Ordem corretiva da liquidação forçada (RF-MRG-02/D2, ADR-0009).
+
+    Detectada no CLOSE (marcação a mercado) e executada a mercado no OPEN da
+    próxima barra do PRÓPRIO ativo (ADR-0002). ``qty`` é INTEGRAL (|qty|
+    atual da posição — nunca parcial dentro de um ativo, MRG-02); ``side``
+    decorre do sinal (long ⇒ SELL, short ⇒ BUY/cobertura); ``decision_date``
+    = close que detectou (auditoria, padrão ORD-04.4); ``reason`` fixo
+    "margin_call" ⇒ `origin = MARGIN_CALL` no Trade (CA-02.3).
+    """
+
+    ticker: str
+    side: Side
+    qty: int
+    decision_date: date
+    intent_seq: int
+    reason: Literal["margin_call"] = "margin_call"
+
+    def __post_init__(self) -> None:
+        if self.qty <= 0:
+            raise EngineError(
+                f"MarginCallOrder: qty {self.qty} inválido — exige |qty| > 0 "
+                "(integral por ativo, MRG-02)."
+            )
+
+
+@dataclass(frozen=True)
+class BrokenFundState:
+    """Estado fundo quebrado (RF-MRG-03/R6) — valor NEGATIVO real, nunca
+    zero fabricado (CA-03.2): após liquidar TODAS as posições a equity ainda
+    é < 0 (gap severo). Métricas de retorno (CAGR, Sharpe, turnover,
+    exposição) derivam `None` explícito — nunca NaN (lição do ING-05.1); a
+    conciliação CONTINUA fechando com a equity negativa."""
+
+    broken: bool
+    final_equity: float
 
 
 @dataclass(frozen=True)
