@@ -72,7 +72,7 @@ T01–T07; T09 depende de T08b; T10–T13 dependem da cadeia completa.
 | T09 | Exposição gross/net + turnover | T08b | RF-MRG-04 | ✅ |
 | T10 | Folds/grid/seleção + sharpe_annualized_rf0 único | T08b | RF-WFK-01, RF-WFK-02 | ✅ |
 | T11a | run_walkforward + orçamento do WF | T10 | RF-WFK-03, RF-WFK-05 | ✅ |
-| T11b | Mutação ENG-01.2 estendida ao OOS (teste puro) | T11a | RF-WFK-04 | ⬜ |
+| T11b | Mutação ENG-01.2 estendida ao OOS (teste puro) | T11a | RF-WFK-04 | ✅ |
 | T12 | Relatório 2b + benchmark long-only + vieses + herança RNF + ADR-0009 + timezone | T09, T11a | RF-MET-05, RF-MET-06, RF-RNF-02 | ⬜ |
 | T12b | Harness RNF-04 2b (WF) + arquitetura + cobertura 85% | T12 | RF-WFK-05, RNF-02, RNF-07 | ⬜ |
 | T13 | Run long+short ponta a ponta vs 1/N long-only (DoD) | T12b | DoD | ⬜ |
@@ -714,10 +714,24 @@ Qualquer código de engine — se um teste falhar, PARE e reporte o achado (bug
 real ⇒ commit próprio; spec errada ⇒ emenda spec-first, CLAUDE.md).
 
 **Critério de verificação**
-- [ ] `make test-unit` verde; `make typecheck` verde
-- [ ] `test_mutating_oos_does_not_change_is_selected_params` (CA-04.1)
-- [ ] `test_mutating_future_is_bars_does_not_change_prior_intentions_long_short_buy_stop` (CA-04.2)
-- [ ] Diff do commit = SÓ tests/
+- [x] `make test-unit` verde; `make typecheck` verde
+- [x] `test_mutating_oos_does_not_change_is_selected_params` (CA-04.1) —
+  mutação do OOS (último fold: livre para TODOS os IS; fold 0: livre para o
+  IS do fold 0) não altera `selected_params` por fold e muda a equity OOS
+  onde deve; estratégia scalper (trade em todo bar consultado ⇒ equity
+  sensível a toda barra lida); grid 2 combinações
+- [x] `test_mutating_future_is_bars_does_not_change_prior_intentions_long_short_buy_stop`
+  (CA-04.2) — estratégia de papel com ENTER_SHORT/EXIT_SHORT + buy-stop
+  (preço derivado do close corrente, observer compartilhado de emissões);
+  mutar barras livres do IS (índices >= 5) não altera intenções (sinais E
+  preço do stop); ADR-0002 reassegurado nos trades do OOS isolado
+- [x] Diff do commit = SÓ tests/
+
+**Matriz de discriminação (verificada localmente, mutações revertidas):**
+(a) IS sem truncamento em `is_end` (o IS lê OOS) ⇒ `test_..._is_selected_params`
+FALHA; (b) execução com `decision_date` = data da execução (broker) ⇒
+`test_..._prior_intentions_long_short_buy_stop` FALHA na asserção de vínculo
+ADR-0002 (`entry_decision_date < entry_date`).
 
 **Riscos**
 Alto — é o critério de aceitação da fase; se o run_walkforward (T11a) tiver
