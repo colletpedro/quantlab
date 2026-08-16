@@ -92,6 +92,14 @@ class EqualWeightOpen(Sizer):
     limiar que gateia o ajuste (SIZ-03.3) — o helper puro
     `rebalance_deviation_pp` calcula o desvio, o laço compara.
 
+    **LONG-ONLY por construção (2b, emenda T09/P0):** o alvo ``1/k`` é
+    coerente apenas com posições POSITIVAS; tratar shorts aqui faria o sizer
+    decidir direção (violaria D3 — a direção é do Signal). O laço levanta
+    `EngineError` claro se o gatilho de k disparar com posição `qty < 0`
+    aberta (configuração inválida: EqualWeightOpen não coexiste com short;
+    use um sizer que não decide direção — ex. FixedOneOverN/FixedFraction),
+    nunca o crash obscuro do `rebalance_deviation_pp`.
+
     Pré-condição: ``k = len(inputs.positions) ≥ 1`` — sem posições abertas,
     ``1/k`` é indefinido (EngineError).
     """

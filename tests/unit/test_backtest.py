@@ -1532,3 +1532,35 @@ def test_report_counts_buy_stop_ambiguities_in_mechanism_counters() -> None:
     assert trade.exit_price == pytest.approx(10.5)
     assert result.portfolio.positions == {}  # flat
     assert result.counters.stops_triggered == 1  # a saída do pior caso é stop
+
+
+# ─── Emenda T09/P0: rebalance é long-only por construção (D3) ────────────────
+
+
+@pytest.mark.unit
+def test_rebalance_with_open_short_raises_engine_error() -> None:
+    """Emenda T09/P0 — o rebalance (EqualWeightOpen) é LONG-ONLY por
+    construção (D3): com uma posição SHORT aberta, o gatilho de k (a entrada
+    do short muda k 0→1) levanta EngineError CLARO de configuração — nunca o
+    crash obscuro do rebalance_deviation_pp (peso negativo fora de [0, 1]).
+    Controle: o MESMO run long-only não levanta nada (regressão da 2a)."""
+    series = {"A": _series([10, 10, 10], [10, 10, 10], ticker="A", dates=_dates(3))}
+
+    with pytest.raises(EngineError, match="rebalance é long-only"):
+        run_backtest_multi(
+            series,
+            {"A": ScriptedStrategy({0: Signal.ENTER_SHORT})},
+            costs=_FREE,
+            slippage=_NO_SLIP,
+            sizer=EqualWeightOpen(threshold_pp=1.0),
+        )
+
+    # Controle long-only: EqualWeightOpen segue funcionando (2a, sem erro).
+    long_run = run_backtest_multi(
+        series,
+        {"A": ScriptedStrategy({0: Signal.ENTER})},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=EqualWeightOpen(threshold_pp=1.0),
+    )
+    assert long_run.portfolio.positions["A"].quantity == 10_000  # all-in (N=1)

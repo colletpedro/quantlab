@@ -593,6 +593,10 @@ run_walkforward (T11a); orçamento (T11a); mutação (T11b).
 
 **Critério de verificação**
 - [ ] `make test-unit` verde; `make typecheck` verde
+- [ ] `test_rebalance_with_open_short_raises_engine_error` — NOVO, registrado
+  aqui (emenda T09/P0 — não existia no design §10): gatilho de k do
+  rebalance com posição short aberta ⇒ EngineError claro (long-only por
+  construção, D3); controle long-only verde
 - [ ] `test_folds_are_disjoint_and_oos_union_covers_window` (CA-01.2)
 - [ ] `test_walkforward_grid_is_deterministic_params_identical` (CA-02.1)
 - [ ] `test_is_run_never_indexes_oos_bars_engine_error` (CA-01.1) — série

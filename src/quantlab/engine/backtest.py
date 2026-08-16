@@ -682,6 +682,17 @@ def run_backtest_multi(
             and k_now >= 1
             and k_now != k_before
         ):
+            # Emenda T09/P0 — rebalance é LONG-ONLY por construção (D3): o
+            # alvo 1/k é coerente só com posições positivas; gatilho de k com
+            # short aberto é CONFIGURAÇÃO inválida ⇒ EngineError claro (não o
+            # crash obscuro do rebalance_deviation_pp, peso fora de [0, 1]).
+            shorts = sorted(t for t, p in portfolio.positions.items() if p.quantity < 0)
+            if shorts:
+                raise EngineError(
+                    "run_backtest_multi: rebalance (EqualWeightOpen) com posição short "
+                    f"aberta em {shorts} — rebalance é long-only por construção (D3); "
+                    "use um sizer que não decide direção (ex.: FixedOneOverN)."
+                )
             equity_now = portfolio.equity()
             target = 1.0 / k_now
             for ticker, position in sorted(portfolio.positions.items()):
