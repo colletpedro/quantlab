@@ -17,6 +17,7 @@ import pandas as pd
 
 from quantlab.engine.backtest import BacktestResultMulti
 from quantlab.engine.portfolio import Trade
+from quantlab.engine.walkforward import sharpe_annualized_rf0
 from quantlab.exceptions import EngineError
 
 __all__ = [
@@ -79,7 +80,16 @@ def sharpe(returns: pd.Series, rf: float = 0.0, periods: int = 252) -> float | N
     para ter desvio-padrão definido (menos de duas observações) devolvem
     `None`. `nan` se propaga em silêncio por qualquer agregação a jusante;
     `None` estoura no primeiro uso aritmético.
+
+    Fonte única (emenda P1, design §3.6): com os defaults `rf=0` e
+    `periods=252` — o uso do relatório — delega integralmente a
+    `engine.walkforward.sharpe_annualized_rf0`: a seleção IS do walk-forward
+    (R5) e o relatório usam a MESMA implementação, sem drift. `rf != 0` ou
+    `periods != 252` são a generalização explícita da mesma fórmula (mesma
+    política de `None`).
     """
+    if rf == 0.0 and periods == 252:
+        return sharpe_annualized_rf0(returns.tolist())
     if len(returns) < 2:
         return None
     excess = returns - rf

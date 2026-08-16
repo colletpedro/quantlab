@@ -70,7 +70,7 @@ T01–T07; T09 depende de T08b; T10–T13 dependem da cadeia completa.
 | T08a | Laço 2b — fechamento (fee → margem → MARGIN_CALL → fundo quebrado) | T03, T05 | RF-SHT-03, RF-MRG-01/02/03 | ✅ |
 | T08b | Laço 2b — abertura/bordas (executa MARGIN_CALL, contadores, short deslistado) | T06, T07, T08a | RF-MRG-02, RF-SHT-05, RF-ORD-06 | ✅ |
 | T09 | Exposição gross/net + turnover | T08b | RF-MRG-04 | ✅ |
-| T10 | Folds/grid/seleção + sharpe_annualized_rf0 único | T08b | RF-WFK-01, RF-WFK-02 | ⬜ |
+| T10 | Folds/grid/seleção + sharpe_annualized_rf0 único | T08b | RF-WFK-01, RF-WFK-02 | ✅ |
 | T11a | run_walkforward + orçamento do WF | T10 | RF-WFK-03, RF-WFK-05 | ⬜ |
 | T11b | Mutação ENG-01.2 estendida ao OOS (teste puro) | T11a | RF-WFK-04 | ⬜ |
 | T12 | Relatório 2b + benchmark long-only + vieses + herança RNF + ADR-0009 + timezone | T09, T11a | RF-MET-05, RF-MET-06, RF-RNF-02 | ⬜ |
@@ -592,21 +592,29 @@ gate i ≥ warmup é da T11a; aqui o contrato e os folds).
 run_walkforward (T11a); orçamento (T11a); mutação (T11b).
 
 **Critério de verificação**
-- [ ] `make test-unit` verde; `make typecheck` verde
-- [ ] `test_rebalance_with_open_short_raises_engine_error` — NOVO, registrado
+- [x] `make test-unit` verde; `make typecheck` verde
+- [x] `test_rebalance_with_open_short_raises_engine_error` — NOVO, registrado
   aqui (emenda T09/P0 — não existia no design §10): gatilho de k do
   rebalance com posição short aberta ⇒ EngineError claro (long-only por
   construção, D3); controle long-only verde
-- [ ] `test_folds_are_disjoint_and_oos_union_covers_window` (CA-01.2)
-- [ ] `test_walkforward_grid_is_deterministic_params_identical` (CA-02.1)
-- [ ] `test_is_run_never_indexes_oos_bars_engine_error` (CA-01.1) — série
+- [x] `test_folds_are_disjoint_and_oos_union_covers_window` (CA-01.2)
+- [x] `test_walkforward_grid_is_deterministic_params_identical` (CA-02.1)
+- [x] `test_is_run_never_indexes_oos_bars_engine_error` (CA-01.1) — série
   truncada: acesso além do fim ⇒ EngineError
-- [ ] `test_oos_warmup_uses_is_tail_without_lookahead` (CA-01.3 — contrato:
+- [x] `test_oos_warmup_uses_is_tail_without_lookahead` (CA-01.3 — contrato:
   cauda ≤ fronteira; mutar OOS não altera a cauda)
-- [ ] `test_is_selection_metric_is_annualized_sharpe_rf0_declared` (CA-02.3)
-- [ ] `test_sharpe_annualized_rf0_closed_form_and_delegation` — forma fechada
+- [x] `test_is_selection_metric_is_annualized_sharpe_rf0_declared` (CA-02.3)
+- [x] `test_sharpe_annualized_rf0_closed_form_and_delegation` — forma fechada
   e `metrics.sharpe()` delegando (sem duas fórmulas)
-- [ ] Cobertura do módulo novo ≥ 85% já neste commit
+- [x] Cobertura do módulo novo ≥ 85% já neste commit
+
+**Decisão local T10 (registrada — o design §3.6 fala em "dia útil seguinte a
+is_end" sem definir a unidade das janelas):** `build_folds` conta janelas em
+DIAS ÚTEIS (seg–sex, weekday arithmetic — a única escolha autocontida sem
+calendário externo). Os testes cruzam fim de semana de propósito, para a
+semântica "dia útil" ser exercitada (numa janela seg–sex pura, dias corridos
+e úteis coincidiriam). A fronteira por DATA (truncar séries em `is_end`)
+herda essa semântica na T11a.
 
 **Riscos**
 Médio — o isolamento estrito depende da fronteira ser do ARRAY (truncado), não
