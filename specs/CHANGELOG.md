@@ -20,6 +20,18 @@ Design técnico v0.1 da Fase 2b produzido no template da 2a (§1–§11) + ADRs 
 
 **ADR-0011** — protocolo walk-forward: isolamento estrito IS/OOS por construção (série truncada, guard no array); warmup do OOS pela cauda do IS (R4); seleção = Sharpe anualizado rf=0 (R5); rolling default (D7/R7) com anchored configurável; mutação ENG-01.2 estendida ao OOS (mutar OOS não altera params IS); WF como caixa preta; orçamento por fold + total (RNF-10).
 
+### fase-2b-design 0.1 — emenda P1 (verificação do gate 2)
+
+Rodada de verificação P1 antes do fechamento do gate 2 (5 itens, todos resolvidos como emenda da própria v0.1 — gate 1 NÃO reaberto):
+
+- **P1.1 — buy-stop × ENG-05:** regra de ativação por side explícita em tabela (§3.5/§3.8/§4 passo 1b) — sem posição ⇒ entrada long; LONG aberta ⇒ guard ENG-05 ignora e **consome** (log); SHORT aberta ⇒ cobertura do stop-loss (reduz \|qty\|, nunca cruza). Sell-stop espelhado: ativa só com LONG (2a ORD-02.2 estendido).
+- **P1.2 — barreira P2 da 2a removida:** `convert` passa a aceitar `OrderKind.STOP` (buy-stop) como kind de entrada; o teste 2a `test_convert_domain_errors_raise_engine_error` perde o bloco do buy-stop (regressão esperada e documentada); teste novo `test_convert_accepts_buy_stop`.
+- **P1.3 — warmup do OOS:** mecanismo explicitado em `run_walkforward` — cauda do IS entra como histórico puro (gate i ≥ warmup com len(cauda) = warmup ⇒ primeira barra consultada é o primeiro bar OOS; a estratégia nunca trade a cauda); `oos_equity = equity_curve[tail_len:]`; pré-condição `strategy.warmup == warmup`.
+- **P1.4 — Sharpe com fonte única:** `sharpe_annualized_rf0` em `engine/walkforward.py` é a ÚNICA implementação; o `sharpe()` da Fase 1/2a em `analytics/metrics.py` (relatório) passa a delegar — zero drift entre seleção IS e relatório.
+- **P1.5 — fundo quebrado por gap:** cronologia explícita no §4 — (1) liquida no open do gap → (2) constata equity < 0 → (3) congela (flag, sem trades novos) → (4) métricas None (nunca NaN) com conciliação fechando.
+
+§10 atualizado: **58 testes nomeados para 54 CAs** (+3: guard ENG-05 do buy-stop nos dois lados e convert aceita buy-stop).
+
 ### fase-2b-requirements 0.2 — gate 1 aprovado
 
 Gate 1 da Fase 2b declarado **APROVADO** após checklist validado pelo tech lead do web.

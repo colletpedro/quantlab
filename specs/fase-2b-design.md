@@ -203,7 +203,8 @@ def execute_pending(self, store: PendingBook, ticker: str, bar: BarSlice,
          NUNCA viola o limite (SHT-02.4)
        - sell-stop → low ≤ S ? min(S, open) + slippage : persiste (2a)
        - BUY-STOP → high ≥ S ? compra a max(S, open) + slippage de compra : PERMANECE pendente
-         (ORD-05 CA-05.1/05.2); nunca debita caixa antes de disparar (CA-05.3)
+         (ORD-05 CA-05.1/05.2); nunca debita caixa antes de disparar (CA-05.3);
+         ativação por side × ENG-05: tabela explícita abaixo (emenda P1)
        - Custos max(f + p·N, m) fora do preço (2a/SLP-04.3); gap registrado (2a);
          origin = TradeOrigin no Trade (auditoria ENG-01.2; MARGIN_CALL só via execute_margin_calls)
        - Ambiguidades intrabarra (par na mesma barra) → pior caso (ADR-0007 estendido — §4),
@@ -218,6 +219,15 @@ def execute_margin_calls(self, plan: tuple[MarginCallOrder, ...], bar: BarSlice,
 ```
 
 - **`Broker.convert` ganha o sinal (D3):** para `ENTER_SHORT`, a fração do sizer é aplicada como **magnitude** e o alvo vira negativo (`qty = −⌊fração × equity / ref_price⌋`), passando pela MESMA sequência fixa da 2a (SIZING → CAP → INTEIRAS → CAIXA/CUSTOS, R1) e pelo cap de participação (SHT-02.3 — mesma regra e motivo, `cut_reason`). `ref_price = last_close[ticker]` (2a).
+- **Barreira P2 da 2a REMOVIDA (emenda P1 — regressão esperada e documentada):** na 2a, `convert` rejeitava `OrderKind.STOP` com `EngineError` ("buy-stop é escopo da 2b (P2)"). Na 2b o STOP vira **kind VÁLIDO de entrada** (buy-stop, ver regra de ativação abaixo) — o guard é removido e o teste 2a `test_convert_domain_errors_raise_engine_error` (`tests/unit/test_broker.py`) **perde o bloco `pytest.raises(EngineError)` do buy-stop** (regressão intencional do portão 2a, documentada); a intenção STOP ganha teste próprio (`test_convert_accepts_buy_stop`, §10). O ramo morto de `_execute_entry` (entrada STOP ⇒ `EngineError`, pragma "barrado por convert") também desaparece: buy-stop vira caminho real de execução.
+- **Ativação por side × guard ENG-05 (emenda P1 — regra explícita para os dois stops):**
+
+  | Ordem pendente | Sem posição | Posição LONG aberta | Posição SHORT aberta |
+  |---|---|---|---|
+  | sell-stop (STOP, SELL — 2a) | permanece pendente, nunca ativa (ORD-02.2) | **ativa** a `min(S, open)` + slippage venda; vende a posição inteira | permanece pendente, nunca ativa (não existe "vender mais short" sem intenção `ENTER_SHORT` — espelho do ORD-02.2) |
+  | buy-stop (STOP, BUY — 2b) | **ativa**: entra long a `max(S, open)` + slippage compra (ORD-05.1) | **guard ENG-05 da Fase 1**: ignorado e **consumido** (log `engine.enter_with_open_position`), como `ENTER` com posição — nunca duas posições do mesmo sinal | **ativa como COBERTURA** (o stop-loss do short, ORD-06): compra que reduz `\|qty\|` até 0, **nunca cruza de sinal** (SHT-02.2) — o guard ENG-05 não se aplica |
+
+  O guard ENG-05 se aplica ao buy-stop **apenas quando o sinal da posição aberta é o MESMO da entrada** (LONG): aí a ordem morre consumida, como o `ENTER` da Fase 1. Sobre SHORT, o buy-stop é a cobertura do stop-loss e executa sempre.
 - **Borrow fee × cap:** o fee é custo de carregamento (diário), não custo de transação — o `convert` não o usa; ele entra no caixa no close (§4). A disponibilidade (`BorrowFeeModel.is_available`) é checada no `convert` de `ENTER_SHORT`: indisponível ⇒ `None` + log + `borrow_rejections += 1` (CA-03.4 direita).
 - **Débito do fee no caixa:** função do laço (§4), não do broker — o broker não conhece o `BorrowFeeModel`; a conciliação (§6) soma o termo próprio.
 
@@ -274,8 +284,15 @@ def run_walkforward(series: dict[str, PriceSeries], strategy_factory: Callable[[
        do run único — herança por construção (filosofia do benchmark 1/N da T15).
        1. IS: séries truncadas no fim do IS → corre a grade → seleciona por sharpe_annualized_rf0
           (R5, WFK-02 CA-02.3) — a série OOS NÃO é passada (isolamento por construção, CA-01.1).
-       2. OOS: série composta = CAUDA DO IS (últimas `warmup` barras ≤ fronteira, R4) + segmento OOS;
-          equity registrado a partir do primeiro bar OOS; decisões na cauda descartadas (aquecimento).
+       2. OOS: série composta = CAUDA DO IS (últimas `warmup` barras ≤ fronteira, R4) + segmento OOS,
+          rodada como run_backtest_multi com a MESMA instância de estratégia (warmup base = `warmup`).
+          MECANISMO (emenda P1): o laço consulta on_bar apenas em i ≥ warmup e, como
+          len(cauda) = warmup, a PRIMEIRA barra consultada é o PRIMEIRO bar OOS — a estratégia
+          NUNCA é consultada (nem trade) na cauda: a cauda entra SÓ como histórico do MarketView
+          (indicadores aquecem), barras ≤ fronteira do IS, sem lookahead (CA-01.3).
+          oos_equity = equity_curve[tail_len:] — concatenação exata (CA-03.1); a equity da cauda
+          é descartada (aquecimento). Pré-condição: strategy.warmup == warmup, senão o corte da
+          cauda desalinha com o gate de consulta (EngineError, §3.8).
           Parâmetros = selecionados no IS DO MESMO fold (CA-02.2).
        3. Concatena os segmentos OOS (CA-03.1)."""
 
@@ -286,7 +303,7 @@ def sharpe_annualized_rf0(returns: Sequence[float]) -> float:
 ```
 
 - **Isolamento estrito por construção (CA-01.1):** o fold entrega ao run IS séries **truncadas** (`series[X]` cortada em `is_end`); o `UnionCalendar` do IS cobre só a janela IS; o `MarketView` indexa o array truncado — qualquer acesso além do fim é `EngineError` (guarda de fronteira no próprio array, testável: `test_is_run_never_indexes_oos_bars_engine_error`). Não basta "não passar a série": o acesso é bloqueado por construção.
-- **Warmup do OOS (R4):** a cauda do IS entra na série composta do OOS; mutar o OOS não altera a cauda ⇒ não altera o warmup (CA-01.3).
+- **Warmup do OOS (R4, emenda P1):** a cauda do IS entra na série composta do OOS **como histórico puro** — o mecanismo é o próprio gate de warmup do laço (i ≥ warmup com len(cauda) = warmup), sem mecanismo novo: a estratégia nunca trade a cauda, e mutar o OOS não altera a cauda ⇒ não altera o warmup (CA-01.3).
 - **Orçamento (RNF-10/WFK-05):** por fold (default 30 s para IS+OOS de 20 ativos × janela) e total (default `n_folds × 30 s` + margem declarada). O harness mede ambos (CA-05.1); sem base ingerida, usa séries sintéticas determinísticas e declara a origem (padrão T17).
 
 ### 3.7 Resultado e contadores — estendidos (agregação: dono declarado, checklist 4)
@@ -349,8 +366,8 @@ Regra mantida na íntegra: a classe `datetime` e o aparato de fuso (`timezone`, 
 | `BrokenFundState` | — | `broken = equity < 0` após liquidação total; métricas = `None` explícito (CA-03.2); conciliação continua fechando (CA-03.2) | — (estado declarado, não exceção) |
 | `BorrowFeeModel.daily_fee(qty, close)` | `close > 0`; `qty != 0` | `\|qty\| × close × fee_annual/252` (CA-03.1) | `EngineError` se `close ≤ 0` |
 | `BorrowFeeModel.is_available(ticker, decision_date)` | — | `unlimited=True` ⇒ sempre True (CA-03.4 esq.); `unlimited=False` ⇒ `ticker ∉ unavailable` (CA-03.4 dir.) | — |
-| `Broker.convert` (2b) | intenção de entrada válida (2a §3.8) + disponibilidade (se SHORT e restrita) | sequência fixa da 2a (SIZING → CAP → INTEIRAS → CAIXA/CUSTOS); alvo negativo em SHORT (SHT-01.2); `cut_reason` registrado; indisponível ⇒ `None` + log + `borrow_rejections += 1` (CA-03.4) | `EngineError` se `EXIT_SHORT` sem posição (SHT-01.3) |
-| `Broker.execute_pending` (2b) | barra do próprio ativo (ADR-0002); preços > 0 | regras da 2a preservadas + buy-stop (`high ≥ S` ⇒ `max(S, open)` + slippage compra; persiste senão — ORD-05 CA-05.1/05.2); sem reserva (CA-05.3); `origin` no Trade (auditoria) | `EngineError` se preço ≤ 0 ou barra malformada |
+| `Broker.convert` (2b) | intenção de entrada válida (2a §3.8) + disponibilidade (se SHORT e restrita) | sequência fixa da 2a (SIZING → CAP → INTEIRAS → CAIXA/CUSTOS); alvo negativo em SHORT (SHT-01.2); `cut_reason` registrado; indisponível ⇒ `None` + log + `borrow_rejections += 1` (CA-03.4); **kind STOP (buy-stop) é entrada VÁLIDA — barreira P2 da 2a removida (emenda P1, §3.5)** | `EngineError` se `EXIT_SHORT` sem posição (SHT-01.3) |
+| `Broker.execute_pending` (2b) | barra do próprio ativo (ADR-0002); preços > 0 | regras da 2a preservadas + buy-stop (`high ≥ S` ⇒ `max(S, open)` + slippage compra; persiste senão — ORD-05 CA-05.1/05.2); **ativação por side × ENG-05: sem posição ⇒ entrada long; LONG aberta ⇒ ignorada + consumida (guard); SHORT aberta ⇒ cobertura que reduz `\|qty\|`, nunca cruza (SHT-02.2)** (emenda P1); sem reserva (CA-05.3); `origin` no Trade (auditoria) | `EngineError` se preço ≤ 0 ou barra malformada |
 | `Broker.execute_margin_calls(plan, bar, portfolio, cost_model, slippage)` | plano do ativo com posição aberta; barra do próprio ativo | liquidação integral a mercado (open) com slippage; `origin = MARGIN_CALL` (CA-02.3); custos fora do preço (SLP-04.3); determinístico (CA-02.4) | `EngineError` se ativo sem posição ou preço ≤ 0 |
 | `Fold` | `is_start ≤ is_end < oos_start ≤ oos_end`; janelas dentro da série | IS/OOS disjuntos; união dos OOS cobre a janela sem sobreposição (CA-01.2) | `EngineError` se `is_end ≥ oos_start` ou janelas fora da série |
 | `build_folds(...)` | `is_window, oos_window ≥ 1`; `start < end` | folds determinísticos; `anchor="rolling"` default (D7/R7) | `EngineError` se janelas inválidas ou série curta demais |
@@ -375,16 +392,24 @@ Para cada índice-união `u` em `0..D-1` (em cada fase, ativos processados em **
       long → SELL, short → BUY (cobertura), origin = MARGIN_CALL (CA-02.3);
       após CADA ativo liquidado, o laço re-checa a margem aos preços de execução
       e interrompe quando restaurada (CA-02.1). Plano esgotado + margem ainda
-      violada com equity ≥ 0 ⇒ EngineError (CA-01.3). Equity < 0 após liquidar
-      tudo ⇒ FUNDO QUEBRADO: congela (nenhum trade novo; pendentes canceladas;
-      intenções seguintes descartadas), flag = true, equity reportada negativa real
-      (CA-03.1/03.2). [borda rara: ativo do plano sem barra em u ⇒ não liquida
-      nesta u; se ao fim do dia a margem persistir violada, é o caminho do CA-01.3]
+      violada com equity ≥ 0 ⇒ EngineError (CA-01.3). FUNDO QUEBRADO POR GAP —
+      cronologia explícita (emenda P1): (1) liquidação integral executada no
+      open do próprio ativo, ao preço do GAP (ADR-0002); (2) re-cheque constata
+      equity < 0 após liquidar tudo; (3) CONGELA — nenhum trade novo, pendentes
+      canceladas, intenções seguintes descartadas, flag = true, equity reportada
+      negativa real (CA-03.1); (4) métricas de retorno derivam None explícito
+      (R6/CA-03.2 — o relatório §7 nunca emite NaN) e a conciliação continua
+      fechando com a equity negativa (CA-03.2). [borda rara: ativo do plano sem
+      barra em u ⇒ não liquida nesta u; se ao fim do dia a margem persistir
+      violada, é o caminho do CA-01.3]
    b. PENDENTES regulares (se não congelado): broker.execute_pending(...) — MARKET,
       LIMIT, sell-stop (2a) + buy-stop (ORD-05): high[i] ≥ S ⇒ compra a max(S, open[i])
       + slippage de compra (CA-05.1); não disparado ⇒ PERMANECE (CA-05.2); nunca
-      debita caixa antes (CA-05.3). Caixa insuficiente ⇒ atendimento alfabético,
-      não-atendida logada e contada (2a POR-01.2, mantido).
+      debita caixa antes (CA-05.3). Ativação por side × ENG-05 (tabela §3.5, emenda
+      P1): sem posição ⇒ entrada long; LONG aberta ⇒ guard ignora e consome (log);
+      SHORT aberta ⇒ cobertura do stop-loss (reduz |qty|, nunca cruza — SHT-02.2);
+      sell-stop ativa só com LONG (2a ORD-02.2 estendido). Caixa insuficiente ⇒
+      atendimento alfabético, não-atendida logada e contada (2a POR-01.2, mantido).
    c. REBALANCE (2a, só EqualWeightOpen) — inalterado.
 
 2. MARCAR A MERCADO (close): equity[u] = cash + Σ_X qty[X] × close_conhecido(X, u)
@@ -461,7 +486,11 @@ def turnover_annualized(trades, equity_daily, n_bars) -> float:
     """2a INTOCADA — (Σ|notional_compra| + Σ|notional_venda|)/(2×patrimônio_médio)×(252/n_barras);
        |notional| já funciona com qty < 0 (MRG-04)."""
 def sharpe_annualized_rf0(returns) -> float:
-    """IMPORTADO de engine/walkforward.py — uma única forma fechada (seleção IS e relatório — R5/CA-06.2)."""
+    """IMPORTADO de engine/walkforward.py — FONTE ÚNICA da forma fechada
+       (média/desvio × √252, rf=0 — R5/CA-06.2). Emenda P1: o `sharpe()` da
+       Fase 1/2a em analytics/metrics.py (usado pelo relatório, report.py) passa
+       a DELEGAR para este helper — uma única implementação, zero drift entre
+       seleção IS e relatório (sem duas fórmulas)."""
 
 # analytics/benchmark.py — INTOCADO: buy_and_hold_multi da 2a = 1/N long-only (RF-MET-05 CA-05.1/05.2).
 #   O benchmark NUNCA short e NUNCA usa margem — é a mesma função, mesma configuração do run único da 2a.
@@ -510,7 +539,7 @@ Opções, futuros e derivativos; fracionário (quantidades inteiras — SIZ-01 d
 | Margem como invariante (MRG-01; substitui POR-04.3) | Checada no laço (§4), pós-open | `test_margin_invariant_reduces_to_cash_ge_zero_long_only`; `test_margin_breach_close_to_open_window_allowed_then_error` |
 | Liquidação determinística (MRG-02 CA-02.4) | Seleção alfabética no engine, sem preço como critério | `test_forced_liquidation_deterministic_across_runs` |
 | Fundo quebrado: métricas `None` explícito, nunca NaN (R6/CA-03.2) | `BrokenFundState` + relatório | `test_broken_fund_metrics_are_explicit_none_never_nan` |
-| Buy-stop = `max(S, open)` + slippage; persiste; sem reserva (ORD-05) | Regra no broker (espelha sell-stop) | `test_buy_stop_executes_at_max_stop_open_with_buy_slippage`; `test_buy_stop_undispatched_persists_to_next_bar_of_own_asset`; `test_buy_stop_never_dispatched_never_debits_cash` |
+| Buy-stop = `max(S, open)` + slippage; persiste; sem reserva; ativação por side × ENG-05 (ORD-05, emenda P1) | Regra no broker (espelha sell-stop) | `test_buy_stop_executes_at_max_stop_open_with_buy_slippage`; `test_buy_stop_undispatched_persists_to_next_bar_of_own_asset`; `test_buy_stop_never_dispatched_never_debits_cash`; `test_buy_stop_with_open_long_is_ignored_and_consumed`; `test_buy_stop_over_short_covers_never_crosses` |
 | Pior caso intrabarra com buy-stop (ORD-06/ADR-0007 estendido) | Tabela §4, sem "ambos executam" | `test_intrabar_ambiguity_buy_stop_entry_bracket_worst_case`; `test_intrabar_ambiguity_short_bracket_stop_wins_over_tp` |
 | Isolamento estrito IS/OOS (WFK-01 CA-01.1) | Série truncada no fold; guard no array | `test_is_run_never_indexes_oos_bars_engine_error` |
 | Warmup OOS = cauda do IS (R4) | Série composta (cauda ≤ fronteira) | `test_oos_warmup_uses_is_tail_without_lookahead` |
@@ -556,9 +585,10 @@ Opções, futuros e derivativos; fracionário (quantidades inteiras — SIZ-01 d
 | | CA-03.3 | `test_broken_fund_result_excluded_from_auto_comparison` |
 | RF-MRG-04 | CA-04.1 | `test_gross_and_net_exposure_formulas_side_by_side` |
 | | CA-04.2 | `test_leveraged_gross_gt_100_reported_with_margin_utilization` |
-| RF-ORD-05 | CA-05.1 | `test_buy_stop_executes_at_max_stop_open_with_buy_slippage` |
+| RF-ORD-05 | CA-05.1 | `test_buy_stop_executes_at_max_stop_open_with_buy_slippage`; `test_buy_stop_with_open_long_is_ignored_and_consumed` (guard ENG-05); `test_buy_stop_over_short_covers_never_crosses` (cobertura — SHT-02.2) |
 | | CA-05.2 | `test_buy_stop_undispatched_persists_to_next_bar_of_own_asset` |
 | | CA-05.3 | `test_buy_stop_never_dispatched_never_debits_cash` |
+| | (emenda P1) | `test_convert_accepts_buy_stop` (barreira P2 da 2a removida — regressão documentada) |
 | RF-ORD-06 | CA-06.1 | `test_intrabar_ambiguity_buy_stop_entry_bracket_worst_case` |
 | | CA-06.2 | `test_intrabar_ambiguity_short_bracket_stop_wins_over_tp` |
 | | CA-06.3 | `test_report_counts_buy_stop_ambiguities_in_mechanism_counters` |
@@ -581,10 +611,11 @@ Opções, futuros e derivativos; fracionário (quantidades inteiras — SIZ-01 d
 | | CA-02.2 | `test_ci_coverage_floor_85_includes_margin_walkforward` |
 | | CA-02.3 | `test_spec_architecture_fails_without_adr_0009` |
 
-**55 testes nomeados para 54 CAs** — CA-03.4 (aluguel, R1) exige dois testes (os dois lados: default nunca bloqueia; restrito bloqueia e loga). Todos os 54 CAs mapeados 1:1; nenhum RF sem teste nomeado direto.
+**58 testes nomeados para 54 CAs** — CA-03.4 (aluguel, R1) exige dois testes (os dois lados: default nunca bloqueia; restrito bloqueia e loga); CA-05.1 (buy-stop) ganhou na emenda P1 os testes do guard ENG-05 (ativação por side) e o teste do convert (barreira P2 removida). Todos os 54 CAs mapeados 1:1; nenhum RF sem teste nomeado direto.
 
 ## 11. Histórico
 
 | Versão | Data | Mudança |
 |---|---|---|
 | 0.1 | 2026-08-14 | Rascunho inicial — gate 2. Design completo no template da 2a (§1–§11): contratos completos com campos/tipos/defaults (§3.1–§3.7), exceções com pré/pós-condições por interface (§3.8), fronteira de instante (§3.9), fluxo da barra 2b com sequência declarada como invariante (§4), bordas (§5), identidade estendida com borrow fees (§6), analytics gross/net + MHT + fundo quebrado (§7), decisões D1–D7 comprometidas com ADRs (§8), 54 CAs mapeados 1:1 (§10). ADRs **0009–0011 propostos** (margem + liquidação; modelo de aluguel; protocolo walk-forward). Emenda spec-first no requirements v0.2 §8: a missão do gate 2 reagrupa os ADRs (D1+D2 → 0009; fee de aluguel → 0010; D6+D7 → 0011) — tabela atualizada para não divergir. |
+| 0.1 (emenda P1) | 2026-08-14 | Verificação do gate 2 (P1), sem reabrir o gate 1: (1) regra de ativação por side do buy-stop × guard ENG-05, tabela explícita (§3.5/§3.8/§4 passo 1b); (2) barreira P2 da 2a removida no `convert` (STOP vira kind válido) + regressão documentada do teste 2a `test_convert_domain_errors_raise_engine_error` (§3.5/§3.8, teste novo `test_convert_accepts_buy_stop`); (3) mecanismo do warmup OOS explicitado — cauda como histórico puro via gate i ≥ warmup, `oos_equity = equity_curve[tail_len:]`, pré-condição `strategy.warmup == warmup` (§3.6); (4) fonte única do Sharpe — `metrics.sharpe()` (2a) delega ao helper do engine (§7); (5) cronologia do fundo quebrado por gap no §4 (liquida → constata → congela → métricas None). §10: 58 testes nomeados para 54 CAs. |
