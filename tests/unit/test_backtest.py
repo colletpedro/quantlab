@@ -13,12 +13,18 @@ import pytest
 from numpy.typing import NDArray
 from structlog.typing import EventDict
 
-from quantlab.engine.backtest import BacktestResultMulti, run_backtest, run_backtest_multi
+from quantlab.engine.backtest import (
+    BacktestResultMulti,
+    build_liquidation_plan,
+    run_backtest,
+    run_backtest_multi,
+)
 from quantlab.engine.broker import CostModel
-from quantlab.engine.conditional import ConditionalIntent, OrderKind
+from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind, Side
+from quantlab.engine.margin import MarginModel
 from quantlab.engine.market_view import MarketView
-from quantlab.engine.portfolio import TradeOrigin
-from quantlab.engine.sizing import EqualWeightOpen, SizingInputs
+from quantlab.engine.portfolio import Position, TradeOrigin
+from quantlab.engine.sizing import EqualWeightOpen, FixedOneOverN, SizingInputs
 from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
 from quantlab.exceptions import EngineError
@@ -1019,3 +1025,184 @@ def test_alphabetical_serving_with_insufficient_cash() -> None:
         "cash",
         "integer",
     ]
+
+
+# ─── 2b (T08a): laço fechamento — fee, margem, MARGIN_CALL e fundo quebrado ──
+
+
+@pytest.mark.unit
+def test_borrow_fee_debited_at_close_open_short_only() -> None:
+    """CA-03.1/03.2 no laço — o borrow fee é debitado no CLOSE, em etapa
+    própria, apenas em pregões com short ABERTO ao fim do dia: abre o short
+    no open da barra 1 (paga na barra 1), cobre no open da barra 2 (NÃO paga
+    na barra 2 — CA-03.2). Determinístico, nunca no preço de execução.
+
+    Forma fechada: N=2 ⇒ alvo 1/2 ⇒ short de 5.000 ações a 10.00; fee diário
+    = |qty| x close x 0,005/252 = 50.000 x 0,005/252 ~= 0,9921 — UMA única
+    incidência (o dia da cobertura não paga).
+    """
+    series = {
+        "A": _series([10, 10, 10], [10, 10, 10], ticker="A", dates=_dates(3)),
+        "B": _series([10, 10, 10], [10, 10, 10], ticker="B", dates=_dates(3)),
+    }
+    strategies = {"A": ScriptedStrategy({0: Signal.ENTER_SHORT, 1: Signal.EXIT_SHORT})}
+
+    result = run_backtest_multi(series, strategies, costs=_FREE, slippage=_NO_SLIP)
+
+    fee = 50_000.0 * 0.005 / 252.0
+    assert result.borrow_fees == pytest.approx(fee)
+    assert result.final_equity == pytest.approx(100_000.0 - fee)
+    # O round-trip (abertura na barra 1 + cobertura na barra 2) vira UM trade
+    # fechado (`_close_trade` substitui o aberto — design §4.5).
+    assert len(result.portfolio.trades) == 1
+    assert result.portfolio.trades[0].quantity == -5_000  # short
+    assert result.portfolio.trades[0].exit_price == pytest.approx(10.0)  # coberto
+    assert result.portfolio.trades[0].origin == TradeOrigin.MARKET
+    assert not result.broken_fund
+
+
+@pytest.mark.unit
+def test_margin_breach_close_to_open_window_allowed_then_error() -> None:
+    """CA-01.3 no laço (lado do close) — violação de margem DETECTADA no
+    close NÃO é erro: gera o plano de liquidação e segue (janela close→open
+    é a única em que o invariante fica pendente). O erro pós-open (plano
+    esgotado + margem ainda violada) é da T08b — aqui a T08a não executa o
+    plano: a posição segue aberta, sem trade de liquidação, sem congelamento.
+    """
+    series = {"A": _series([10, 10, 10], [10, 10, 10], ticker="A", dates=_dates(3))}
+    strategies = {"A": ScriptedStrategy({0: Signal.ENTER})}
+
+    result = run_backtest_multi(
+        series,
+        strategies,
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedOneOverN(1),  # all-in ⇒ alavancado com factor 2.0
+        margin=MarginModel(factor=2.0),
+    )
+
+    # Sem EngineError (a violação no close é evento normal — CA-01.3).
+    assert len(result.portfolio.trades) == 1  # só a entrada
+    assert "A" in result.portfolio.positions  # nada foi liquidado (T08b executa)
+    assert all(t.origin != TradeOrigin.MARGIN_CALL for t in result.portfolio.trades)
+    assert result.broken_fund is False  # há posições — não é fundo quebrado
+
+
+@pytest.mark.unit
+def test_margin_call_plan_alphabetical_and_cancels_pendings() -> None:
+    """CA-02.1/02.2 — (a) `build_liquidation_plan` (puro): seleção ALFABÉTICA
+    por ticker, INTEGRAL por ativo, e repete ATÉ RESTAURAR a margem projetada
+    (equity >= margem a preços de close); (b) no laço, o plano do close
+    CANCELA as pendentes dos ativos do plano (CA-02.2)."""
+    # (a) forma pura — ordem alfabética, para quando a projeção restaura.
+    positions = {
+        "B": Position(ticker="B", quantity=10, entry_price=10.0, entry_date=_D0),
+        "A": Position(ticker="A", quantity=-5, entry_price=10.0, entry_date=_D0),
+        "C": Position(ticker="C", quantity=3, entry_price=10.0, entry_date=_D0),
+    }
+    closes = {"A": 10.0, "B": 10.0, "C": 10.0}
+    plan = build_liquidation_plan(positions, closes, MarginModel(), equity=100.0, decision_date=_D0)
+    assert [o.ticker for o in plan] == ["A", "B"]  # alfabético; para ao restaurar
+    assert plan[0].side is Side.BUY  # short => cobertura
+    assert plan[0].qty == 5  # integral (|qty| atual)
+    assert plan[1].side is Side.SELL  # long => venda
+    assert plan[1].qty == 10
+    assert all(o.decision_date == _D0 for o in plan)
+    assert [o.intent_seq for o in plan] == [0, 1]
+
+    # Só shorts com factor 1.0: o plano inclui TODOS — liquidar short com
+    # factor 1 não restaura (a restauração fica para o open — CA-01.3).
+    only_short = {"X": Position(ticker="X", quantity=-10, entry_price=10.0, entry_date=_D0)}
+    plan2 = build_liquidation_plan(
+        only_short, {"X": 10.0}, MarginModel(), equity=50.0, decision_date=_D0
+    )
+    assert [o.ticker for o in plan2] == ["X"]
+
+    # (b) no laço: o plano do close cancela as pendentes do ativo do plano
+    # (CA-02.2). Bracket de ENTRADA (L=8 + sell-stop S=7, série a 10): o
+    # limite preenche na barra 1 (low 8), abre a posição e o sell-stop do par
+    # PERMANECE vivo protegendo. A posição all-in alavancada (factor 2) viola
+    # a margem no close da barra 1 — o plano inclui A e CANCELA o sell-stop.
+    # Sem a violação (factor 1.0), o mesmo sell-stop persiste até o fim.
+    series = {"A": _series([10, 8, 10, 10], [10, 8, 10, 10], ticker="A", dates=_dates(4))}
+    strategies = {
+        "A": ScriptedConditional(
+            {
+                0: ConditionalIntent(
+                    Signal.ENTER, OrderKind.LIMIT, limit=8.0, bracket=Bracket(limit=8.0, stop=7.0)
+                ),
+            }
+        )
+    }
+    result = run_backtest_multi(
+        series,
+        strategies,
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedOneOverN(1),
+        margin=MarginModel(factor=2.0),
+    )
+    assert result.portfolio.pending.pending_for("A") == ()  # sell-stop cancelado pelo plano
+    assert len(result.portfolio.trades) == 1  # só a entrada a 8 — stop nunca disparou
+    assert result.portfolio.trades[0].entry_price == pytest.approx(8.0)
+
+    # Controle (factor 1.0 — sem violação): o sell-stop PERSISTE (CA-05.2).
+    control = run_backtest_multi(
+        series,
+        strategies,
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedOneOverN(1),
+        margin=MarginModel(factor=1.0),
+    )
+    surviving = control.portfolio.pending.pending_for("A")
+    assert len(surviving) == 1
+    assert surviving[0].kind is OrderKind.STOP
+    assert surviving[0].side is Side.SELL
+
+
+@pytest.mark.unit
+def test_broken_fund_freezes_no_new_trades_and_flag() -> None:
+    """CA-03.1 no laço — short aberto e coberto em prejuízo drena o caixa
+    abaixo de zero com posição zerada => fundo quebrado detectado no close:
+    flag ligada, equity NEGATIVA real reportada, e CONGELAMENTO — nenhum
+    trade novo e a estratégia não é mais consultada (intenções descartadas)."""
+    series = {"A": _series([10, 10, 20, 20], [10, 10, 20, 20], ticker="A", dates=_dates(4))}
+    strategies = {"A": ScriptedStrategy({0: Signal.ENTER_SHORT, 1: Signal.EXIT_SHORT})}
+
+    result = run_backtest_multi(
+        series,
+        strategies,
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        initial_cash=1_000.0,
+        sizer=FixedOneOverN(1),
+    )
+
+    # Forma fechada: short 100 a 10 (barra 1), cobertura a 20 (barra 2) ⇒
+    # caixa 1.000 + 1.000 - 2.000 - fee = -fee; fee = 1.000 x 0,005/252.
+    assert result.broken_fund is True
+    assert result.final_equity == pytest.approx(-1000.0 * 0.005 / 252.0)
+    # O round-trip fechado (short + cobertura) vira UM trade; nenhum trade novo
+    # depois do congelamento.
+    assert len(result.portfolio.trades) == 1
+    assert result.portfolio.trades[0].exit_price is not None
+    assert result.portfolio.positions == {}
+    # Congelamento: consultada nas barras 0 e 1; quebrou no close da barra 2
+    # e a barra 3 NÃO foi consultada (intenções descartadas — CA-03.1).
+    assert strategies["A"].seen == [0, 1]
+
+
+@pytest.mark.unit
+def test_exit_short_without_position_raises_engine_error() -> None:
+    """SHT-01.3 no laço — EXIT_SHORT sem posição short aberta é EngineError
+    (nunca silêncio): o sinal é processado no laço (design §4 passo 5), não no
+    convert — e a checagem acontece na emissão, antes de agendar cobertura."""
+    series = {"A": _series([10, 10, 10], [10, 10, 10], ticker="A", dates=_dates(3))}
+    with pytest.raises(EngineError, match="EXIT_SHORT sem posição short"):
+        run_backtest_multi(
+            series,
+            {"A": ScriptedStrategy({1: Signal.EXIT_SHORT})},
+            costs=_FREE,
+            slippage=_NO_SLIP,
+        )

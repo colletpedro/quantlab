@@ -204,18 +204,18 @@ def test_invariants_pass_on_a_healthy_portfolio() -> None:
 
 
 @pytest.mark.unit
-def test_negative_cash_raises_and_names_the_likely_cause() -> None:
-    """ENG-04.4 — o guard que design §4.4 pede, com a mensagem que ajuda.
-
-    A mensagem cita o custo no cálculo da quantidade de propósito: é a causa
-    esmagadoramente mais provável, e dizer isso poupa a quem depura a
-    primeira meia hora.
+def test_negative_cash_is_legal_after_adr_0009() -> None:
+    """ENG-04.4 — REGRESSÃO DOCUMENTADA (2b, T08a, ADR-0009): o guard de
+    `cash >= 0` do design §4.4 foi SUBSTITUÍDO pelo invariante de margem
+    `equity >= margem`, checado no laço (o sizing/convert continua cortando a
+    quantidade para caber no caixa — design §4.4 — então a causa provável
+    "custo fora do cálculo" segue impossível long-only). Caixa NEGATIVO
+    passa a ser legal com margem (shorts, liquidação, borrow fee).
     """
     portfolio = Portfolio(cash=100.0)
     portfolio.cash = -0.01
 
-    with pytest.raises(EngineError, match="custo"):
-        portfolio.check_invariants()
+    portfolio.check_invariants()  # não levanta mais — o invariante mudou
 
 
 @pytest.mark.unit
@@ -396,9 +396,12 @@ def test_equity_identity_multi_asset() -> None:
 
 
 @pytest.mark.unit
-def test_cash_and_quantity_never_negative_multi() -> None:
-    """CA-04.3/POR-04.3 — os guards multi-ativo: caixa negativo e posição
-    corrompida são erro de programação, com dois ativos abertos."""
+def test_check_invariants_after_adr_0009_relaxation() -> None:
+    """CA-04.3/POR-04.3 — REGRESSÃO DOCUMENTADA (2b, T08a, ADR-0009): o
+    invariante `cash >= 0` da 2a foi SUBSTITUÍDO por `equity >= margem`
+    (checado no laço), então `check_invariants` NÃO levanta mais com caixa
+    negativo — legal com margem (shorts/liquidação). `quantity == 0`
+    continua sendo erro de programação; `k <= N` idem."""
     portfolio = Portfolio(cash=100.0)
     portfolio.positions["AAA"] = Position(
         ticker="AAA", quantity=10, entry_price=10.0, entry_date=_ENTRY
@@ -409,9 +412,10 @@ def test_cash_and_quantity_never_negative_multi() -> None:
 
     portfolio.check_invariants()  # saudável
 
+    # 2b: caixa NEGATIVO passa a ser legal (a margem que substitui o guard é
+    # checada no laço — a assinatura antiga preservada para a Fase 1).
     portfolio.cash = -0.01
-    with pytest.raises(EngineError, match="custo"):
-        portfolio.check_invariants()
+    portfolio.check_invariants()  # não levanta mais (regressão documentada)
     portfolio.cash = 100.0
 
     object.__setattr__(portfolio.positions["BBB"], "quantity", 0)

@@ -19,8 +19,14 @@ from quantlab.engine.broker import PendingOrder as BrokerPendingOrder
 from quantlab.engine.calendar import UnionCalendar
 from quantlab.engine.conditional import ConditionalStrategy, OrderKind, Side
 from quantlab.engine.liquidity import adv
+from quantlab.engine.margin import (
+    BorrowFeeModel,
+    MarginCallOrder,
+    MarginModel,
+    margin_requirement,
+)
 from quantlab.engine.market_view import MarketView
-from quantlab.engine.portfolio import Portfolio, Trade, TradeOrigin
+from quantlab.engine.portfolio import Portfolio, Position, Trade, TradeOrigin
 from quantlab.engine.sizing import (
     EqualWeightOpen,
     FixedOneOverN,
@@ -39,6 +45,7 @@ __all__ = [
     "BacktestResultMulti",
     "EquityPoint",
     "PendingOrder",
+    "build_liquidation_plan",
     "run_backtest",
     "run_backtest_multi",
 ]
@@ -335,6 +342,15 @@ class BacktestResultMulti:
     #: da conciliação (§6); acumulado no laço (T08a). Default 0 preserva os
     #: runs long-only da 2a.
     borrow_fees: float = 0.0
+    #: 2b (T08a, RF-MRG-03 CA-03.1): fundo quebrado — equity < 0 sem posições
+    #: (detectado no close) ou após liquidação total (T08b, cronologia do gap).
+    #: Congela o laço (nenhum trade novo, pendentes canceladas, intenções
+    #: descartadas); métricas de retorno derivam `None` explícito (R6 — nunca
+    #: NaN) e o resultado é excluído de comparações automáticas (CA-03.3).
+    broken_fund: bool = False
+    #: 2b (T08a): config do run — reconstruível do JSON (RF-CON-02/CA-06.2).
+    margin: MarginModel = field(default_factory=MarginModel)
+    borrow: BorrowFeeModel = field(default_factory=BorrowFeeModel)
 
     @property
     def final_equity(self) -> float:
@@ -343,6 +359,71 @@ class BacktestResultMulti:
     @property
     def n_bars(self) -> int:
         return len(self.dates)
+
+
+def build_liquidation_plan(
+    positions: dict[str, Position],
+    closes: dict[str, float],
+    model: MarginModel,
+    equity: float,
+    decision_date: date,
+    seq_start: int = 0,
+) -> tuple[MarginCallOrder, ...]:
+    """Plano de liquidação forçada (RF-MRG-02/D2, ADR-0009) — construído no
+    CLOSE pelo laço quando `equity < margem` (CA-01.3: janela close→open).
+
+    Seleção **alfabética por ticker** (MRG-02.4 — nunca preço como critério),
+    **integral por ativo** (`qty = |qty_atual|`, nunca parcial — MRG-02):
+    itera as posições em ordem alfabética, projeta a restauração a preços de
+    close (sem custos — desconhecidos no close; a execução no open re-checa
+    a margem a preços reais, CA-01.3) e **para quando a projeção atinge
+    `equity >= margem`** (CA-02.1: repete até restaurar). Longs restauram sem
+    perder equity (posição vira caixa); shorts reduzem equity E exigência —
+    com `factor = 1.0` o plano inclui todos os shorts e a restauração fica
+    para o open (CA-01.3). Função PURA e determinística (RNF-01).
+
+    Raises:
+        EngineError: `closes` incompleto/preço não positivo (via
+            `margin_requirement`) ou posição zerada — erro de programação
+            (§3.8).
+    """
+    req = margin_requirement(positions, closes, model)
+    if equity >= req:
+        return ()  # defensivo — o chamador só deve chamar com violação
+    plan: list[MarginCallOrder] = []
+    proj_equity = equity
+    proj_req = req
+    seq = seq_start
+    for ticker in sorted(positions):
+        if proj_equity >= proj_req:
+            break  # CA-02.1 — restaurado (projeção a preços de close)
+        pos = positions[ticker]
+        if pos.quantity == 0:
+            raise EngineError(
+                f"build_liquidation_plan: posição zerada em {ticker} — erro de programação."
+            )
+        close_p = closes[ticker]
+        magnitude = abs(pos.quantity)
+        if pos.quantity > 0:
+            # Long: vender converte a posição em caixa — equity invariante (sem
+            # custos); a exigência cai pelo notional liquidado.
+            proj_req -= magnitude * close_p * model.factor
+        else:
+            # Short: cobrir DEBITA o caixa — equity cai |qty| x close; a
+            # exigência cai pelo notional (com factor 1.0 não restaura).
+            proj_equity -= magnitude * close_p
+            proj_req -= magnitude * close_p * model.factor
+        plan.append(
+            MarginCallOrder(
+                ticker=ticker,
+                side=Side.SELL if pos.quantity > 0 else Side.BUY,
+                qty=magnitude,
+                decision_date=decision_date,
+                intent_seq=seq,
+            )
+        )
+        seq += 1
+    return tuple(plan)
 
 
 def run_backtest_multi(
@@ -354,31 +435,47 @@ def run_backtest_multi(
     slippage: SlippageModel | None = None,
     cap: float = 0.10,
     sizer: Sizer | None = None,
+    margin: MarginModel | None = None,
+    borrow: BorrowFeeModel | None = None,
 ) -> BacktestResultMulti:
     """Roda N estratégias (uma por ativo) sobre o calendário-união, barra a barra.
 
     ────────────────────────────────────────────────────────────────────────
     **INVARIANTE — a ordem das operações dentro de cada data-união `u`**
-    (extensão da §4.3 da Fase 1, preservada por ativo):
+    (extensão da §4.3 da Fase 1, preservada por ativo; 2b T08a):
 
       1. **Executar** as pendentes de X ao open da barra do PRÓPRIO ativo
-         (ADR-0002 por ativo — POR-05.3), e a saída pendente de um EXIT da
-         barra anterior de X (venda ao open, origin=MARKET);
+         (ADR-0002 por ativo — POR-05.3), a saída pendente de um EXIT da
+         barra anterior de X (venda ao open, origin=MARKET) e a cobertura
+         pendente de um EXIT_SHORT (compra ao open, T08a);
       2. **Marcar a mercado** pelo último close conhecido (POR-02.2) e
          registrar a equity de `u`;
       1b. **Rebalance** (só se sizer == EqualWeightOpen): k mudou ⇒ eventos
-         com limiar em pp (SIZ-03.3) para o próximo open do próprio ativo;
-      3. **Consultar** as estratégias por ÚLTIMO (i ≥ warmup), MarketView
-         só com barras do próprio ativo (POR-03.1/05.1).
+         com limiar em pp (SIZ-03.3) para o próximo open do próprio ativo
+         (2a, inalterado);
+      3. **Debitar o borrow fee** no close, etapa própria (2b, T08a —
+         RF-SHT-03 CA-03.1/03.2): só com short aberto no close;
+      4. **Checar margem** (2b, T08a — RF-MRG-01/02): `equity < margem` no
+         close ⇒ plano de liquidação alfabético (CA-02.1), integral por ativo,
+         cancelando as pendentes dos ativos do plano (CA-02.2); violação no
+         close NÃO é erro (CA-01.3 — janela close→open; o erro pós-open é da
+         T08b). Sem posições e equity < 0 ⇒ **fundo quebrado** (CA-03.1):
+         congela (nenhum trade novo, pendentes canceladas, intenções
+         descartadas, flag);
+      5. **Consultar** as estratégias por ÚLTIMO (i ≥ warmup; se não
+         congelado), MarketView só com barras do próprio ativo (POR-03.1/05.1);
+         `EXIT_SHORT` sem posição short aberta ⇒ EngineError (SHT-01.3).
 
     **Por que a ordem importa (Fase 1 §4.3, estendido):** executar antes de
     marcar garante que a equity de `u` reflete a posição real ao fim de `u`;
     executar antes de consultar garante que nenhuma decisão de `u` executa em
-    `u` (ADR-0002 em código). Uma inversão em refatoração reintroduz lookahead
-    e o teste de mutação ENG-01.2 (T12) quebra. Entre marcar e consultar a
-    ordem é livre por ativo (consulta sem efeito colateral — ENG-05.2),
-    travada por teste. As fases rodam em ordem alfabética por ativo
-    (determinismo RNF-01 + caixa compartilhado POR-01.2).
+    `u` (ADR-0002 em código). A sequência de fechamento **marcar → fee →
+    margem → consultar** é nova e declarada como invariante (design §4): o
+    fee usa o close (marcação), a margem usa o caixa pós-fee, e a consulta
+    usa o close sem efeito colateral — uma inversão derruba a semântica de
+    margem ou a auditoria do ENG-01.2 (T12 da 2b quebra). As fases rodam em
+    ordem alfabética por ativo (determinismo RNF-01 + caixa compartilhado
+    POR-01.2).
 
     **ENG-01.4 por ativo (C1):** intenção na ÚLTIMA barra da série de X morre
     pendente (não existe "próxima barra de X") — ENTER não é colocada, EXIT
@@ -413,6 +510,8 @@ def run_backtest_multi(
     cost_model = costs or CostModel()
     slippage_model = slippage or FixedBps()
     sizer_model = sizer or FixedOneOverN(n)
+    margin_model = margin or MarginModel()
+    borrow_model = borrow or BorrowFeeModel()
     broker = Broker(cost_model)
     calendar = UnionCalendar.build(series)
     portfolio = Portfolio(cash=initial_cash)
@@ -420,58 +519,82 @@ def run_backtest_multi(
     warmup: dict[str, int] = {t: strategies[t].warmup for t in tickers if t in strategies}
     pending_dead: dict[str, int] = {t: 0 for t in tickers}
     exit_pending: dict[str, date] = {}
+    cover_pending: dict[str, date] = {}  # 2b (T08a) — EXIT_SHORT cobre no open
     equity_curve: list[float] = []
     intent_seq = 0
     # MET-05/P6 (T16): contadores de mecanismo — stops/ambiguidades derivados
     # dos fills, não-atendidas por caixa contadas no broker (convert/execução).
     counters = MechanismCounters()
+    # 2b (T08a): estado do fechamento — plano de liquidação do close (executa
+    # no open do PRÓPRIO ativo, T08b), contador próprio da liquidação (design
+    # §3.3), fundo quebrado congelado e Σ borrow fees.
+    margin_plan: dict[str, MarginCallOrder] = {}
+    margin_seq = 0
+    broken = False
+    borrow_fees = 0.0
 
     for u in range(len(calendar.dates)):
         u_date = calendar.dates[u]
         k_before = len(portfolio.positions)
 
         # ── 1. EXECUTAR (alfabético; ADR-0002 por ativo — POR-05.3) ────────
-        for ticker in tickers:
-            i = calendar.bar_index_at(ticker, u)
-            if i is None:
-                continue
-            series_x = series[ticker]
-            bar = BarSlice(
-                date=series_x.dates[i],
-                open=float(series_x.open[i]),
-                high=float(series_x.high[i]),
-                low=float(series_x.low[i]),
-                close=float(series_x.close[i]),
-            )
-            # Saída pendente (EXIT da barra anterior de X): vende ao open.
-            if ticker in exit_pending:
-                decision = exit_pending.pop(ticker)
-                if ticker in portfolio.positions:
-                    broker.sell(
-                        portfolio,
-                        ticker=ticker,
-                        price=float(series_x.open[i]),
-                        execution_date=bar.date,
-                        decision_date=decision,
-                        origin=TradeOrigin.MARKET,
-                    )
-                # EXIT sem posição (Q2) — consumido e logado pelo broker.
-            filled = broker.execute_pending(
-                store=portfolio.pending,
-                ticker=ticker,
-                bar=bar,
-                portfolio=portfolio,
-                cost_model=cost_model,
-                slippage=slippage_model,
-                adv=adv(series_x, i),
-                counters=counters,
-            )
-            # MET-05 (T16): 1 trade de venda por stop disparado (origin=STOP,
-            # incluindo o stop do bracket ambíguo — T09) e 1 trade ambíguo por
-            # ocorrência (ADR-0007/D2).
-            counters.stops_triggered += sum(1 for t in filled if t.origin == TradeOrigin.STOP)
-            counters.intrabar_ambiguities += sum(1 for t in filled if t.ambiguous)
-        portfolio.check_invariants(n)
+        if not broken:
+            for ticker in tickers:
+                i = calendar.bar_index_at(ticker, u)
+                if i is None:
+                    continue
+                series_x = series[ticker]
+                bar = BarSlice(
+                    date=series_x.dates[i],
+                    open=float(series_x.open[i]),
+                    high=float(series_x.high[i]),
+                    low=float(series_x.low[i]),
+                    close=float(series_x.close[i]),
+                )
+                # Saída pendente (EXIT da barra anterior de X): vende ao open.
+                if ticker in exit_pending:
+                    decision = exit_pending.pop(ticker)
+                    if ticker in portfolio.positions:
+                        broker.sell(
+                            portfolio,
+                            ticker=ticker,
+                            price=float(series_x.open[i]),
+                            execution_date=bar.date,
+                            decision_date=decision,
+                            origin=TradeOrigin.MARKET,
+                        )
+                    # EXIT sem posição (Q2) — consumido e logado pelo broker.
+                # Cobertura pendente (EXIT_SHORT da barra anterior de X): compra
+                # ao open (2b, T08a) — se a posição já foi coberta por outro
+                # mecanismo (buy-stop, margem), consumida (Q2 simétrico).
+                if ticker in cover_pending:
+                    decision = cover_pending.pop(ticker)
+                    pos = portfolio.positions.get(ticker)
+                    if pos is not None and pos.quantity < 0:
+                        broker.cover(
+                            portfolio,
+                            ticker=ticker,
+                            price=float(series_x.open[i]),
+                            execution_date=bar.date,
+                            decision_date=decision,
+                            origin=TradeOrigin.MARKET,
+                        )
+                filled = broker.execute_pending(
+                    store=portfolio.pending,
+                    ticker=ticker,
+                    bar=bar,
+                    portfolio=portfolio,
+                    cost_model=cost_model,
+                    slippage=slippage_model,
+                    adv=adv(series_x, i),
+                    counters=counters,
+                )
+                # MET-05 (T16): 1 trade de venda por stop disparado (origin=STOP,
+                # incluindo o stop do bracket ambíguo — T09) e 1 trade ambíguo por
+                # ocorrência (ADR-0007/D2).
+                counters.stops_triggered += sum(1 for t in filled if t.origin == TradeOrigin.STOP)
+                counters.intrabar_ambiguities += sum(1 for t in filled if t.ambiguous)
+            portfolio.check_invariants(n)
 
         # ── 2. MARCAR a mercado pelo último close conhecido (POR-02.2) ──────
         close_by_ticker: dict[str, float] = {}
@@ -487,7 +610,12 @@ def run_backtest_multi(
 
         # ── 1b. REBALANCE (SIZ-03; só EqualWeightOpen; k mudou?) ────────────
         k_now = len(portfolio.positions)
-        if isinstance(sizer_model, EqualWeightOpen) and k_now >= 1 and k_now != k_before:
+        if (
+            not broken
+            and isinstance(sizer_model, EqualWeightOpen)
+            and k_now >= 1
+            and k_now != k_before
+        ):
             equity_now = portfolio.equity()
             target = 1.0 / k_now
             for ticker, position in sorted(portfolio.positions.items()):
@@ -513,61 +641,112 @@ def run_backtest_multi(
                             )
                         )
 
-        # ── 3. CONSULTAR (alfabético; MarketView do próprio ativo) ──────────
-        for ticker in tickers:
-            if ticker not in strategies:
-                continue
-            i = calendar.bar_index_at(ticker, u)
-            if i is None:
-                continue
-            if i < warmup[ticker]:
-                continue
-            intent = strategies[ticker].on_bar(MarketView(series[ticker], i))
-            if intent is None:
-                continue
-            is_last_bar = i == len(series[ticker]) - 1
-            # `Signal` da Fase 1 É o enum (sem atributo `.signal`); o
-            # `ConditionalIntent` carrega `.signal`. Dispatch por tipo.
-            signal = intent if isinstance(intent, Signal) else intent.signal
-            if signal is Signal.EXIT:
-                broker.cancel_all(portfolio.pending, ticker)
-                if is_last_bar:
-                    pending_dead[ticker] += 1  # ENG-01.4 — não há próxima barra p/ a saída
+        # ── 3. DEBITAR BORROW FEE (2b, T08a — etapa própria, RF-SHT-03) ─────
+        if not broken:
+            for ticker, position in sorted(portfolio.positions.items()):
+                if position.quantity < 0:
+                    fee = borrow_model.daily_fee(position.quantity, portfolio.marks[ticker])
+                    portfolio.cash -= fee  # fora do preço de execução (SLP-04.3)
+                    borrow_fees += fee  # dono: o laço (§3.7); termo próprio (§6)
+
+        # ── 4. CHECAR MARGEM (2b, T08a — equity < margem ⇒ plano; close não
+        #    é erro — CA-01.3; a execução no open é da T08b) ─────────────────
+        if not broken:
+            equity_now = portfolio.equity()
+            requirement = margin_requirement(portfolio.positions, portfolio.marks, margin_model)
+            if equity_now < requirement:
+                if not portfolio.positions:
+                    # Fundo quebrado: sem posições e equity < 0 (requirement = 0).
+                    # Congela: pendentes canceladas, intenções descartadas (CA-03.1).
+                    broken = True
+                    for t in tickers:
+                        portfolio.pending.cancel_all(t)
                 else:
-                    exit_pending[ticker] = u_date
-                continue
-            if is_last_bar:
-                pending_dead[ticker] += 1  # ENG-01.4 — intenção morre pendente
-                continue
-            intent_seq += 1
-            # Seed da primeira entrada com EqualWeightOpen (k = 0 ⇒ 1/k é
-            # indefinido): a fração é a da política default, 1/N (decisão
-            # T11a — documentada na docstring do laço).
-            effective_sizer = (
-                FixedOneOverN(n)
-                if isinstance(sizer_model, EqualWeightOpen) and not portfolio.positions
-                else sizer_model
-            )
-            converted = broker.convert(
-                intent,
-                ticker,
-                SizingInputs(
-                    equity=portfolio.equity(),
-                    cash=portfolio.cash,
-                    n=n,
-                    positions={t: p.quantity for t, p in portfolio.positions.items()},
-                    last_close=dict(portfolio.marks),
-                ),
-                effective_sizer,
-                adv(series[ticker], i),
-                cost_model,
-                cap,
-                decision_date=u_date,
-                intent_seq=intent_seq,
-                counters=counters,
-            )
-            if converted is not None:
-                broker.place(portfolio.pending, converted)
+                    plan = build_liquidation_plan(
+                        portfolio.positions,
+                        portfolio.marks,
+                        margin_model,
+                        equity_now,
+                        u_date,
+                        margin_seq,
+                    )
+                    margin_seq += len(plan)
+                    for order in plan:
+                        margin_plan[order.ticker] = order
+                        # CA-02.2 — pendentes do ativo liquidado saem do book.
+                        portfolio.pending.cancel_all(order.ticker)
+
+        # ── 5. CONSULTAR (alfabético; MarketView do próprio ativo; se não
+        #    congelado — intenções seguintes descartadas, CA-03.1) ──────────
+        if not broken:
+            for ticker in tickers:
+                if ticker not in strategies:
+                    continue
+                i = calendar.bar_index_at(ticker, u)
+                if i is None:
+                    continue
+                if i < warmup[ticker]:
+                    continue
+                intent = strategies[ticker].on_bar(MarketView(series[ticker], i))
+                if intent is None:
+                    continue
+                is_last_bar = i == len(series[ticker]) - 1
+                # `Signal` da Fase 1 É o enum (sem atributo `.signal`); o
+                # `ConditionalIntent` carrega `.signal`. Dispatch por tipo.
+                signal = intent if isinstance(intent, Signal) else intent.signal
+                if signal is Signal.EXIT_SHORT:
+                    # SHT-01.3 — nunca silêncio: EXIT_SHORT sem short é erro de
+                    # programação da estratégia (design §3.8).
+                    pos = portfolio.positions.get(ticker)
+                    if pos is None or pos.quantity >= 0:
+                        raise EngineError(
+                            f"EXIT_SHORT sem posição short aberta em {ticker} (SHT-01.3)."
+                        )
+                    broker.cancel_all(portfolio.pending, ticker)
+                    if is_last_bar:
+                        pending_dead[ticker] += 1  # ENG-01.4 — sem próxima barra
+                    else:
+                        cover_pending[ticker] = u_date
+                    continue
+                if signal is Signal.EXIT:
+                    broker.cancel_all(portfolio.pending, ticker)
+                    if is_last_bar:
+                        pending_dead[ticker] += 1  # ENG-01.4 — não há próxima barra p/ a saída
+                    else:
+                        exit_pending[ticker] = u_date
+                    continue
+                if is_last_bar:
+                    pending_dead[ticker] += 1  # ENG-01.4 — intenção morre pendente
+                    continue
+                intent_seq += 1
+                # Seed da primeira entrada com EqualWeightOpen (k = 0 ⇒ 1/k é
+                # indefinido): a fração é a da política default, 1/N (decisão
+                # T11a — documentada na docstring do laço).
+                effective_sizer = (
+                    FixedOneOverN(n)
+                    if isinstance(sizer_model, EqualWeightOpen) and not portfolio.positions
+                    else sizer_model
+                )
+                converted = broker.convert(
+                    intent,
+                    ticker,
+                    SizingInputs(
+                        equity=portfolio.equity(),
+                        cash=portfolio.cash,
+                        n=n,
+                        positions={t: p.quantity for t, p in portfolio.positions.items()},
+                        last_close=dict(portfolio.marks),
+                    ),
+                    effective_sizer,
+                    adv(series[ticker], i),
+                    cost_model,
+                    cap,
+                    decision_date=u_date,
+                    intent_seq=intent_seq,
+                    counters=counters,
+                )
+                if converted is not None:
+                    broker.place(portfolio.pending, converted)
 
     # POR-02.3: posição aberta cuja série terminou antes do fim da união é
     # travada — marcada pelo último close (passo 2 já usa last_known até o
@@ -593,5 +772,8 @@ def run_backtest_multi(
         pending_dead=pending_dead,
         delisted=delisted,
         counters=counters,
-        borrow_fees=0.0,  # T03: o débito no close é da T08a; default 0 preserva a 2a
+        borrow_fees=borrow_fees,  # T08a: acumulado no débito do close
+        broken_fund=broken,  # T08a: RF-MRG-03 CA-03.1
+        margin=margin_model,
+        borrow=borrow_model,
     )

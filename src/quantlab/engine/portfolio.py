@@ -221,25 +221,22 @@ class Portfolio:
         """ENG-04.4/POR-04.3 — checada a cada barra pelo laço.
 
         Erro de programação, não condição de mercado: `Position` já barra
-        quantidade não positiva na construção, então o que sobra aqui é o
-        caixa e o ``k <= N`` (com `n`, o número de posições abertas não pode
-        exceder o N do run — SIZ-04.3). Caixa negativo num backtest sem
-        alavancagem só acontece se o cálculo de tamanho ignorou o custo
-        (design §4.4). A Fase 1 continua intacta: `check_invariants()` sem
-        argumento pula o ``k <= N``.
+        quantidade nula na construção, então o que sobra aqui é ``quantity ==
+        0`` e o ``k <= N`` (com `n`, o número de posições abertas não pode
+        exceder o N do run — SIZ-04.3). A Fase 1 continua intacta:
+        `check_invariants()` sem argumento pula o ``k <= N``.
+
+        2b (T08a, ADR-0009): o invariante `cash >= 0` da 2a foi SUBSTITUÍDO
+        por `equity >= margem` — checado no laço (close e pós-open), não
+        aqui. Caixa NEGATIVO é legal com margem (shorts, liquidação, borrow
+        fee); num backtest long-only sem alavancagem ele continua impossível
+        por construção (o sizing corta a quantidade para caber no caixa —
+        design §4.4), então a remoção deste guard não enfraquece a Fase 1.
+        `quantity < 0` = short é válido (T02); `quantity == 0` continua
+        inválido — zero ações não é posição (T01).
         """
         if n is not None and n < 1:
             raise EngineError(f"check_invariants: N do run inválido: {n}.")
-        if self.cash < 0:
-            raise EngineError(
-                f"Caixa negativo: {self.cash}. Num backtest long-only sem alavancagem "
-                "isso é erro de programação — provavelmente o custo não entrou no "
-                "cálculo da quantidade (design §4.4)."
-            )
-        # 2b (T02): `quantity < 0` = short passa a ser VÁLIDO (ADR-0009 — o
-        # relaxamento do invariante `qty >= 0` da 2a; a margem que o substitui
-        # é checada no laço, T08a). `quantity == 0` continua inválido — zero
-        # ações não é posição (T01).
         for ticker, position in self.positions.items():
             if position.quantity == 0:
                 raise EngineError(f"Posição zerada em {ticker}: quantity == 0.")

@@ -710,14 +710,24 @@ class Broker:
             )
             return
 
+        # 2b (emenda T08a, SHT-01.2/02.1): `ConvertedOrder.qty` carrega o
+        # SINAL do alvo (negativo em ENTER_SHORT); o side é DERIVADO aqui e o
+        # `PendingOrder.qty` vira a MAGNITUDE positiva — a negatividade nasce
+        # no Position/Trade (o executor short usa `order.qty` como magnitude).
+        if order.qty > 0:
+            side = Side.BUY
+            qty = order.qty
+        else:
+            side = Side.SELL
+            qty = -order.qty
         store.place(
             PendingOrder(
                 ticker=order.ticker,
                 kind=order.kind,
-                side=Side.BUY,
+                side=side,
                 limit=order.limit,
                 stop=order.stop,
-                qty=order.qty,
+                qty=qty,
                 decision_date=order.decision_date,
                 intent_seq=order.intent_seq,
                 bracket=False,
