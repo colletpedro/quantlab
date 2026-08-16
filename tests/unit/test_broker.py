@@ -22,7 +22,7 @@ from quantlab.engine.broker import (
     PendingOrder,
 )
 from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind, Side
-from quantlab.engine.portfolio import Portfolio, Trade
+from quantlab.engine.portfolio import Portfolio, Trade, TradeOrigin
 from quantlab.engine.sizing import FixedOneOverN, SizingInputs
 from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
@@ -736,7 +736,7 @@ def test_market_executes_at_open_with_slippage() -> None:
     trade = trades[0]
     assert trade.entry_price == pytest.approx(10.001)
     assert trade.entry_cost == pytest.approx(1.10001)
-    assert trade.origin is OrderKind.MARKET
+    assert trade.origin == TradeOrigin.MARKET
     assert trade.entry_gap_days == 2
     assert portfolio.cash == pytest.approx(2_000.0 - 1_000.1 - 1.10001)
     assert portfolio.positions[_TICKER].quantity == 100
@@ -756,7 +756,7 @@ def test_limit_fills_at_min_of_limit_and_open_and_cancels_otherwise() -> None:
     trades = _run(broker, book, portfolio, _bar(low=9.4))
     assert len(trades) == 1
     assert trades[0].entry_price == pytest.approx(9.5)
-    assert trades[0].origin is OrderKind.LIMIT
+    assert trades[0].origin == TradeOrigin.LIMIT
 
     # low 9.60 > 9.50 ⇒ cancela: sem trade, sem posição, book vazio.
     book2 = PendingBook()
@@ -800,7 +800,7 @@ def test_limit_never_violated_on_either_side() -> None:
     assert exit_price is not None
     assert exit_price == pytest.approx(12.0)
     assert exit_price >= 12.0
-    assert trades2[0].origin is OrderKind.LIMIT
+    assert trades2[0].origin == TradeOrigin.LIMIT
     assert portfolio2.positions == {}  # saída integral (D3)
 
 
@@ -824,7 +824,7 @@ def test_sell_stop_triggers_at_min_of_stop_and_open_with_slippage() -> None:
     trades = _run(broker, book, portfolio, _bar(open_=9.5, low=8.5))
     assert len(trades) == 1
     assert trades[0].exit_price == pytest.approx(9.0 * (1 - 1e-4))
-    assert trades[0].origin is OrderKind.STOP
+    assert trades[0].origin == TradeOrigin.STOP
     assert portfolio.positions == {}  # stop vende a posição inteira (D3)
     assert book.pending_for(_TICKER) == ()  # disparado ⇒ consumido
 
@@ -1061,7 +1061,7 @@ def test_intrabar_ambiguity_exit_bracket_worst_case() -> None:
     assert trade.exit_price is not None
     assert trade.exit_price == pytest.approx(9.0)  # o stop em S — não max(12, open)
     assert trade.ambiguous is True
-    assert trade.origin is OrderKind.STOP
+    assert trade.origin == TradeOrigin.STOP
     assert portfolio.positions == {}  # uma única saída — sem "ambos executam"
     assert book.pending_for(_TICKER) == ()
     # Caixa: uma venda só (qty x 9 - custo), não TP + stop.
@@ -1190,7 +1190,7 @@ def test_exit_bracket_only_tp_touched() -> None:
     trade = trades[0]
     assert trade.exit_price == pytest.approx(12.0)  # max(TP, open), sem slippage
     assert trade.ambiguous is False
-    assert trade.origin is OrderKind.LIMIT
+    assert trade.origin == TradeOrigin.LIMIT
     assert portfolio.positions == {}
     assert book.pending_for(_TICKER) == ()  # par completo — sem stop sobre posição fechada
 
@@ -1232,7 +1232,7 @@ def test_exit_bracket_only_stop_touched() -> None:
     # min(S, open) = min(9.0, 9.4) = 9.0, venda: 9.0 x (1 - 1e-4) = 8.9991
     assert trade.exit_price == pytest.approx(9.0 * (1 - 1e-4))
     assert trade.ambiguous is False
-    assert trade.origin is OrderKind.STOP
+    assert trade.origin == TradeOrigin.STOP
     assert portfolio.positions == {}
     assert book.pending_for(_TICKER) == ()  # TP cancelado, par completo
 
@@ -1330,7 +1330,7 @@ def test_rebalance_market_sell_closes_partial() -> None:
     closed = trades[0]
     assert closed.quantity == 40
     assert closed.rebalance is True
-    assert closed.origin is OrderKind.MARKET
+    assert closed.origin == TradeOrigin.MARKET
     assert closed.entry_price == pytest.approx(10.0)
     assert closed.exit_price == pytest.approx(11.0 * (1 - 1e-4))  # slippage na venda
     remaining = portfolio.positions[_TICKER]

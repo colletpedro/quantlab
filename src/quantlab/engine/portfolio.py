@@ -27,15 +27,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from quantlab.engine.conditional import OrderKind
 from quantlab.exceptions import EngineError
 
 if TYPE_CHECKING:  # mypy apenas — evita ciclo broker ⇄ portfolio em runtime
     from quantlab.engine.broker import CutStage, PendingBook
 
-__all__ = ["Portfolio", "Position", "Trade"]
+__all__ = ["Portfolio", "Position", "Trade", "TradeOrigin"]
+
+
+class TradeOrigin(StrEnum):
+    """Origem da execução de um `Trade` — auditoria (2b, T01, design §3.2).
+
+    `MARKET`/`LIMIT`/`STOP` **espelham** `OrderKind` com os MESMOS valores
+    (compat 2a — comparação por valor, não por identidade: `TradeOrigin.STOP
+    == OrderKind.STOP`); `MARGIN_CALL` é novo e **só existe como origin de
+    Trade** — nunca como `PendingOrder.kind` (a ordem subjacente é MARKET,
+    ADR-0009/RF-MRG-02 CA-02.3).
+    """
+
+    MARKET = "market"
+    LIMIT = "limit"
+    STOP = "stop"
+    MARGIN_CALL = "margin_call"
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,7 +81,7 @@ class Trade:
     #: Fase 2a (§3.6, T08): origem da execução (auditoria ENG-01.2/ORD-04.4),
     #: etapa do corte no sizing (CST-01.3/R1) e ambiguidade intrabarra
     #: (ORD-03/ADR-0007). Defaults preservam os caminhos da Fase 1.
-    origin: OrderKind | None = None
+    origin: TradeOrigin | None = None
     cut_reason: CutStage | None = None
     ambiguous: bool = False
     #: Fase 2a (T11a): trade de rebalanceamento (SIZ-03.2/CA-03.2) — contado
@@ -99,7 +115,13 @@ class Trade:
 
 @dataclass(frozen=True, slots=True)
 class Position:
-    """Posição aberta em um ticker. Long-only: `quantity` nunca é negativa."""
+    """Posição aberta em um ticker. Fase 2b: `quantity < 0` = short (D3/ADR-0009).
+
+    O relaxamento de `quantity >= 0` (invariante da 2a, POR-04.3) é coberto
+    pelo ADR-0009 (RNF-09): `quantity < 0` passa a ser válido (short);
+    `quantity == 0` continua inválido — zero ações não é posição, é lixo no
+    dicionário esperando virar divisão por zero em `analytics`.
+    """
 
     ticker: str
     quantity: int
@@ -107,10 +129,10 @@ class Position:
     entry_date: date
 
     def __post_init__(self) -> None:
-        if self.quantity <= 0:
+        if self.quantity == 0:
             raise EngineError(
-                f"Posição em {self.ticker} com quantidade {self.quantity}. "
-                "A Fase 1 é long-only (premissa 2): posição existe com quantidade > 0, "
+                f"Posição em {self.ticker} com quantidade 0 — posição existe com "
+                "quantidade != 0 (positiva = long, negativa = short, 2b/ADR-0009), "
                 "ou não existe."
             )
 

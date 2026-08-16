@@ -64,16 +64,21 @@ def test_position_market_value_is_quantity_times_price() -> None:
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("quantity", [0, -1, -100])
-def test_position_with_non_positive_quantity_is_rejected(quantity: int) -> None:
-    """Long-only (premissa 2): posição existe com quantidade > 0, ou não existe.
+def test_position_with_zero_quantity_is_rejected() -> None:
+    """Zero ações não é posição — lixo no dicionário esperando virar divisão por
+    zero em `analytics` (2b, T01: o invariante relaxado pelo ADR-0009 aceita
+    `quantity < 0` = short; `== 0` continua inválido)."""
+    with pytest.raises(EngineError):
+        Position(ticker=_TICKER, quantity=0, entry_price=100.0, entry_date=_ENTRY)
 
-    Quantidade zero é rejeitada junto com a negativa de propósito — uma
-    posição de zero ações não é uma posição, é lixo no dicionário esperando
-    virar divisão por zero em `analytics`.
-    """
-    with pytest.raises(EngineError, match="long-only"):
-        Position(ticker=_TICKER, quantity=quantity, entry_price=100.0, entry_date=_ENTRY)
+
+@pytest.mark.unit
+def test_position_accepts_negative_quantity_as_short() -> None:
+    """2b (T01, RF-SHT-01/D3): `quantity < 0` é posição short válida — o
+    relaxamento de `qty >= 0` (POR-04.3 da 2a) é coberto pelo ADR-0009."""
+    position = Position(ticker=_TICKER, quantity=-100, entry_price=100.0, entry_date=_ENTRY)
+    assert position.quantity == -100
+    assert position.market_value(90.0) == pytest.approx(-9_000.0)
 
 
 # ─── Trade ───────────────────────────────────────────────────────────────────

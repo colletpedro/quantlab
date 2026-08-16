@@ -27,7 +27,7 @@ from enum import StrEnum
 
 from quantlab.engine.conditional import ConditionalIntent, OrderKind, Side
 from quantlab.engine.liquidity import participation_cap
-from quantlab.engine.portfolio import Portfolio, Position, Trade
+from quantlab.engine.portfolio import Portfolio, Position, Trade, TradeOrigin
 from quantlab.engine.sizing import Sizer, SizingInputs
 from quantlab.engine.slippage import SlippageModel
 from quantlab.engine.strategy import Signal
@@ -241,7 +241,7 @@ class MechanismCounters:
     Bloco "contadores de mecanismo" do relatório — incrementados APENAS pelo
     engine (design §3.8), nunca pelo relatório. `stops_triggered` e
     `intrabar_ambiguities` são derivados pelo laço (T16) dos trades de
-    execução (``origin == OrderKind.STOP`` / ``ambiguous`` — 1 trade por
+    execução (``origin == TradeOrigin.STOP`` / ``ambiguous`` — 1 trade por
     ocorrência, ADR-0007/D2); `unfilled_cash_orders` é incrementado aqui no
     broker, onde o evento acontece: o `convert` (nem 1 ação após custos) e o
     `execute_pending` (caixa insuficiente na barra de execução) — Q5/POR-01.2.
@@ -350,13 +350,13 @@ class Broker:
         price: float,
         execution_date: date,
         decision_date: date,
-        origin: OrderKind | None = None,
+        origin: TradeOrigin | None = None,
         ambiguous: bool | None = None,
     ) -> Trade | None:
         """ENG-02.2 + decisão D3 — liquida a posição inteira, volta a 100% caixa.
 
-        `origin` (2a, T08): MARKET/LIMIT/STOP — auditoria do ENG-01.2
-        (ORD-04.4). `ambiguous` (T09): ``None`` preserva o flag da entrada;
+        `origin` (2a, T08; 2b, T01 — `TradeOrigin`): MARKET/LIMIT/STOP —
+        auditoria do ENG-01.2 (ORD-04.4). `ambiguous` (T09): ``None`` preserva o flag da entrada;
         ``True``/``False`` força — a ambiguidade intrabarra é da SAÍDA
         (ADR-0007). `None` preserva o caminho da Fase 1.
         """
@@ -394,7 +394,7 @@ class Broker:
         cost: float,
         execution_date: date,
         decision_date: date,
-        origin: OrderKind | None = None,
+        origin: TradeOrigin | None = None,
         ambiguous: bool | None = None,
         rebalance: bool | None = None,
     ) -> Trade:
@@ -787,7 +787,7 @@ class Broker:
                         price=price,
                         execution_date=bar.date,
                         decision_date=order.decision_date,
-                        origin=OrderKind.STOP,
+                        origin=TradeOrigin.STOP,
                     )
                     assert closed is not None  # posição existe — sell nunca devolve None aqui
                     trades.append(closed)
@@ -811,7 +811,7 @@ class Broker:
                         price=price,
                         execution_date=bar.date,
                         decision_date=order.decision_date,
-                        origin=OrderKind.LIMIT,
+                        origin=TradeOrigin.LIMIT,
                     )
                     assert closed is not None  # posição existe — sell nunca devolve None aqui
                     trades.append(closed)
@@ -838,7 +838,7 @@ class Broker:
                     price=price,
                     execution_date=bar.date,
                     decision_date=order.decision_date,
-                    origin=OrderKind.MARKET,
+                    origin=TradeOrigin.MARKET,
                     rebalance=True,
                 )
                 if closed is not None:
@@ -908,7 +908,7 @@ class Broker:
                     price=stop_price,
                     execution_date=bar.date,
                     decision_date=limit_order.decision_date,
-                    origin=OrderKind.STOP,
+                    origin=TradeOrigin.STOP,
                     ambiguous=True,
                 )
                 assert closed is not None  # posição acabou de abrir
@@ -979,7 +979,7 @@ class Broker:
                 price=stop_price,
                 execution_date=bar.date,
                 decision_date=tp_order.decision_date,
-                origin=OrderKind.STOP,
+                origin=TradeOrigin.STOP,
                 ambiguous=True,
             )
             assert closed is not None  # posição aberta (pré-condição do par)
@@ -995,7 +995,7 @@ class Broker:
                 price=max(tp_price, bar.open),
                 execution_date=bar.date,
                 decision_date=tp_order.decision_date,
-                origin=OrderKind.LIMIT,
+                origin=TradeOrigin.LIMIT,
             )
             assert closed is not None  # posição aberta (pré-condição do par)
             trades.append(closed)
@@ -1014,7 +1014,7 @@ class Broker:
                 price=price,
                 execution_date=bar.date,
                 decision_date=tp_order.decision_date,
-                origin=OrderKind.STOP,
+                origin=TradeOrigin.STOP,
             )
             assert closed is not None
             trades.append(closed)
@@ -1033,7 +1033,7 @@ class Broker:
         price: float,
         execution_date: date,
         decision_date: date,
-        origin: OrderKind | None = None,
+        origin: TradeOrigin | None = None,
         rebalance: bool = True,
     ) -> Trade | None:
         """Venda PARCIAL da posição aberta (rebalance — SIZ-03, T11a).
@@ -1220,7 +1220,7 @@ class Broker:
             quantity=qty,
             entry_cost=cost,
             entry_gap_days=(bar.date - order.decision_date).days,
-            origin=order.kind,
+            origin=TradeOrigin(order.kind.value),  # valores idênticos — compat 2a (T01)
             cut_reason=cut_reason,
             ambiguous=ambiguous,
             rebalance=order.rebalance,

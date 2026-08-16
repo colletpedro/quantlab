@@ -20,7 +20,7 @@ from quantlab.engine.calendar import UnionCalendar
 from quantlab.engine.conditional import ConditionalStrategy, OrderKind, Side
 from quantlab.engine.liquidity import adv
 from quantlab.engine.market_view import MarketView
-from quantlab.engine.portfolio import Portfolio, Trade
+from quantlab.engine.portfolio import Portfolio, Trade, TradeOrigin
 from quantlab.engine.sizing import (
     EqualWeightOpen,
     FixedOneOverN,
@@ -449,7 +449,7 @@ def run_backtest_multi(
                         price=float(series_x.open[i]),
                         execution_date=bar.date,
                         decision_date=decision,
-                        origin=OrderKind.MARKET,
+                        origin=TradeOrigin.MARKET,
                     )
                 # EXIT sem posição (Q2) — consumido e logado pelo broker.
             filled = broker.execute_pending(
@@ -465,7 +465,7 @@ def run_backtest_multi(
             # MET-05 (T16): 1 trade de venda por stop disparado (origin=STOP,
             # incluindo o stop do bracket ambíguo — T09) e 1 trade ambíguo por
             # ocorrência (ADR-0007/D2).
-            counters.stops_triggered += sum(1 for t in filled if t.origin == OrderKind.STOP)
+            counters.stops_triggered += sum(1 for t in filled if t.origin == TradeOrigin.STOP)
             counters.intrabar_ambiguities += sum(1 for t in filled if t.ambiguous)
         portfolio.check_invariants(n)
 

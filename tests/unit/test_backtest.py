@@ -17,6 +17,7 @@ from quantlab.engine.backtest import BacktestResultMulti, run_backtest, run_back
 from quantlab.engine.broker import CostModel
 from quantlab.engine.conditional import ConditionalIntent, OrderKind
 from quantlab.engine.market_view import MarketView
+from quantlab.engine.portfolio import TradeOrigin
 from quantlab.engine.sizing import EqualWeightOpen, SizingInputs
 from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
@@ -843,7 +844,7 @@ def test_conditional_intent_flows_through_the_loop() -> None:
     assert len(trades) == 1
     assert trades[0].entry_date == _D0 + timedelta(days=1)
     assert trades[0].entry_price == pytest.approx(11.0)  # min(11, open 11) — sem slippage
-    assert trades[0].origin is OrderKind.LIMIT
+    assert trades[0].origin == TradeOrigin.LIMIT
 
 
 @pytest.mark.unit

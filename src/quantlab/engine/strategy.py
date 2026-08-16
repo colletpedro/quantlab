@@ -31,10 +31,18 @@ class Signal(StrEnum):
 
     `StrEnum` para que o valor sobreviva a `backtest_runs` (§3.5) e volte de lá
     sem conversão manual — mesma razão de `CorporateActionKind`.
+
+    **Fase 2b (T01, RF-SHT-01/D3):** `ENTER_SHORT`/`EXIT_SHORT` são
+    **opcionais e retrocompatíveis** — uma estratégia long-only (Fase 1/2a)
+    emite apenas `ENTER`/`EXIT` e roda sem mudança de comportamento
+    (SHT-01.1). A **direção é decisão da estratégia, no sinal** — o sizer
+    nunca decide direção (D3); a conversão aplica o sinal (T02).
     """
 
     ENTER = "enter"
     EXIT = "exit"
+    ENTER_SHORT = "enter_short"  # venda a descoberto — alvo NEGATIVO (SHT-01.2)
+    EXIT_SHORT = "exit_short"  # cobertura — reduz |qty| até 0, sem cruzar (SHT-01.3)
 
 
 @runtime_checkable

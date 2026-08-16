@@ -30,6 +30,7 @@ from quantlab.engine.backtest import run_backtest_multi
 from quantlab.engine.broker import CostModel
 from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind
 from quantlab.engine.market_view import MarketView
+from quantlab.engine.portfolio import TradeOrigin
 from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
 from quantlab.storage.series import PriceSeries
@@ -168,7 +169,7 @@ def test_eng_012_execution_binds_to_order_via_decision_date() -> None:
     by_ticker = {t.ticker: t for t in trades}
 
     closed = by_ticker["A"]
-    assert closed.origin is OrderKind.STOP  # a origem final é a da saída
+    assert closed.origin == TradeOrigin.STOP  # a origem final é a da saída
     assert closed.entry_decision_date == _D0 + timedelta(days=1)  # decisão em d1
     assert closed.entry_date == _D0 + timedelta(days=2)  # execução em d2
     assert closed.entry_decision_date < closed.entry_date
@@ -176,12 +177,12 @@ def test_eng_012_execution_binds_to_order_via_decision_date() -> None:
     assert closed.exit_decision_date < closed.exit_date  # type: ignore[operator]
 
     opened = by_ticker["B"]
-    assert opened.origin is OrderKind.LIMIT
+    assert opened.origin == TradeOrigin.LIMIT
     assert opened.entry_decision_date < opened.entry_date
 
     # Auditoria sobre TODOS os trades do run: origem condicional + vínculo.
     for trade in trades:
-        assert trade.origin in {OrderKind.LIMIT, OrderKind.STOP}
+        assert trade.origin in {TradeOrigin.LIMIT, TradeOrigin.STOP}
         assert trade.entry_decision_date < trade.entry_date
         if trade.exit_date is not None:
             assert trade.exit_decision_date is not None
