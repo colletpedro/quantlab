@@ -15,8 +15,11 @@ import pytest
 from quantlab.analytics.metrics import (
     avg_exposure,
     cagr,
+    gross_exposure_avg,
     hit_rate,
+    margin_utilization_avg,
     max_drawdown,
+    net_exposure_avg,
     sharpe,
     turnover_annualized,
 )
@@ -370,3 +373,116 @@ def test_average_exposure_domain_errors_raise_engine_error() -> None:
         )
     with pytest.raises(EngineError):
         avg_exposure(notional, pd.Series([100_000.0, 0.0]))  # equity não positiva
+
+
+# ─── 2b (T09): exposição gross/net e utilização de margem (RF-MRG-04) ─────────
+
+
+@pytest.mark.unit
+def test_gross_and_net_exposure_formulas_side_by_side() -> None:
+    """CA-04.1 (RF-MRG-04) — gross e net lado a lado no MESMO run, em forma
+    fechada derivada à mão (RNF-03).
+
+    Carteira de papel por dia (long A + short B), equity 10.000 constante:
+      dia 1: long 100 x 20 = 2.000, short -100 x 10 = -1.000
+             ⇒ gross 3.000 (|2.000| + |-1.000|), net 1.000 (2.000 - 1.000)
+      dia 2: long 100 x 25 = 2.500, short -100 x 15 = -1.500
+             ⇒ gross 4.000, net 1.000
+      dia 3: long 100 x 15 = 1.500, short -100 x 20 = -2.000
+             ⇒ gross 3.500, net -500 (short líquido)
+    razões gross/equity = [0.3, 0.4, 0.35] ⇒ média 0.35
+    razões net/equity   = [0.1, 0.1, -0.05] ⇒ média 0.05
+    """
+    daily_gross_notional = [3_000.0, 4_000.0, 3_500.0]
+    daily_net_notional = [1_000.0, 1_000.0, -500.0]
+    equity_daily = [10_000.0, 10_000.0, 10_000.0]
+
+    gross = gross_exposure_avg(daily_gross_notional, equity_daily)
+    net = net_exposure_avg(daily_net_notional, equity_daily)
+
+    assert gross == pytest.approx(0.35)
+    assert net == pytest.approx(0.05)
+    # Determinismo (RNF-01): mesma entrada ⇒ mesmo valor (função pura).
+    assert gross_exposure_avg(daily_gross_notional, equity_daily) == gross
+    assert net_exposure_avg(daily_net_notional, equity_daily) == net
+
+
+@pytest.mark.unit
+def test_leveraged_gross_gt_100_reported_with_margin_utilization() -> None:
+    """CA-04.2 (RF-MRG-04) — gross pode EXCEDER 100% (alavancada com margem):
+    a métrica devolve o número > 1 (a renderização lado a lado com a
+    utilização é a T12 — "reportado"). Forma fechada à mão:
+
+      dia 1: gross 25.000/10.000 = 2,5; margem 12.500/10.000 = 1,25
+      dia 2: gross 20.000/10.000 = 2,0; margem 10.000/10.000 = 1,0
+    médias: gross (2,5 + 2,0)/2 = 2,25 (225%); utilização 1,125 (112,5%).
+    """
+    gross = gross_exposure_avg([25_000.0, 20_000.0], [10_000.0, 10_000.0])
+    utilization = margin_utilization_avg([12_500.0, 10_000.0], [10_000.0, 10_000.0])
+
+    assert gross == pytest.approx(2.25)  # 225% > 100% — alavancada
+    assert utilization == pytest.approx(1.125)
+
+
+@pytest.mark.unit
+def test_margin_utilization_avg_none_on_broken_fund() -> None:
+    """R6 (MRG-01 CA-01.4) — equity <= 0 (fundo quebrado) ⇒ None explícito,
+    nunca NaN nem zero fabricado; um único dia quebrado contamina a média
+    inteira (nada de média parcial sobre os dias válidos)."""
+    assert margin_utilization_avg([10_000.0], [-5_000.0]) is None  # equity negativa
+    assert margin_utilization_avg([10_000.0], [0.0]) is None  # equity zero
+    assert margin_utilization_avg([10_000.0, 10_000.0], [10_000.0, -1.0]) is None
+    # Controle saudável: não é None e o valor fecha.
+    assert margin_utilization_avg([10_000.0], [10_000.0]) == pytest.approx(1.0)
+
+
+@pytest.mark.unit
+def test_turnover_closed_form_with_shorts() -> None:
+    """RF-MRG-04 — turnover com |notional|: shorts contam IGUAL a longs
+    (notional absoluto; a fórmula da 2a já funciona com qty < 0 — design §7,
+    turnover 2a INTOCADA). Forma fechada à mão:
+
+    Short de 1.000@100 coberto a 100 ⇒ |notional venda| 100k + |notional
+    compra| 100k = 200k; equity média 100k; n_bars = 2 ⇒ turnover =
+    200k/(2 x 100k) x (252/2) = 126. O round-trip LONG idêntico (1.000@100
+    comprado, vendido a 100) dá o MESMO 126 — simetria por |qty|.
+    """
+    short = [_notional_trade(-1_000, 100.0, 100.0)]  # qty < 0 (2b, T01)
+    long_trip = [_notional_trade(1_000, 100.0, 100.0)]
+    equity_daily = pd.Series([100_000.0, 100_000.0])
+
+    short_turnover = turnover_annualized(short, equity_daily, n_bars=2)
+    long_turnover = turnover_annualized(long_trip, equity_daily, n_bars=2)
+
+    assert short_turnover == pytest.approx(126.0)
+    assert long_turnover == pytest.approx(126.0)  # |qty| — mesma pegada
+
+
+@pytest.mark.unit
+def test_exposure_domain_errors_raise_engine_error() -> None:
+    """§3.8 (RF-MRG-04, mesmo padrão da T14) — séries vazias/desalinhadas
+    (comprimento) e equity não positiva => EngineError para gross/net; para
+    margin_utilization_avg, equity <= 0 é o caso R6 (None), nunca erro."""
+    gross = [3_000.0, 4_000.0]
+    net = [1_000.0, -500.0]
+    req = [12_500.0, 10_000.0]
+    equity = [10_000.0, 10_000.0]
+
+    with pytest.raises(EngineError):
+        gross_exposure_avg([], equity)
+    with pytest.raises(EngineError):
+        net_exposure_avg([], equity)
+    with pytest.raises(EngineError):
+        margin_utilization_avg([], equity)
+    with pytest.raises(EngineError):
+        gross_exposure_avg(gross, [10_000.0])  # comprimentos diferentes
+    with pytest.raises(EngineError):
+        net_exposure_avg(net, [10_000.0])
+    with pytest.raises(EngineError):
+        margin_utilization_avg(req, [10_000.0])
+    with pytest.raises(EngineError):
+        gross_exposure_avg(gross, [10_000.0, 0.0])  # equity não positiva
+    with pytest.raises(EngineError):
+        net_exposure_avg(net, [10_000.0, -1.0])
+    # margin_utilization_avg com equity <= 0 NÃO é erro — é None (R6).
+    assert margin_utilization_avg(req, [10_000.0, 0.0]) is None

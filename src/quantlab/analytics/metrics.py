@@ -8,6 +8,7 @@ checagem de amostra insuficiente (ANA-01.5) é responsabilidade do relatório
 """
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import cast
@@ -25,8 +26,11 @@ __all__ = [
     "cagr",
     "contribution_per_asset",
     "daily_returns",
+    "gross_exposure_avg",
     "hit_rate",
+    "margin_utilization_avg",
     "max_drawdown",
+    "net_exposure_avg",
     "reconcile_multi",
     "sharpe",
     "turnover_annualized",
@@ -312,3 +316,69 @@ def avg_exposure(daily_notional: pd.Series, equity_daily: pd.Series) -> float:
     if (equity_daily <= 0).any():
         raise EngineError("avg_exposure: equity deve ser estritamente positiva (RF-MET-04).")
     return float((daily_notional / equity_daily).mean())
+
+
+# ─── 2b (T09): exposição gross/net e utilização de margem (RF-MRG-04) ─────────
+
+
+def gross_exposure_avg(
+    daily_gross_notional: Sequence[float], equity_daily: Sequence[float]
+) -> float:
+    """Exposição GROSS média (RF-MRG-04/D4, design §7) — média diária de
+    ``(Σᵢ |qtyᵢ| x closeᵢ) / equity``: longs e shorts SOMAM (risco real),
+    pode EXCEDER 100% (alavancada com margem — CA-04.2). MESMA definição
+    para estratégia e benchmark (MET-04.2 da 2a, herdado). Função PURA.
+
+    Raises:
+        EngineError: séries vazias/desalinhadas (comprimento) ou equity não
+            positiva em algum dia (divisão indefinida — mesmo padrão da T14).
+    """
+    if not daily_gross_notional or not equity_daily:
+        raise EngineError("gross_exposure_avg: séries vazias (RF-MRG-04).")
+    if len(daily_gross_notional) != len(equity_daily):
+        raise EngineError("gross_exposure_avg: séries desalinhadas (RF-MRG-04).")
+    if any(e <= 0 for e in equity_daily):
+        raise EngineError("gross_exposure_avg: equity deve ser estritamente positiva (RF-MRG-04).")
+    ratios = [g / e for g, e in zip(daily_gross_notional, equity_daily, strict=True)]
+    return float(sum(ratios) / len(ratios))
+
+
+def net_exposure_avg(daily_net_notional: Sequence[float], equity_daily: Sequence[float]) -> float:
+    """Exposição NET média (RF-MRG-04/D4, design §7) — média diária de
+    ``(Σᵢ qtyᵢ x closeᵢ) / equity``: longs e shorts se CANCELAM, pode ser
+    NEGATIVA (short líquido — CA-04.1). MESMA definição para estratégia e
+    benchmark (MET-04.2 da 2a, herdado). Função PURA.
+
+    Raises:
+        EngineError: séries vazias/desalinhadas (comprimento) ou equity não
+            positiva em algum dia (divisão indefinida — mesmo padrão da T14).
+    """
+    if not daily_net_notional or not equity_daily:
+        raise EngineError("net_exposure_avg: séries vazias (RF-MRG-04).")
+    if len(daily_net_notional) != len(equity_daily):
+        raise EngineError("net_exposure_avg: séries desalinhadas (RF-MRG-04).")
+    if any(e <= 0 for e in equity_daily):
+        raise EngineError("net_exposure_avg: equity deve ser estritamente positiva (RF-MRG-04).")
+    ratios = [n / e for n, e in zip(daily_net_notional, equity_daily, strict=True)]
+    return float(sum(ratios) / len(ratios))
+
+
+def margin_utilization_avg(
+    daily_requirement: Sequence[float], equity_daily: Sequence[float]
+) -> float | None:
+    """Utilização de margem média (MRG-01 CA-01.4/R6, design §7) — média
+    diária de ``margem_exigida / equity``. ALGUM dia com equity <= 0 ⇒
+    ``None`` explícito (fundo quebrado — nunca NaN, nunca média parcial
+    fabricada sobre os dias válidos; R6). Função PURA.
+
+    Raises:
+        EngineError: séries vazias/desalinhadas (erro de programação — §3.8).
+    """
+    if not daily_requirement or not equity_daily:
+        raise EngineError("margin_utilization_avg: séries vazias (RF-MRG-04).")
+    if len(daily_requirement) != len(equity_daily):
+        raise EngineError("margin_utilization_avg: séries desalinhadas (RF-MRG-04).")
+    if any(e <= 0 for e in equity_daily):
+        return None
+    ratios = [r / e for r, e in zip(daily_requirement, equity_daily, strict=True)]
+    return float(sum(ratios) / len(ratios))

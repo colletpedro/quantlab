@@ -69,7 +69,7 @@ T01–T07; T09 depende de T08b; T10–T13 dependem da cadeia completa.
 | T07 | Ambiguidades intrabarra com buy-stop | T06 | RF-ORD-06 | ✅ |
 | T08a | Laço 2b — fechamento (fee → margem → MARGIN_CALL → fundo quebrado) | T03, T05 | RF-SHT-03, RF-MRG-01/02/03 | ✅ |
 | T08b | Laço 2b — abertura/bordas (executa MARGIN_CALL, contadores, short deslistado) | T06, T07, T08a | RF-MRG-02, RF-SHT-05, RF-ORD-06 | ✅ |
-| T09 | Exposição gross/net + turnover | T08b | RF-MRG-04 | ⬜ |
+| T09 | Exposição gross/net + turnover | T08b | RF-MRG-04 | ✅ |
 | T10 | Folds/grid/seleção + sharpe_annualized_rf0 único | T08b | RF-WFK-01, RF-WFK-02 | ⬜ |
 | T11a | run_walkforward + orçamento do WF | T10 | RF-WFK-03, RF-WFK-05 | ⬜ |
 | T11b | Mutação ENG-01.2 estendida ao OOS (teste puro) | T11a | RF-WFK-04 | ⬜ |
@@ -537,6 +537,21 @@ Relatório (T12).
 - [ ] `test_leveraged_gross_gt_100_reported_with_margin_utilization` — valor
   > 100% em forma fechada (CA-04.2; o "reportado" é T12)
 - [ ] `test_margin_utilization_avg_none_on_broken_fund` — R6
+- [ ] `test_turnover_closed_form_with_shorts` — NOVO, registrado aqui (não
+  existia no design §10): turnover com |notional| em forma fechada (short
+  x long simétricos por |qty|; a fórmula da 2a fica INTOCADA — design §7)
+- [ ] **HARDENING BLOQUEADO — registrado (não há teste):** o guard `not
+  broken` do rebalance (SIZ-03, 2a) não tem fixture construtível na 2b. O
+  rebalance é LONG-ONLY por construção (`rebalance_deviation_pp` rejeita
+  peso fora de [0, 1] — peso de short é negativo ⇒ EngineError no primeiro
+  k-change com short no portfolio), e fundo quebrado exige short (equity
+  long-only ≥ 0 por construção — o sizing nunca deixa caixa negativo). Logo
+  qualquer k-change com short CRASHA antes de qualquer estado quebrado
+  alcançável, e o guard `not broken` é inalcançável (defesa em profundidade
+  morta). GAP 2b descoberto: EqualWeightOpen × short = EngineError —
+  decisão de design para tarefa futura (rebalance com pesos negativos/
+  alavancagem não é definido no design §4 passo 2b, que declara o rebalance
+  "2a, inalterado")
 - [ ] Testes antigos de métricas continuam VERDES (regressão zero)
 
 **Riscos**
