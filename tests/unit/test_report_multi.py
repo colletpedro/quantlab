@@ -132,6 +132,7 @@ def test_report_mechanism_counters_block() -> None:
         "stops_triggered": 2,
         "intrabar_ambiguities": 1,
         "unfilled_cash_orders": 1,
+        "borrow_rejections": 0,  # 2b (T03) — novo contador, zero sem shorts
     }
 
 

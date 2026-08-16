@@ -331,6 +331,10 @@ class BacktestResultMulti:
     #: MET-05/P6 (T16) — contadores de mecanismo, agregados pelo laço; o
     #: relatório só reporta (design §3.8).
     counters: MechanismCounters = field(default_factory=MechanismCounters)
+    #: 2b (T03, RF-SHT-03): Σ borrow fees debitados no close — termo próprio
+    #: da conciliação (§6); acumulado no laço (T08a). Default 0 preserva os
+    #: runs long-only da 2a.
+    borrow_fees: float = 0.0
 
     @property
     def final_equity(self) -> float:
@@ -589,4 +593,5 @@ def run_backtest_multi(
         pending_dead=pending_dead,
         delisted=delisted,
         counters=counters,
+        borrow_fees=0.0,  # T03: o débito no close é da T08a; default 0 preserva a 2a
     )

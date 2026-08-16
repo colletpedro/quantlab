@@ -171,17 +171,23 @@ class ReconciliationReport:
     realized_pnl: float
     unrealized_pnl: float
     total_costs: float
+    #: 2b (T03, RF-SHT-04/§6): custo de aluguel — TERMO PRÓPRIO, entra UMA
+    #: única vez na identidade (a armadilha da dupla contagem da T13 vale
+    #: também para o fee: nunca somá-lo dentro de `total_costs` E aqui).
+    total_borrow_fees: float = 0.0
 
     @property
     def reconciles(self) -> bool:
-        """Identidade de §6: ``final - inicial ≡ Σ realizado + Σ não-realizado - Σ custos``.
+        """Identidade de §6: ``final - inicial ≡ Σ realizado + Σ não-realizado
+        - Σ custos - Σ borrow_fees`` (2b).
 
         `math.isclose(rel_tol=1e-9)`, conforme RNF-08 — nunca igualdade exata:
         dinheiro é float e os dois lados percorrem caminhos de arredondamento
-        diferentes.
+        diferentes. Com `qty < 0` o realizado/não-realizado já carrega o sinal
+        (SHT-04 CA-04.2).
         """
         left = self.final_equity - self.initial_equity
-        right = self.realized_pnl + self.unrealized_pnl - self.total_costs
+        right = self.realized_pnl + self.unrealized_pnl - self.total_costs - self.total_borrow_fees
         return math.isclose(left, right, rel_tol=_RECONCILIATION_REL_TOL, abs_tol=1e-9)
 
 
@@ -230,6 +236,9 @@ def reconcile_multi(result: BacktestResultMulti) -> ReconciliationReport:
         realized_pnl=parts.realized,
         unrealized_pnl=parts.unrealized,
         total_costs=parts.costs,
+        # 2b (T03): termo próprio, acumulado no laço (T08a) — aqui lido do
+        # resultado; o teste fecha com o valor em forma fechada (CA-04.2).
+        total_borrow_fees=result.borrow_fees,
     )
 
 

@@ -27,6 +27,7 @@ from enum import StrEnum
 
 from quantlab.engine.conditional import ConditionalIntent, OrderKind, Side
 from quantlab.engine.liquidity import participation_cap
+from quantlab.engine.margin import BorrowFeeModel
 from quantlab.engine.portfolio import Portfolio, Position, Trade, TradeOrigin
 from quantlab.engine.sizing import Sizer, SizingInputs
 from quantlab.engine.slippage import SlippageModel
@@ -252,12 +253,16 @@ class MechanismCounters:
     stops_triggered: int = 0
     intrabar_ambiguities: int = 0
     unfilled_cash_orders: int = 0
+    #: 2b (T03, RF-SHT-03 CA-03.4) — ENTER_SHORT bloqueado por indisponibilidade
+    #: de aluguel; contado no `convert`, onde o evento acontece (dono §3.7).
+    borrow_rejections: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
             "stops_triggered": self.stops_triggered,
             "intrabar_ambiguities": self.intrabar_ambiguities,
             "unfilled_cash_orders": self.unfilled_cash_orders,
+            "borrow_rejections": self.borrow_rejections,
         }
 
 
@@ -447,6 +452,7 @@ class Broker:
         decision_date: date,
         intent_seq: int,
         counters: MechanismCounters | None = None,
+        borrow: BorrowFeeModel | None = None,
     ) -> ConvertedOrder | None:
         """Converte a intenção de ENTRADA em ordem pronta para `place` (T06).
 
@@ -498,6 +504,19 @@ class Broker:
                 else (intent.bracket.stop if intent.bracket is not None else None)
             )
             bracket = intent.bracket is not None
+
+        if short and borrow is not None and not borrow.is_available(ticker, decision_date):
+            # 2b (T03, RF-SHT-03 CA-03.4 direita): aluguel indisponível ⇒ a
+            # ordem NÃO executa, logada e contada (borrow_rejections) — o
+            # evento acontece aqui no convert (dono §3.7).
+            if counters is not None:
+                counters.borrow_rejections += 1
+            _log.info(
+                "engine.borrow_unavailable",
+                ticker=ticker,
+                date=decision_date.isoformat(),
+            )
+            return None
 
         if kind is OrderKind.STOP:
             # P2: na 2a o único stop é o sell-stop protetor sobre posição
