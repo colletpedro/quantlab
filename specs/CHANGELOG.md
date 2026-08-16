@@ -4,6 +4,16 @@ Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versioname
 
 ## 2026-08-14
 
+### fase-2b-tasks 0.1 — em revisão (gate 3)
+
+Plano de tarefas da Fase 2b produzido no formato da 2a: **16 tarefas em 6 blocos** ordenados por dependência (contratos → broker → laço → analytics → walk-forward → E2E), cada uma com RFs/CA, arquivos, testes nomeados do design §10/§10.1, comandos exatos do Makefile (`make test-unit && make typecheck && make check`), critério de verificação objetivo e mensagem de commit com o porquê.
+
+**Divisão validada pelo tech lead do web** — T08 dividida em T08a (fechamento: fee → margem → plano MARGIN_CALL → fundo quebrado) e T08b (abertura/bordas: executa liquidação, contadores, short deslistado); T11 em T11a (run_walkforward + orçamento) e T11b (mutação ENG-01.2 estendida, teste puro); T12b (harness RNF-04 do WF) separada de T12. Tabela RF → tarefa NÃO muda com re-splits (lição da 2a/T11).
+
+**Regressões documentadas** — T06 remove a barreira P2 da 2a no `convert` (buy-stop vira kind válido; `test_convert_domain_errors_raise_engine_error` perde o bloco do buy-stop); T01 aceita `Position(quantity < 0)` (ADR-0009; `== 0` continua inválido).
+
+**Mapeamentos completos** — tabela RF → tarefa (21 RFs novos + RF-CON-01/02/03 marcados como herança da Fase 1/2a, sem tarefa nova), DoD v0.2 → tarefa (cada item do DoD aponta a tarefa que o satisfaz; ADRs 0009–0011 já entregues no gate 2) e nota sobre a ordem de build (folha antes de consumidor; broker antes do laço; analytics/WF depois do engine estável).
+
 ### fase-2b-design 0.1 — em revisão (gate 2)
 
 Design técnico v0.1 da Fase 2b produzido no template da 2a (§1–§11) + ADRs **0009–0011 propostos**.
