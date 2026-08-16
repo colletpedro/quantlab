@@ -71,7 +71,7 @@ T01–T07; T09 depende de T08b; T10–T13 dependem da cadeia completa.
 | T08b | Laço 2b — abertura/bordas (executa MARGIN_CALL, contadores, short deslistado) | T06, T07, T08a | RF-MRG-02, RF-SHT-05, RF-ORD-06 | ✅ |
 | T09 | Exposição gross/net + turnover | T08b | RF-MRG-04 | ✅ |
 | T10 | Folds/grid/seleção + sharpe_annualized_rf0 único | T08b | RF-WFK-01, RF-WFK-02 | ✅ |
-| T11a | run_walkforward + orçamento do WF | T10 | RF-WFK-03, RF-WFK-05 | ⬜ |
+| T11a | run_walkforward + orçamento do WF | T10 | RF-WFK-03, RF-WFK-05 | ✅ |
 | T11b | Mutação ENG-01.2 estendida ao OOS (teste puro) | T11a | RF-WFK-04 | ⬜ |
 | T12 | Relatório 2b + benchmark long-only + vieses + herança RNF + ADR-0009 + timezone | T09, T11a | RF-MET-05, RF-MET-06, RF-RNF-02 | ⬜ |
 | T12b | Harness RNF-04 2b (WF) + arquitetura + cobertura 85% | T12 | RF-WFK-05, RNF-02, RNF-07 | ⬜ |
@@ -655,13 +655,32 @@ declarada — CA-05.1).
 Mutação (T11b); relatório com tabela fold a fold (T12); harness no CI (T12b).
 
 **Critério de verificação**
-- [ ] `make test-unit` verde; `make typecheck` verde
-- [ ] `test_walkforward_equity_is_exact_oos_concatenation` (CA-03.1) —
+- [x] `make test-unit` verde; `make typecheck` verde
+- [x] `test_walkforward_equity_is_exact_oos_concatenation` (CA-03.1) —
   comparação direta com o run OOS isolado de cada fold
-- [ ] `test_oos_uses_params_selected_in_same_fold` (CA-02.2)
-- [ ] `test_walkforward_harness_reports_per_fold_and_total_budgets` (CA-05.1)
-- [ ] `test_run_walkforward_warmup_mismatch_raises_engine_error` — §3.8
-- [ ] Determinismo: dois runs ⇒ mesmos params por fold (RNF-01)
+- [x] `test_oos_uses_params_selected_in_same_fold` (CA-02.2)
+- [x] `test_walkforward_harness_reports_per_fold_and_total_budgets` (CA-05.1)
+- [x] `test_run_walkforward_warmup_mismatch_raises_engine_error` — §3.8
+- [x] Determinismo: dois runs ⇒ mesmos params por fold (RNF-01)
+
+**Decisões locais T11a (registradas — ambiguidades do design §3.6 resolvidas
+no código, sem mudar o contrato):**
+1. **`FoldMetrics.sharpe_is` é `float | None`** (o design tipava `float`):
+   `None` sse NENHUMA combinação do grid produziu Sharpe computável (fundo
+   quebrado no IS ou série sem desvio) — a mesma honestidade do R6 que já
+   torna `ret_oos`/`sharpe_oos`/`max_dd_oos` None-able; nunca NaN.
+2. **Seleção com Sharpe `None`:** `None` vale MENOS que qualquer Sharpe
+   computável; empate (ou todos-`None`) desempatado pela ORDEM do grid
+   (primeiro vence) — determinismo RNF-01.
+3. **Cauda do OOS com ativo pobre em histórico IS:** a cauda é
+   ``min(warmup, n_is)`` barras; ativo com menos de `warmup` barras no IS
+   degrada com segurança (primeiras barras OOS entram como aquecimento
+   adicional — NUNCA lookahead); a pré-condição "janela IS do fold >= warmup"
+   (dias úteis) é o guard forte.
+4. **`measure_walkforward`:** margem DECLARADA do orçamento total = 10 s
+   fixos (`TOTAL_BUDGET_MARGIN_S`); a instrumentação por fold entra como
+   parâmetro opcional `on_fold_complete` de `run_walkforward` (não altera o
+   resultado — o harness mede em UMA passada, sem re-execução).
 
 **Riscos**
 Alto — o warmup pela cauda (R4) é o ponto mais fácil de errar: se a estratégia
