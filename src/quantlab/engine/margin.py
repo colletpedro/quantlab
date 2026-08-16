@@ -18,10 +18,77 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from typing import TYPE_CHECKING
 
 from quantlab.exceptions import EngineError
 
-__all__ = ["BorrowFeeModel"]
+if TYPE_CHECKING:  # mypy apenas — evita ciclo em runtime
+    from quantlab.engine.portfolio import Position
+
+__all__ = ["BorrowFeeModel", "MarginModel", "margin_requirement", "margin_utilization"]
+
+
+@dataclass(frozen=True)
+class MarginModel:
+    """Fator único de margem (RF-MRG-01/D1, ADR-0009, R3).
+
+    ``margin_requirement = Σ|qty_i| x close_i x factor`` — valores ABSOLUTOS,
+    nunca soma algébrica (MRG-01 CA-01.1). Fator ÚNICO para long e short é
+    uma **simplificação declarada** (R3); a equivalência com dois níveis
+    (fator long x fator short) está documentada como alternativa descartada
+    no ADR-0009 e na spec §8.1. Default **1.0 explícito e configurável**
+    (CA-01.5). Com apenas longs e factor 1.0, a margem é o notional longo e o
+    invariante ``equity >= margem`` reduz exatamente a ``cash >= 0`` —
+    regressão long-only (CA-01.2).
+    """
+
+    factor: float = 1.0
+
+    def __post_init__(self) -> None:
+        if self.factor <= 0:
+            raise EngineError(f"MarginModel: factor {self.factor} inválido — exige > 0 (ADR-0009).")
+
+
+def margin_requirement(
+    positions: dict[str, Position],
+    closes: dict[str, float],
+    model: MarginModel,
+) -> float:
+    """Exigência de margem — ``Σ_i |qty_i| x close_i x factor`` (MRG-01 CA-01.1).
+
+    Função PURA (só lê). Valores ABSOLUTOS: longs e shorts somam (nunca se
+    cancelam — a soma algébrica seria a armadilha). Long-only com factor 1.0
+    ⇒ notional longo ⇒ ``equity >= margem ⇔ cash >= 0`` (CA-01.2 — regressão).
+
+    Raises:
+        EngineError: `closes` incompleto (faltou ativo com posição) ou preço
+            não positivo — erro de programação (o laço garante a pré-condição
+            de `market_to_market` a cada barra, §3.8).
+    """
+    missing = sorted(set(positions) - set(closes))
+    if missing:
+        raise EngineError(
+            f"margin_requirement: faltou último close conhecido para {missing} "
+            "— o laço deve passar o close de todos os ativos com posição (§3.8)."
+        )
+    bad = sorted(t for t, c in closes.items() if c <= 0)
+    if bad:
+        raise EngineError(f"margin_requirement: close não positivo em {bad} (§3.8).")
+    total = 0.0
+    for ticker, position in positions.items():
+        total += abs(position.quantity) * closes[ticker] * model.factor
+    return total
+
+
+def margin_utilization(equity: float, requirement: float) -> float | None:
+    """Utilização de margem — ``requirement / equity`` (MRG-01 CA-01.4).
+
+    ``equity <= 0`` ⇒ ``None`` explícito (R6 — nunca NaN, nunca zero
+    fabricado; o fundo quebrado deriva `None`, MRG-03 CA-03.2).
+    """
+    if equity <= 0:
+        return None
+    return requirement / equity
 
 
 @dataclass(frozen=True)

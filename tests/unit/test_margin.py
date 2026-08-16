@@ -12,7 +12,13 @@ import pytest
 
 from quantlab.engine.broker import Broker, CostModel, MechanismCounters
 from quantlab.engine.conditional import OrderKind
-from quantlab.engine.margin import BorrowFeeModel
+from quantlab.engine.margin import (
+    BorrowFeeModel,
+    MarginModel,
+    margin_requirement,
+    margin_utilization,
+)
+from quantlab.engine.portfolio import Position
 from quantlab.engine.sizing import FixedOneOverN, SizingInputs
 from quantlab.engine.strategy import Signal
 from quantlab.exceptions import EngineError
@@ -142,3 +148,82 @@ def test_convert_ignores_order_kind_of_blocked_short() -> None:
     )
     assert converted is None
     assert counters.borrow_rejections == 1
+
+
+# ─── T04 — margem: invariante e utilização (RF-MRG-01, ADR-0009) ─────────────
+
+
+def _position(ticker: str, quantity: int) -> Position:
+    return Position(ticker=ticker, quantity=quantity, entry_price=100.0, entry_date=_DECIDED)
+
+
+@pytest.mark.unit
+def test_margin_requirement_uses_absolute_qty() -> None:
+    """CA-01.1 — a margem usa Σ|qty| x close x factor (valores ABSOLUTOS),
+    nunca a soma algébrica: long e short NÃO se cancelam."""
+    positions = {"AAA": _position("AAA", 100), "BBB": _position("BBB", -50)}
+    closes = {"AAA": 100.0, "BBB": 200.0}
+    model = MarginModel()  # factor default 1.0
+
+    requirement = margin_requirement(positions, closes, model)
+
+    assert requirement == pytest.approx(100 * 100.0 + 50 * 200.0)  # 10.000 + 10.000
+    assert requirement != pytest.approx(100 * 100.0 - 50 * 200.0)  # soma algébrica = 0
+
+
+@pytest.mark.unit
+def test_margin_invariant_reduces_to_cash_ge_zero_long_only() -> None:
+    """CA-01.2 — regressão da 2a: com apenas longs e factor 1.0,
+    ``equity >= margem`` é exatamente ``cash >= 0``."""
+    positions = {"AAA": _position("AAA", 100)}
+    closes = {"AAA": 100.0}
+    model = MarginModel()
+
+    requirement = margin_requirement(positions, closes, model)
+    # equity = cash 50 + posição 100 x 100 = 10.050; margem = 10.000.
+    equity = 10_050.0
+    assert equity - requirement == pytest.approx(50.0)  # = cash
+    # equity >= margem ⇔ cash >= 0, com folga exata de 1 centavo.
+    assert (equity >= requirement) is (50.0 >= 0.0)
+
+
+@pytest.mark.unit
+def test_margin_factor_default_1_0_exact_formula() -> None:
+    """CA-01.5 — `margin_factor` default 1.0, explícito e configurável: o
+    valor segue EXATAMENTE Σ|qty| x close x factor (R3)."""
+    positions = {"AAA": _position("AAA", -200)}
+    closes = {"AAA": 50.0}
+
+    assert MarginModel().factor == 1.0  # default explícito
+    assert margin_requirement(positions, closes, MarginModel()) == pytest.approx(200 * 50.0)
+    assert margin_requirement(positions, closes, MarginModel(factor=1.5)) == pytest.approx(
+        200 * 50.0 * 1.5
+    )
+
+
+@pytest.mark.unit
+def test_margin_utilization_none_on_nonpositive_equity() -> None:
+    """R6 — utilização com equity <= 0 é `None` explícito, nunca NaN (o fundo
+    quebrado deriva None — MRG-03 CA-03.2)."""
+    assert margin_utilization(equity=0.0, requirement=100.0) is None
+    assert margin_utilization(equity=-500.0, requirement=100.0) is None
+    assert margin_utilization(equity=1_000.0, requirement=250.0) == pytest.approx(0.25)
+
+
+@pytest.mark.unit
+def test_margin_factor_non_positive_raises_engine_error() -> None:
+    """§3.8 — factor <= 0 é erro de configuração (EngineError)."""
+    with pytest.raises(EngineError):
+        MarginModel(factor=0.0)
+    with pytest.raises(EngineError):
+        MarginModel(factor=-1.0)
+
+
+@pytest.mark.unit
+def test_margin_requirement_domain_errors() -> None:
+    """§3.8 — closes incompleto ou preço não positivo são erro de programa."""
+    positions = {"AAA": _position("AAA", 100), "BBB": _position("BBB", -50)}
+    with pytest.raises(EngineError):
+        margin_requirement(positions, {"AAA": 100.0}, MarginModel())  # falta BBB
+    with pytest.raises(EngineError):
+        margin_requirement(positions, {"AAA": 0.0, "BBB": 200.0}, MarginModel())
