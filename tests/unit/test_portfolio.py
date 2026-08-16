@@ -232,7 +232,7 @@ def test_invariants_catch_a_position_corrupted_after_construction() -> None:
     # desastrada faria por acidente.
     object.__setattr__(portfolio.positions[_TICKER], "quantity", 0)
 
-    with pytest.raises(EngineError, match="não positiva"):
+    with pytest.raises(EngineError, match="zerada"):
         portfolio.check_invariants()
 
 
@@ -415,7 +415,7 @@ def test_cash_and_quantity_never_negative_multi() -> None:
     portfolio.cash = 100.0
 
     object.__setattr__(portfolio.positions["BBB"], "quantity", 0)
-    with pytest.raises(EngineError, match="não positiva"):
+    with pytest.raises(EngineError, match="zerada"):
         portfolio.check_invariants()
 
 

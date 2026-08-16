@@ -236,9 +236,13 @@ class Portfolio:
                 "isso é erro de programação — provavelmente o custo não entrou no "
                 "cálculo da quantidade (design §4.4)."
             )
+        # 2b (T02): `quantity < 0` = short passa a ser VÁLIDO (ADR-0009 — o
+        # relaxamento do invariante `qty >= 0` da 2a; a margem que o substitui
+        # é checada no laço, T08a). `quantity == 0` continua inválido — zero
+        # ações não é posição (T01).
         for ticker, position in self.positions.items():
-            if position.quantity <= 0:
-                raise EngineError(f"Posição não positiva em {ticker}: {position.quantity}.")
+            if position.quantity == 0:
+                raise EngineError(f"Posição zerada em {ticker}: quantity == 0.")
         if n is not None and len(self.positions) > n:
             raise EngineError(
                 f"Número de posições abertas {len(self.positions)} excede o N do run {n} "

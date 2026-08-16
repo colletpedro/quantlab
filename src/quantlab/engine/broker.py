@@ -470,20 +470,23 @@ class Broker:
                 por ativo sem barra, R2/SIZ-02.4).
         """
         if isinstance(intent, Signal):
-            if intent is not Signal.ENTER:
+            if intent not in (Signal.ENTER, Signal.ENTER_SHORT):
                 raise EngineError(
-                    "convert só recebe intenções de ENTER; EXIT passa por cancel_all "
-                    "e saída ao próximo open (T07)."
+                    "convert só recebe intenções de ENTER/ENTER_SHORT; EXIT/EXIT_SHORT "
+                    "passam por cancel_all + saída ao próximo open (T07/T08a)."
                 )
+            short = intent is Signal.ENTER_SHORT  # 2b (T02, D3) — direção no sinal
             kind = OrderKind.MARKET
             limit: float | None = None
             stop: float | None = None
             bracket = False
         else:
-            if intent.signal is not Signal.ENTER:
+            if intent.signal not in (Signal.ENTER, Signal.ENTER_SHORT):
                 raise EngineError(
-                    "convert só recebe intenções de ENTER; bracket de saída é ciclo de vida (T07)."
+                    "convert só recebe intenções de ENTER/ENTER_SHORT; bracket de saída "
+                    "é ciclo de vida (T07)."
                 )
+            short = intent.signal is Signal.ENTER_SHORT  # 2b (T02, D3)
             kind = intent.order_type
             limit = intent.limit
             # O par limite+stop vive na mesma intenção (SIG-01.2): para
@@ -514,26 +517,33 @@ class Broker:
             raise EngineError(f"convert: ref_price {ref_price} não positivo para {ticker}.")
 
         # SIZING — fração do patrimônio (SIZ-04.2) → quantidade alvo (float).
+        # 2b (T02, D3): ENTER_SHORT aplica a fração como MAGNITUDE e o alvo vira
+        # NEGATIVO — a direção é do sinal, nunca do sizer (SHT-01.2).
         fraction = sizer.target_fraction(ticker, inputs)
         qty = inputs.equity * fraction / ref_price
+        if short:
+            qty = -qty
         cut: CutStage | None = None
 
         # CAP — teto de participação (SLP-03.3), mesmo helper da T02. O teto
-        # opera sobre a parte inteira do alvo (quantidades são discretas); se
-        # o teto reduz, o corte é CAP — e a comparação é em unidades inteiras.
+        # opera sobre a MAGNITUDE do alvo (quantidades são discretas); se o teto
+        # reduz, o corte é CAP — e a comparação é em unidades inteiras. Vale
+        # para short igualmente (SHT-02.3 — mesma regra e motivo).
         if adv is not None:
-            capped = participation_cap(max(1, int(qty)), adv, cap)
-            if capped < int(qty):
-                qty = float(capped)
+            magnitude = abs(qty)
+            capped = participation_cap(max(1, int(magnitude)), adv, cap)
+            if capped < int(magnitude):
+                qty = int(math.copysign(float(capped), qty))
                 cut = CutStage.CAP
 
-        # INTEIRAS — conversão em quantidade inteira (SIZ-01.2).
-        whole = math.floor(qty)
-        if whole < qty:
+        # INTEIRAS — conversão em quantidade inteira (SIZ-01.2), com o sinal
+        # preservado (copysign).
+        whole = math.floor(abs(qty))
+        if whole < abs(qty):
             cut = CutStage.INTEGER
-        qty = whole
+        qty = int(math.copysign(float(whole), qty)) if whole else 0
 
-        if qty < 1:
+        if abs(qty) < 1:
             _log.info(
                 "engine.order_below_one_share",
                 ticker=ticker,
@@ -543,8 +553,14 @@ class Broker:
             )
             return None
 
-        # CAIXA/CUSTOS — reduce-until-fits (CST-01.2), forma fechada.
-        fitted = _affordable_quantity(inputs.cash, ref_price, cost_model)
+        # CAIXA/CUSTOS — reduce-until-fits (CST-01.2), forma fechada. Para
+        # ENTER (long) o caixa é o limite (2a, preservado). Para ENTER_SHORT a
+        # VENDA CREDITA caixa (o limite não é o caixa — é a margem, checada no
+        # laço, T04/T08a); a etapa existe na mesma sequência (R1) mas não corta
+        # por caixa — decisão local documentada (RF-SHT-02).
+        fitted = (
+            _affordable_quantity(inputs.cash, ref_price, cost_model) if qty > 0 else int(abs(qty))
+        )
         if fitted < 1:
             if counters is not None:
                 counters.unfilled_cash_orders += 1
@@ -556,11 +572,11 @@ class Broker:
                 price=ref_price,
             )
             return None
-        if fitted < qty:
-            qty = fitted
+        if fitted < abs(qty):
+            qty = int(math.copysign(float(fitted), qty))
             cut = CutStage.CASH
 
-        notional = qty * ref_price
+        notional = abs(qty) * ref_price
         est_cost = cost_model.cost_for(notional)
         return ConvertedOrder(
             ticker=ticker,
@@ -773,9 +789,12 @@ class Broker:
                         "ordem malformada (programming error)."
                     )
                 position = portfolio.positions.get(ticker)
-                if position is None:
+                if position is None or position.quantity < 0:
                     # ORD-02.2: sem posição aberta, o stop NUNCA ativa — e
                     # permanece pendente (protege a entrada quando ela encher).
+                    # 2b (T02): com posição SHORT aberta também permanece —
+                    # "vender mais short" sem intenção ENTER_SHORT não existe
+                    # (espelho do ORD-02.2, tabela de ativação por side §3.5).
                     remaining.append(order)
                     continue
                 if bar.low <= stop_price:
@@ -803,6 +822,15 @@ class Broker:
                         f"execute_pending: limite de venda sem preço em {ticker} — "
                         "ordem malformada (programming error)."
                     )
+                position = portfolio.positions.get(ticker)
+                if position is not None and position.quantity < 0:
+                    # 2b: LIMIT de venda só existe como take-profit de LONG; com
+                    # short aberto seria "vender mais short" via limite — não é
+                    # constructo da 2b (short entra a mercado por ENTER_SHORT).
+                    raise EngineError(
+                        f"execute_pending: limite de venda em {ticker} com posição "
+                        "short aberta — take-profit de short é buy-limit (T02/RF-SHT-02)."
+                    )
                 if bar.high >= limit_price:
                     price = max(limit_price, bar.open)  # ORD-01.2, sem slippage
                     closed = self.sell(
@@ -818,33 +846,43 @@ class Broker:
                 # Senão cancela ao fim da barra (Q2/ORD-01.3) — consumida.
                 continue
 
-            # kind == MARKET com side SELL: na 2a só existe como ordem
-            # SINTÉTICA do rebalance (SIZ-03/T11a) — venda parcial ao open com
-            # slippage (SLP-04.1), custos fora do preço (SLP-04.3). De sinal,
-            # MARKET de venda não existe (EXIT vai por cancel_all + saída ao
-            # open — T11); se chegar, é erro de programa.
-            if not order.rebalance:
-                raise EngineError(
-                    f"execute_pending: MARKET de venda em {ticker} sem rebalance "
-                    "não existe na 2a (EXIT vai por cancel_all + saída ao open — T11)."
-                )
-            position = portfolio.positions.get(ticker)
-            if position is not None:
-                price = slippage.execution_price(bar.open, Side.SELL, position.quantity, adv)
-                closed = self._close_partial(
-                    portfolio,
-                    ticker=ticker,
-                    qty=order.qty,
-                    price=price,
-                    execution_date=bar.date,
-                    decision_date=order.decision_date,
-                    origin=TradeOrigin.MARKET,
-                    rebalance=True,
-                )
-                if closed is not None:
-                    trades.append(closed)
-            # sem posição (já saiu por stop/EXIT no mesmo barra): consumida,
-            # nada a vender
+            # kind == MARKET com side SELL: ENTER_SHORT (2b, T02 — abre a
+            # descoberto) ou ordem SINTÉTICA de rebalance (2a, T11a). De sinal,
+            # MARKET de venda da 2a só existia como rebalance; com a 2b o
+            # ENTER_SHORT é o caminho real (SHT-02.1).
+            if order.rebalance:
+                position = portfolio.positions.get(ticker)
+                if position is not None:
+                    price = slippage.execution_price(bar.open, Side.SELL, position.quantity, adv)
+                    closed = self._close_partial(
+                        portfolio,
+                        ticker=ticker,
+                        qty=order.qty,
+                        price=price,
+                        execution_date=bar.date,
+                        decision_date=order.decision_date,
+                        origin=TradeOrigin.MARKET,
+                        rebalance=True,
+                    )
+                    if closed is not None:
+                        trades.append(closed)
+                # sem posição (já saiu por stop/EXIT no mesmo barra): consumida,
+                # nada a vender
+                continue
+            executed = self._execute_entry_short(
+                store,
+                ticker,
+                order,
+                bar,
+                portfolio,
+                cost_model,
+                slippage,
+                adv,
+                counters=counters,
+            )
+            if executed is not None:
+                trades.append(executed)
+            # Entrada short é consumida (abriu ou foi ignorada pelo guard).
             continue
 
         store.orders[ticker] = remaining
@@ -1036,23 +1074,30 @@ class Broker:
         origin: TradeOrigin | None = None,
         rebalance: bool = True,
     ) -> Trade | None:
-        """Venda PARCIAL da posição aberta (rebalance — SIZ-03, T11a).
+        """Redução PARCIAL da posição aberta — venda de LONG (rebalance, 2a) ou
+        COBERTURA de SHORT (2b, T02).
 
-        O modelo de Trade da Fase 1 é round-trip com quantidade fixa; a venda
-        parcial divide a operação em dois trades: o trecho VENDIDO fecha agora
-        (entry/exit completos, custos rateados pelo trecho) e o trecho restante
-        continua aberto com a quantidade reduzida (``dataclasses.replace`` na
-        lista de trades + substituição da `Position` no dicionário — os dois
-        objetos são frozen, o estado mutável é o portfolio).
+        O modelo de Trade da Fase 1 é round-trip com quantidade fixa; a
+        redução parcial divide a operação em dois trades: o trecho FECHADO
+        fecha agora (entry/exit completos, custos rateados pelo trecho) e o
+        trecho restante continua aberto com a quantidade reduzida
+        (``dataclasses.replace`` na lista de trades + substituição da
+        `Position` no dicionário — os dois objetos são frozen, o estado
+        mutável é o portfolio).
 
-        `qty` maior que a posição vende a posição inteira (clamp); `qty < 1`
-        ou posição inexistente ⇒ ``None`` (ordem consumida sem efeito).
-        Custos debitados do caixa, fora do preço (SLP-04.3).
+        2b (T02): sinal-ciente. `qty` é sempre a MAGNITUDE fechada; long ⇒
+        venda (caixa += notional - custo, quantity do trecho fechado POSITIVA),
+        short ⇒ cobertura (caixa -= notional + custo, quantity do trecho
+        fechado NEGATIVA — SHT-02.2, nunca cruza de sinal). `qty` maior que a
+        posição reduz a posição inteira (clamp); `qty < 1` ou posição
+        inexistente ⇒ ``None`` (ordem consumida sem efeito). Custos debitados
+        do caixa, fora do preço (SLP-04.3).
         """
         position = portfolio.positions.get(ticker)
         if position is None or qty < 1:
             return None
-        qty = min(qty, position.quantity)
+        sign = 1 if position.quantity > 0 else -1
+        qty = min(qty, abs(position.quantity))
 
         open_index = next(
             (
@@ -1071,11 +1116,14 @@ class Broker:
 
         notional = qty * price
         cost = self._costs.cost_for(notional)
-        portfolio.cash += notional - cost
+        if sign > 0:
+            portfolio.cash += notional - cost  # long: venda
+        else:
+            portfolio.cash -= notional + cost  # short: cobertura (compra)
 
-        remaining = position.quantity - qty
+        remaining = position.quantity - sign * qty
         if remaining == 0:
-            # Ajuste cobre a posição inteira — fecha como a `sell` da Fase 1.
+            # Ajuste cobre a posição inteira — fecha como a `sell`/`cover`.
             del portfolio.positions[ticker]
             closed = self._close_trade(
                 portfolio,
@@ -1096,7 +1144,7 @@ class Broker:
             )
             # Rateia o custo de entrada pelos dois trechos (identidade de
             # conciliação fecha: soma dos entry_cost = total pago).
-            share = qty / (position.quantity or 1)
+            share = qty / (abs(position.quantity) or 1)
             portfolio.trades[open_index] = replace(
                 open_trade,
                 quantity=remaining,
@@ -1107,7 +1155,7 @@ class Broker:
                 entry_date=open_trade.entry_date,
                 entry_price=open_trade.entry_price,
                 entry_decision_date=open_trade.entry_decision_date,
-                quantity=qty,
+                quantity=sign * qty,
                 entry_cost=open_trade.entry_cost * share,
                 entry_gap_days=open_trade.entry_gap_days,
                 exit_date=execution_date,
@@ -1149,7 +1197,23 @@ class Broker:
         cortada para caber no caixa após o custo (``cash >= 0``); se o corte
         acontece aqui, o `cut_reason` vira CASH (a última etapa que cortou).
         """
-        if ticker in portfolio.positions and not order.rebalance:
+        position = portfolio.positions.get(ticker)
+        if position is not None and position.quantity < 0:
+            # 2b (T02): BUY sobre posição SHORT aberta é COBERTURA — compra
+            # que reduz |qty| até 0, NUNCA cruza de sinal (SHT-02.2). Cobre
+            # também o buy-limit de take-profit do bracket short (CA-02.4).
+            return self._execute_cover(
+                store,
+                ticker,
+                order,
+                bar,
+                portfolio,
+                cost_model,
+                slippage,
+                adv,
+                counters=counters,
+            )
+        if position is not None and not order.rebalance:
             # ENG-05 da Fase 1: ENTER com posição aberta é ignorado e logado.
             # Exceção: ordem SINTÉTICA de rebalance (SIZ-03/T11a) ajusta uma
             # posição EXISTENTE — o guard não se aplica.
@@ -1228,3 +1292,175 @@ class Broker:
         portfolio.trades.append(trade)
         portfolio.check_invariants()
         return trade
+
+    def _execute_entry_short(
+        self,
+        store: PendingBook,
+        ticker: str,
+        order: PendingOrder,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+        counters: MechanismCounters | None = None,
+    ) -> Trade | None:
+        """Abre uma posição SHORT a mercado (2b, T02 — SHT-02.1).
+
+        Venda a ``open`` com slippage de VENDA (``open x (1 - bps)`` — direção
+        desfavorável ao vendedor), abrindo ``qty < 0``; custos debitados do
+        caixa (SLP-04.3), fora do preço. A venda CREDITA o caixa (proceeds -
+        custo) — o limite é a margem (laço, T04/T08a), não o caixa.
+
+        Guard (decisão local, ENG-05 da Fase 1 estendido): com posição LONG
+        aberta no ticker, o ENTER_SHORT é ignorado e CONSUMIDO (log) — o
+        modelo não cruza de sinal num único trade; a estratégia deve EXIT
+        antes de ENTER_SHORT. Com short aberto, idem (uma posição por ticker,
+        sem média de preço — espelho do ENTER da 2a).
+        """
+        if ticker in portfolio.positions:
+            _log.info(
+                "engine.enter_short_with_open_position",
+                ticker=ticker,
+                date=bar.date.isoformat(),
+            )
+            return None
+
+        price = slippage.execution_price(bar.open, Side.SELL, order.qty, adv)
+        qty = order.qty
+        cut_reason = order.cut_reason
+
+        notional = qty * price
+        cost = cost_model.cost_for(notional)
+        portfolio.cash += notional - cost
+        portfolio.positions[ticker] = Position(
+            ticker=ticker,
+            quantity=-qty,
+            entry_price=price,
+            entry_date=bar.date,
+        )
+        trade = Trade(
+            ticker=ticker,
+            entry_date=bar.date,
+            entry_price=price,
+            entry_decision_date=order.decision_date,
+            quantity=-qty,
+            entry_cost=cost,
+            entry_gap_days=(bar.date - order.decision_date).days,
+            origin=TradeOrigin.MARKET,
+            cut_reason=cut_reason,
+        )
+        portfolio.trades.append(trade)
+        portfolio.check_invariants()
+        return trade
+
+    def _execute_cover(
+        self,
+        store: PendingBook,
+        ticker: str,
+        order: PendingOrder,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+        counters: MechanismCounters | None = None,
+    ) -> Trade | None:
+        """Cobertura de posição short — compra que reduz |qty| até 0 (2b, T02).
+
+        Preço: MARKET ⇒ ``open`` + slippage de COMPRA (``open x (1 + bps)`` —
+        SHT-02.2); LIMIT BUY ⇒ ``min(L, open)`` quando ``low <= L``, senão
+        CANCELA ao fim da barra — o limite NUNCA é violado (CA-02.4/SLP-04.2).
+        A quantidade é limitada por ``|posição|`` (nunca cruza de sinal —
+        SHT-02.2) e pelo caixa após custos (a cobertura consome caixa).
+        """
+        if order.kind is OrderKind.LIMIT:
+            limit_price = order.limit
+            if limit_price is None:
+                raise EngineError(
+                    f"execute_pending: limite de compra sem preço em {ticker} — "
+                    "ordem malformada (programming error)."
+                )
+            if bar.low > limit_price:
+                _log.info(
+                    "engine.limit_not_filled_cancelled",
+                    ticker=ticker,
+                    date=bar.date.isoformat(),
+                    limit=limit_price,
+                    low=bar.low,
+                )
+                return None
+            price = min(limit_price, bar.open)  # SLP-04.2 — nunca viola o limite
+        else:
+            price = slippage.execution_price(bar.open, Side.BUY, order.qty, adv)
+
+        position = portfolio.positions.get(ticker)
+        if position is None or position.quantity >= 0:  # pragma: no cover - guardado pelo chamador
+            raise EngineError(
+                f"_execute_cover: {ticker} sem posição short aberta — erro de programação."
+            )
+
+        qty = min(order.qty, abs(position.quantity))
+        qty = min(qty, _affordable_quantity(portfolio.cash, price, cost_model))
+        if qty < 1:
+            if counters is not None:
+                counters.unfilled_cash_orders += 1
+            _log.info(
+                "engine.insufficient_cash",
+                ticker=ticker,
+                date=bar.date.isoformat(),
+                cash=portfolio.cash,
+                price=price,
+            )
+            return None
+
+        origin = TradeOrigin(order.kind.value)
+        return self._close_partial(
+            portfolio,
+            ticker=ticker,
+            qty=qty,
+            price=price,
+            execution_date=bar.date,
+            decision_date=order.decision_date,
+            origin=origin,
+        )
+
+    def cover(
+        self,
+        portfolio: Portfolio,
+        *,
+        ticker: str,
+        price: float,
+        execution_date: date,
+        decision_date: date,
+        origin: TradeOrigin | None = None,
+    ) -> Trade | None:
+        """Cobertura INTEGRAL da posição short (2b, T02 — EXIT_SHORT do laço).
+
+        Espelho da ``sell`` da Fase 1 para o lado negativo: compra que zera a
+        posição short, debitando notional + custo do caixa. `origin` default
+        MARKET (EXIT_SHORT vai por cancel_all + cobertura ao open — T08a).
+        """
+        position = portfolio.positions.get(ticker)
+        if position is None or position.quantity >= 0:
+            raise EngineError(
+                f"Cobertura de {ticker} sem posição short aberta. EXIT_SHORT sem "
+                "short é erro de domínio (SHT-01.3/CA-01.3) — erro de programação."
+            )
+
+        notional = abs(position.quantity) * price
+        cost = self._costs.cost_for(notional)
+        portfolio.cash -= notional + cost
+        del portfolio.positions[ticker]
+
+        closed = self._close_trade(
+            portfolio,
+            ticker=ticker,
+            price=price,
+            cost=cost,
+            execution_date=execution_date,
+            decision_date=decision_date,
+            origin=origin,
+        )
+        portfolio.check_invariants()
+        return closed

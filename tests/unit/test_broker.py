@@ -22,7 +22,7 @@ from quantlab.engine.broker import (
     PendingOrder,
 )
 from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind, Side
-from quantlab.engine.portfolio import Portfolio, Trade, TradeOrigin
+from quantlab.engine.portfolio import Portfolio, Position, Trade, TradeOrigin
 from quantlab.engine.sizing import FixedOneOverN, SizingInputs
 from quantlab.engine.slippage import FixedBps
 from quantlab.engine.strategy import Signal
@@ -909,11 +909,14 @@ def test_execution_domain_errors_raise_engine_error() -> None:
     with pytest.raises(EngineError):
         _run(broker, book, portfolio, _bar(open_=0.0))
 
+    # 2b (T02) — MARKET SELL sem rebalance DEIXOU de ser erro: é a entrada
+    # short (ENTER_SHORT, SHT-02.1). Regressão documentada no tasks 2b T02.
     book2 = PendingBook()
     portfolio2 = Portfolio(cash=2_000.0)
     book2.place(_pending(OrderKind.MARKET, side=Side.SELL, qty=100))
-    with pytest.raises(EngineError):
-        _run(broker, book2, portfolio2, _bar())
+    shorts = _run(broker, book2, portfolio2, _bar())
+    assert len(shorts) == 1
+    assert shorts[0].quantity == -100
 
     # Barra malformada (high < low) e ordens sem preço são erro de programa.
     book3 = PendingBook()
@@ -1401,3 +1404,164 @@ def test_rebalance_market_sell_whole_position_and_consumed_without_position() ->
     trades2 = _run(broker, book2, portfolio2, _bar())
     assert trades2 == []
     assert book2.pending_for(_TICKER) == ()
+
+
+# ─── T02 — execução short e cobertura (RF-SHT-02) ─────────────────────────────
+
+
+@pytest.mark.unit
+def test_convert_enter_short_yields_negative_qty() -> None:
+    """SHT-01.2/D3 (T02) — ENTER_SHORT: o sizer devolve a magnitude e o alvo
+    vira NEGATIVO, pela MESMA sequencia fixa da 2a (SIZING > CAP > INTEIRAS >
+    CAIXA/CUSTOS)."""
+    broker = Broker()
+    base = _inputs(equity=100_000.0, cash=100_000.0, n=1, last_close={_TICKER: 100.0})
+    converted = _convert(broker, Signal.ENTER_SHORT, base)
+    assert converted is not None
+    assert converted.qty == -1_000  # magnitude 1.0 * equity / 100 = 1000, sinal -
+    assert converted.kind is OrderKind.MARKET
+    assert converted.ref_price == 100.0
+
+
+@pytest.mark.unit
+def test_short_opens_at_market_with_sell_slippage() -> None:
+    """CA-02.1 — venda a descoberto a mercado: abre `qty < 0` a
+    `open * (1 - bps)` (direcao desfavoravel ao vendedor)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=100_000.0)
+    book.place(_pending(qty=1_000, side=Side.SELL))  # MARKET SELL = ENTER_SHORT
+
+    trades = _run(broker, book, portfolio, _bar(open_=100.0))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.quantity == -1_000
+    assert trade.entry_price == pytest.approx(100.0 * (1 - 0.0001))  # 99.99
+    assert trade.origin == TradeOrigin.MARKET
+    position = portfolio.positions[_TICKER]
+    assert position.quantity == -1_000
+    assert position.entry_price == pytest.approx(99.99)
+    # Venda CREDITA o caixa: proceeds - custo (1 + 1e-4*99_990 ~ 10.999).
+    assert portfolio.cash == pytest.approx(100_000.0 + 99_990.0 - (1.0 + 9.999))
+    assert book.pending_for(_TICKER) == ()  # consumida
+
+
+@pytest.mark.unit
+def test_buy_to_cover_at_market_with_buy_slippage() -> None:
+    """CA-02.2 — cobertura a mercado: compra que REDUZ |qty|, preco
+    `open * (1 + bps)`; a posicao nunca cruza de sinal (SHT-02.2)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=100_000.0)
+    # Abre short de 1000 a 99.99 (venda com slippage).
+    book.place(_pending(qty=1_000, side=Side.SELL))
+    _run(broker, book, portfolio, _bar(open_=100.0))
+    assert portfolio.positions[_TICKER].quantity == -1_000
+
+    # Cobre 400 a mercado: compra a 100 * (1 + 1e-4) = 100.01.
+    book.place(_pending(qty=400, side=Side.BUY))
+    trades = _run(broker, book, portfolio, _bar(open_=100.0))
+
+    assert len(trades) == 1
+    closed = trades[0]
+    assert closed.quantity == -400  # trecho fechado mantém o sinal do round-trip
+    assert closed.exit_price == pytest.approx(100.01)
+    assert portfolio.positions[_TICKER].quantity == -600  # nunca cruza
+    # Caixa: -(400 * 100.01 + custo).
+    assert portfolio.cash == pytest.approx(
+        100_000.0 + 99_990.0 - 9.999 - 1.0 - (400 * 100.01 + 1.0 + 400 * 100.01 * 1e-4)
+    )
+
+
+@pytest.mark.unit
+def test_short_entry_respects_participation_cap() -> None:
+    """CA-02.3 — o cap de participacao corta a ENTRADA short com o MESMO
+    motivo da 2a (cut_reason == CAP)."""
+    broker = Broker()
+    base = _inputs(equity=100_000.0, cash=100_000.0, n=1, last_close={_TICKER: 100.0})
+    converted = _convert(broker, Signal.ENTER_SHORT, base, adv=5_000.0, cap=0.10)
+    assert converted is not None
+    assert converted.qty == -500  # cap 10% * ADV 5000 = 500 < alvo 1000
+    assert converted.cut_reason is CutStage.CAP
+
+
+@pytest.mark.unit
+def test_short_cover_buy_limit_never_violates_limit() -> None:
+    """CA-02.4 — cobertura por buy-limit: preenche a `min(L, open)` quando
+    low <= L; nunca viola o limite (SLP-04.2)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=200_000.0)
+    book.place(_pending(qty=1_000, side=Side.SELL))
+    _run(broker, book, portfolio, _bar(open_=100.0))
+
+    # Barra com low 94.0 ≤ 95.0 ⇒ cobre a 95.0 (preço exato, sem bps).
+    book.place(_pending(OrderKind.LIMIT, side=Side.BUY, limit=95.0, qty=1_000))
+    trades = _run(broker, book, portfolio, _bar(open_=100.0, high=105.0, low=94.0))
+    assert len(trades) == 1
+    assert trades[0].exit_price == pytest.approx(95.0)
+    assert trades[0].origin == TradeOrigin.LIMIT
+    assert _TICKER not in portfolio.positions  # cobertura integral
+
+    # Barra com low 96.0 > 95.0 ⇒ cancela ao fim da barra (ordem consumida).
+    book.place(_pending(OrderKind.LIMIT, side=Side.BUY, limit=95.0, qty=1_000))
+    trades2 = _run(broker, book, portfolio, _bar(open_=100.0, high=105.0, low=96.0))
+    assert trades2 == []
+    assert book.pending_for(_TICKER) == ()
+
+
+@pytest.mark.unit
+def test_cover_above_position_raises_engine_error() -> None:
+    """§3.8 — cobertura sem posição short aberta (flat ou long) é erro de
+    domínio (EngineError), nunca silêncio (SHT-01.3/CA-01.3)."""
+    broker = Broker()
+    portfolio = Portfolio(cash=100_000.0)
+    with pytest.raises(EngineError):
+        broker.cover(
+            portfolio, ticker=_TICKER, price=95.0, execution_date=_EXEC, decision_date=_DECIDED
+        )
+
+    portfolio.positions[_TICKER] = Position(
+        ticker=_TICKER, quantity=100, entry_price=100.0, entry_date=_DECIDED
+    )
+    with pytest.raises(EngineError):
+        broker.cover(
+            portfolio, ticker=_TICKER, price=95.0, execution_date=_EXEC, decision_date=_DECIDED
+        )
+
+
+@pytest.mark.unit
+def test_sell_stop_never_activates_over_short() -> None:
+    """2b (T02, tabela §3.5) — sell-stop com posição SHORT aberta permanece
+    pendente (não existe \"vender mais short\" sem intenção ENTER_SHORT)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=100_000.0)
+    book.place(_pending(qty=1_000, side=Side.SELL))
+    _run(broker, book, portfolio, _bar(open_=100.0))
+
+    book.place(_pending(OrderKind.STOP, side=Side.SELL, stop=95.0, qty=1_000))
+    trades = _run(broker, book, portfolio, _bar(open_=100.0, high=110.0, low=90.0))
+    assert trades == []
+    assert portfolio.positions[_TICKER].quantity == -1_000  # intacta
+    assert len(book.pending_for(_TICKER)) == 1  # stop segue pendente
+
+
+@pytest.mark.unit
+def test_enter_short_with_open_long_is_ignored_and_consumed() -> None:
+    """Decisao local (T02, guard ENG-05 estendido) — ENTER_SHORT com LONG
+    aberto e ignorado e consumido (o modelo nao cruza de sinal num unico
+    trade; a estrategia deve EXIT antes)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=100_000.0)
+    book.place(_pending(qty=100, side=Side.BUY))
+    _run(broker, book, portfolio, _bar())
+    assert portfolio.positions[_TICKER].quantity == 100
+
+    book.place(_pending(qty=1_000, side=Side.SELL))
+    trades = _run(broker, book, portfolio, _bar())
+    assert trades == []
+    assert portfolio.positions[_TICKER].quantity == 100  # long intacto
+    assert book.pending_for(_TICKER) == ()  # consumida
