@@ -256,6 +256,10 @@ class MechanismCounters:
     #: 2b (T03, RF-SHT-03 CA-03.4) — ENTER_SHORT bloqueado por indisponibilidade
     #: de aluguel; contado no `convert`, onde o evento acontece (dono §3.7).
     borrow_rejections: int = 0
+    #: 2b (T08b, RF-MRG-02 CA-02.3) — nº de trades de liquidação forçada
+    #: (origin=MARGIN_CALL); DERIVADO pelo laço dos fills do
+    #: `execute_margin_calls` (dono §3.7 — o relatório só reporta).
+    margin_calls: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -263,6 +267,7 @@ class MechanismCounters:
             "intrabar_ambiguities": self.intrabar_ambiguities,
             "unfilled_cash_orders": self.unfilled_cash_orders,
             "borrow_rejections": self.borrow_rejections,
+            "margin_calls": self.margin_calls,
         }
 
 

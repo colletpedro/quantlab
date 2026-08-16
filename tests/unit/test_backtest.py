@@ -13,6 +13,7 @@ import pytest
 from numpy.typing import NDArray
 from structlog.typing import EventDict
 
+from quantlab.analytics.metrics import reconcile_multi
 from quantlab.engine.backtest import (
     BacktestResultMulti,
     build_liquidation_plan,
@@ -21,7 +22,7 @@ from quantlab.engine.backtest import (
 )
 from quantlab.engine.broker import CostModel
 from quantlab.engine.conditional import Bracket, ConditionalIntent, OrderKind, Side
-from quantlab.engine.margin import MarginModel
+from quantlab.engine.margin import BorrowFeeModel, MarginModel
 from quantlab.engine.market_view import MarketView
 from quantlab.engine.portfolio import Position, TradeOrigin
 from quantlab.engine.sizing import EqualWeightOpen, FixedOneOverN, SizingInputs
@@ -1063,13 +1064,23 @@ def test_borrow_fee_debited_at_close_open_short_only() -> None:
 
 @pytest.mark.unit
 def test_margin_breach_close_to_open_window_allowed_then_error() -> None:
-    """CA-01.3 no laço (lado do close) — violação de margem DETECTADA no
-    close NÃO é erro: gera o plano de liquidação e segue (janela close→open
-    é a única em que o invariante fica pendente). O erro pós-open (plano
-    esgotado + margem ainda violada) é da T08b — aqui a T08a não executa o
-    plano: a posição segue aberta, sem trade de liquidação, sem congelamento.
+    """CA-01.3 — a janela close→open é a única em que o invariante de margem
+    fica pendente: violação DETECTADA no close NÃO é erro (agenda o plano de
+    liquidação); no open seguinte o plano EXECUTA a mercado (T08b) e a margem
+    é restaurada. Se a execução não restaurar (gap desfavorável) com equity
+    >= 0 e o plano esgotado, o laço levanta EngineError — violação persistindo
+    após o open é erro de programação (a única saída legítima é o fundo
+    quebrado, equity < 0 — testado em test_broken_fund_gap_liquidation_*).
+
+    (b) Forma fechada do gap: A long 6.000@10 = 60k, B long 2.000@20 = 40k
+    (fração 0,6; o caixa compartilhado corta B em CASH) ⇒ close barra 1:
+    equity 100k < req 2x(60k+40k) = 200k ⇒ plano [A] (projeção a 10: após
+    liquidar A, req 80k <= equity 100k — restaura). Open barra 2: A abre a 5
+    (gap -50%) ⇒ vende 6.000@5 = 30k ⇒ equity 30k + 40k = 70k < req 2x40k =
+    80k, plano esgotado ⇒ EngineError (CA-01.3).
     """
-    series = {"A": _series([10, 10, 10], [10, 10, 10], ticker="A", dates=_dates(3))}
+    # (a) violação no close permitida; o open seguinte liquida e restaura.
+    series = {"A": _series([10, 10, 10, 10], [10, 10, 10, 10], ticker="A", dates=_dates(4))}
     strategies = {"A": ScriptedStrategy({0: Signal.ENTER})}
 
     result = run_backtest_multi(
@@ -1081,11 +1092,29 @@ def test_margin_breach_close_to_open_window_allowed_then_error() -> None:
         margin=MarginModel(factor=2.0),
     )
 
-    # Sem EngineError (a violação no close é evento normal — CA-01.3).
-    assert len(result.portfolio.trades) == 1  # só a entrada
-    assert "A" in result.portfolio.positions  # nada foi liquidado (T08b executa)
-    assert all(t.origin != TradeOrigin.MARGIN_CALL for t in result.portfolio.trades)
-    assert result.broken_fund is False  # há posições — não é fundo quebrado
+    # Sem EngineError (a violação no close é evento normal — CA-01.3); no open
+    # da barra 2 o plano vende a mercado (origin=MARGIN_CALL) e restaura.
+    assert not result.broken_fund
+    assert len(result.portfolio.trades) == 1  # a entrada, fechada pela liquidação
+    assert result.portfolio.trades[0].origin == TradeOrigin.MARGIN_CALL
+    assert result.portfolio.trades[0].exit_price == pytest.approx(10.0)
+    assert result.portfolio.positions == {}  # liquidada integralmente
+    assert result.counters.margin_calls == 1
+
+    # (b) gap desfavorável: plano esgotado + margem violada com equity >= 0.
+    gap = {
+        "A": _series([10, 10, 5, 5], [10, 10, 5, 5], ticker="A", dates=_dates(4)),
+        "B": _series([20, 20, 20, 20], [20, 20, 20, 20], ticker="B", dates=_dates(4)),
+    }
+    with pytest.raises(EngineError, match="plano de liquidação esgotado"):
+        run_backtest_multi(
+            gap,
+            {"A": ScriptedStrategy({0: Signal.ENTER}), "B": ScriptedStrategy({0: Signal.ENTER})},
+            costs=_FREE,
+            slippage=_NO_SLIP,
+            sizer=FixedFractionSizer(0.6),
+            margin=MarginModel(factor=2.0),
+        )
 
 
 @pytest.mark.unit
@@ -1206,3 +1235,300 @@ def test_exit_short_without_position_raises_engine_error() -> None:
             costs=_FREE,
             slippage=_NO_SLIP,
         )
+
+
+# ─── 2b (T08b): laço abertura — liquidação no open, contadores, bordas ───────
+
+
+@pytest.mark.unit
+def test_forced_liquidation_alphabetical_until_margin_restored() -> None:
+    """CA-02.1 — o plano da véspera executa a MERCADO no open do PRÓPRIO ativo
+    (ADR-0002), em ordem ALFABÉTICA; após CADA ativo liquidado o laço re-checa
+    a margem aos preços de execução e INTERROMPE quando restaurada — o resto
+    do plano morre (B NÃO é liquidado: o gap de A restaurou antes).
+
+    Forma fechada: A long 9.000@10 = 90k e B short 9.000@10 = 90k (fração
+    0,9; o short credita caixa) ⇒ close barra 1: equity 100k < req 2x180k =
+    360k ⇒ plano [A, B] (a projeção a 10 só restaura após B: pós-A req 180k
+    > 100k; pós-B equity 10k >= req 0). Open barra 2: A abre a 30 (gap +200%)
+    ⇒ vende 9.000@30 = 270k ⇒ equity 280k >= req 2x90k = 180k ⇒ RESTAURADO
+    — B (short) permanece aberto, sem trade de liquidação.
+    """
+    series = {
+        "A": _series([10, 10, 30, 30], [10, 10, 30, 30], ticker="A", dates=_dates(4)),
+        "B": _series([10, 10, 10, 10], [10, 10, 10, 10], ticker="B", dates=_dates(4)),
+    }
+    strategies = {
+        "A": ScriptedStrategy({0: Signal.ENTER}),
+        "B": ScriptedStrategy({0: Signal.ENTER_SHORT}),
+    }
+    result = run_backtest_multi(
+        series,
+        strategies,
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedFractionSizer(0.9),
+        margin=MarginModel(factor=2.0),
+        borrow=BorrowFeeModel(fee_annual=0.0),
+    )
+
+    a_closed = [t for t in result.portfolio.trades if t.ticker == "A"]
+    b_trades = [t for t in result.portfolio.trades if t.ticker == "B"]
+    assert len(result.portfolio.trades) == 2  # A (fechada pela liquidação) + B (aberta)
+    assert len(a_closed) == 1  # a entrada de A foi fechada pela liquidação
+    assert a_closed[0].origin == TradeOrigin.MARGIN_CALL
+    assert a_closed[0].exit_price == pytest.approx(30.0)  # open do gap (ADR-0002)
+    assert result.counters.margin_calls == 1  # só A — B não foi liquidado
+    # B segue aberto (short) — a restauração interrompeu o plano (CA-02.1).
+    assert result.portfolio.positions["B"].quantity == -9_000
+    assert b_trades[0].exit_date is None
+    assert not result.broken_fund
+    assert result.final_equity == pytest.approx(370_000.0 - 90_000.0)
+
+
+@pytest.mark.unit
+def test_forced_liquidation_cancels_pending_orders() -> None:
+    """CA-02.2 (lado execução) — no open da liquidação a pendente do ativo do
+    plano já NÃO está no book (cancelada pelo plano no close — T08a): nem a
+    liquidação nem uma pendente fantasma geram trade. Bracket de entrada LIMIT
+    L=8 + sell-stop protetor S=7 (série [10, 8, 7, 7]): entra na barra 1 a 8 e
+    o stop fica vivo; o close da barra 1 viola a margem (factor 2 ⇒ req 200k
+    > equity 100k) e o plano CANCELA o stop; no open da barra 2 — low 7 <= S,
+    que DISPARARIA o stop se ele existisse — a liquidação vende a mercado e o
+    book segue vazio: 1 trade só (a entrada fechada pela liquidação).
+    """
+    series = {"A": _series([10, 8, 7, 7], [10, 8, 7, 7], ticker="A", dates=_dates(4))}
+    strategies = {
+        "A": ScriptedConditional(
+            {
+                0: ConditionalIntent(
+                    Signal.ENTER, OrderKind.LIMIT, limit=8.0, bracket=Bracket(limit=8.0, stop=7.0)
+                ),
+            }
+        )
+    }
+    result = run_backtest_multi(
+        series,
+        strategies,
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedOneOverN(1),
+        margin=MarginModel(factor=2.0),
+    )
+
+    assert len(result.portfolio.trades) == 1  # sem trade do stop fantasma
+    assert result.portfolio.trades[0].origin == TradeOrigin.MARGIN_CALL
+    assert result.portfolio.trades[0].exit_price == pytest.approx(7.0)
+    assert result.portfolio.positions == {}  # liquidada integralmente
+    assert result.portfolio.pending.pending_for("A") == ()  # pendente cancelada
+    assert result.counters.margin_calls == 1
+    assert not result.broken_fund
+
+
+@pytest.mark.unit
+def test_margin_call_trades_carry_origin_and_counter() -> None:
+    """CA-02.3 — o trade de liquidação carrega origin = MARGIN_CALL (auditoria
+    ENG-01.2) com `exit_decision_date` = o CLOSE que detectou a violação, e o
+    laço agrega o contador `margin_calls` (dono §3.7 — 1 trade por liquidação;
+    o relatório só reporta, T12).
+
+    Forma fechada: all-in 10.000@10, factor 2 ⇒ close barra 1: equity 100k <
+    req 200k ⇒ plano [A]; open barra 2 (12): vende 10.000@12 = 120k ⇒
+    restaurada.
+    """
+    series = {"A": _series([10, 10, 12], [10, 10, 12], ticker="A", dates=_dates(3))}
+    result = run_backtest_multi(
+        series,
+        {"A": ScriptedStrategy({0: Signal.ENTER})},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedOneOverN(1),
+        margin=MarginModel(factor=2.0),
+    )
+
+    assert result.counters.margin_calls == 1
+    trade = result.portfolio.trades[0]
+    assert trade.origin == TradeOrigin.MARGIN_CALL
+    assert trade.exit_date == _D0 + timedelta(days=2)
+    assert trade.exit_decision_date == _D0 + timedelta(days=1)  # close que detectou
+    assert trade.exit_price == pytest.approx(12.0)
+    assert result.portfolio.positions == {}
+    assert not result.broken_fund
+
+
+@pytest.mark.unit
+def test_forced_liquidation_deterministic_across_runs() -> None:
+    """CA-02.4/RNF-01 — dois runs IDÊNTICOS (long+short com margem e
+    liquidação forçada no open) produzem equity, trades, contadores, marcas e
+    flag de fundo quebrado idênticos: a liquidação alfabética e o re-cheque
+    são determinísticos (sem preço como critério de seleção)."""
+
+    def run_once() -> BacktestResultMulti:
+        series = {
+            "A": _series([10, 10, 30, 30], [10, 10, 30, 30], ticker="A", dates=_dates(4)),
+            "B": _series([10, 10, 10, 10], [10, 10, 10, 10], ticker="B", dates=_dates(4)),
+        }
+        return run_backtest_multi(
+            series,
+            {
+                "A": ScriptedStrategy({0: Signal.ENTER}),
+                "B": ScriptedStrategy({0: Signal.ENTER_SHORT}),
+            },
+            costs=_FREE,
+            slippage=_NO_SLIP,
+            sizer=FixedFractionSizer(0.9),
+            margin=MarginModel(factor=2.0),
+            borrow=BorrowFeeModel(fee_annual=0.0),
+        )
+
+    first = run_once()
+    second = run_once()
+    assert first.equity_curve == second.equity_curve
+    assert first.portfolio.trades == second.portfolio.trades
+    assert first.counters.to_dict() == second.counters.to_dict()
+    assert dict(first.portfolio.marks) == dict(second.portfolio.marks)
+    assert first.broken_fund == second.broken_fund
+
+
+def _gap_broken_run(strategy: ScriptedStrategy) -> BacktestResultMulti:
+    """Fundo quebrado por GAP (emenda P1, §4 passo 1a): short all-in 10.000@10
+    (factor 2 ⇒ close barra 1: equity 100k < req 200k ⇒ plano [A]); no open
+    da barra 2 o ativo GAPA de 10 para 30 — a liquidação (cobertura a 30)
+    drena o caixa para NEGATIVO REAL: cash 200k - 300k = -100k ⇒ equity < 0.
+    `strategy` emite ENTER_SHORT na barra 0 e (opcionalmente) EXIT_SHORT na 1
+    para provar que a intenção posterior morre consumida."""
+    series = {"A": _series([10, 10, 30, 30], [10, 10, 30, 30], ticker="A", dates=_dates(4))}
+    return run_backtest_multi(
+        series,
+        {"A": strategy},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        initial_cash=100_000.0,
+        sizer=FixedOneOverN(1),
+        margin=MarginModel(factor=2.0),
+        borrow=BorrowFeeModel(fee_annual=0.0),
+    )
+
+
+@pytest.mark.unit
+def test_broken_fund_gap_liquidation_freezes_at_open() -> None:
+    """Cronologia do fundo quebrado por gap (emenda P1, §4 passo 1a):
+    (1) a liquidação integral executa no open do PRÓPRIO ativo ao preço do GAP
+    (cobertura do short a 30 — ADR-0002); (2) o re-cheque constata equity < 0
+    (valor NEGATIVO real, nunca zero fabricado — R6/CA-03.2); (3) CONGELA —
+    flag no resultado, nenhum trade novo, pendentes canceladas, intenções
+    descartadas (a estratégia deixa de ser consultada); equity negativa real
+    reportada."""
+    strategy = ScriptedStrategy({0: Signal.ENTER_SHORT, 1: Signal.EXIT_SHORT})
+    result = _gap_broken_run(strategy)
+
+    assert result.broken_fund is True
+    assert result.final_equity == pytest.approx(-100_000.0)
+    assert len(result.portfolio.trades) == 1  # round trip fechado pela liquidação
+    assert result.portfolio.trades[0].origin == TradeOrigin.MARGIN_CALL
+    assert result.portfolio.trades[0].exit_price == pytest.approx(30.0)  # preço do gap
+    assert result.portfolio.positions == {}
+    assert result.counters.margin_calls == 1
+    # A EXIT_SHORT da barra 1 morreu consumida (posição já coberta pela margem);
+    # a estratégia não é consultada após o congelamento (CA-03.1).
+    assert strategy.seen == [0, 1]
+
+
+@pytest.mark.unit
+def test_broken_fund_reconciliation_still_closes() -> None:
+    """CA-03.2 — o run quebrado por gap (equity NEGATIVA real) continua
+    CONCILIANDO a 1e-9: a identidade fecha com o realizado do round trip
+    (30-10)x(-10.000) = -200k = final(-100k) - inicial(100k), sem NaN."""
+    result = _gap_broken_run(ScriptedStrategy({0: Signal.ENTER_SHORT}))
+
+    report = reconcile_multi(result)
+
+    assert report.reconciles is True
+    assert report.realized_pnl == pytest.approx(-200_000.0)
+    assert report.final_equity == pytest.approx(-100_000.0)
+    assert report.unrealized_pnl == pytest.approx(0.0)  # tudo liquidado
+
+
+@pytest.mark.unit
+def test_short_delisted_position_locked_at_last_close() -> None:
+    """RF-SHT-05 CA-05.1 — posição SHORT cuja série termina antes do fim do
+    run é TRAVADA no último close conhecido (passivo marcado na equity), NUNCA
+    liquidada a preço inventado, e REPORTADA em `delisted` (determinístico —
+    o flag de relatório com categoria própria é a CA-05.2, T12).
+
+    Forma fechada: N=2 ⇒ short de 2.500@20 (1/2 do patrimônio a 20, decidido
+    na barra 0 com ref 20 e executado no open da barra 1, também 20) ⇒ cash
+    150k; B deslista após o close 22 ⇒ equity final = 150k - 2.500x22 = 95k;
+    factor 1.0 ⇒ margem 55k <= equity — nenhum plano, a posição fica aberta.
+    """
+
+    def run_once() -> BacktestResultMulti:
+        series = {
+            "A": _series([10, 10, 10, 10, 10], [10, 10, 10, 10, 10], ticker="A", dates=_dates(5)),
+            "B": _series([20, 20, 22], [20, 20, 22], ticker="B", dates=_dates(3)),
+        }
+        return run_backtest_multi(
+            series,
+            {"B": ScriptedStrategy({0: Signal.ENTER_SHORT})},
+            costs=_FREE,
+            slippage=_NO_SLIP,
+            borrow=BorrowFeeModel(fee_annual=0.0),
+        )
+
+    first = run_once()
+    second = run_once()
+    assert first.delisted == second.delisted == ("B",)  # determinismo (RNF-01)
+    position = first.portfolio.positions["B"]
+    assert position.quantity == -2_500  # short travado
+    assert position.entry_price == pytest.approx(20.0)
+    b_trades = [t for t in first.portfolio.trades if t.ticker == "B"]
+    assert len(b_trades) == 1
+    assert b_trades[0].exit_date is None  # nunca liquidada
+    assert first.final_equity == pytest.approx(150_000.0 - 2_500 * 22.0)  # último close
+    assert first.broken_fund is False
+    report = reconcile_multi(first)
+    assert report.reconciles is True  # o passivo travado fecha a identidade
+
+
+@pytest.mark.unit
+def test_report_counts_buy_stop_ambiguities_in_mechanism_counters() -> None:
+    """RF-ORD-06 CA-06.3 — a agregação no LAÇO: o bracket de entrada por
+    buy-stop com os dois preços tocados na mesma barra (ADR-0007 estendido)
+    produz 1 trade ambíguo e o contador `intrabar_ambiguities` é incrementado
+    pelo laço (1 trade por ocorrência — dono §3.7; o relatório só reporta,
+    T12).
+
+    Forma fechada: intenção na barra 0 (ref 12 ⇒ 166 ações de 2.000); barra 1
+    high 12 >= S_e 11.5 E low 10 <= S_s 10.5 ⇒ abre em S_e e fecha em S_s na
+    mesma barra, flat, ambiguous=True; perda (10,5-11,5)x166 = -166.
+    """
+    series = {"A": _series([12.0, 10.0, 11.0], [12.0, 12.0, 11.0], ticker="A", dates=_dates(3))}
+    strategies = {
+        "A": ScriptedConditional(
+            {
+                0: ConditionalIntent(
+                    Signal.ENTER,
+                    OrderKind.STOP,
+                    stop=11.5,
+                    bracket=Bracket(limit=11.5, stop=10.5),
+                ),
+            }
+        )
+    }
+    result = run_backtest_multi(
+        series,
+        strategies,
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        initial_cash=2_000.0,
+        sizer=FixedOneOverN(1),
+    )
+
+    assert result.counters.intrabar_ambiguities == 1
+    trade = result.portfolio.trades[0]
+    assert trade.ambiguous is True
+    assert trade.origin == TradeOrigin.STOP
+    assert trade.entry_price == pytest.approx(11.5)
+    assert trade.exit_price == pytest.approx(10.5)
+    assert result.portfolio.positions == {}  # flat
+    assert result.counters.stops_triggered == 1  # a saída do pior caso é stop

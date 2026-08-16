@@ -27,6 +27,14 @@
 >   continua inválido. Testes antigos de portfolio que dependem da rejeição
 >   de `quantity <= 0` são ajustados para o novo domínio (short) ou mantidos
 >   para `== 0`.
+> - T08b executa o plano de liquidação no open (passo 1a do design §4), o que
+>   a T08a declaradamente não fazia. O teste T08a
+>   `test_margin_breach_close_to_open_window_allowed_then_error` é atualizado
+>   para o comportamento 2b (a violação no close segue NÃO sendo erro — a
+>   janela close→open; o open seguinte liquida a mercado e restaura; o braço
+>   "erro" do CA-01.3 — plano esgotado + margem violada com equity >= 0 — é
+>   coberto no mesmo teste, agora com gap desfavorável). Tudo o mais de
+>   T01–T08a permanece verde — regressão zero.
 
 ---
 
@@ -52,15 +60,15 @@ T01–T07; T09 depende de T08b; T10–T13 dependem da cadeia completa.
 
 | # | Tarefa | Depende de | RFs cobertos | Estado |
 |---|---|---|---|---|
-| T01 | Contratos: Signal com direção + Position/Trade qty<0 | — | RF-SHT-01 | ⬜ |
-| T02 | Execução short e cobertura no broker | T01 | RF-SHT-02 | ⬜ |
-| T03 | Borrow fee + identidade CA-04.2 + ex-dividendo | T01, T02 | RF-SHT-03, RF-SHT-04 | ⬜ |
-| T04 | Margem: invariante e utilização | T01 | RF-MRG-01 | ⬜ |
-| T05 | Liquidação forçada + fundo quebrado | T04 | RF-MRG-02, RF-MRG-03 | ⬜ |
-| T06 | Buy-stop + barreira P2 removida | T03, T04 | RF-ORD-05 | ⬜ |
-| T07 | Ambiguidades intrabarra com buy-stop | T06 | RF-ORD-06 | ⬜ |
-| T08a | Laço 2b — fechamento (fee → margem → MARGIN_CALL → fundo quebrado) | T03, T05 | RF-SHT-03, RF-MRG-01/02/03 | ⬜ |
-| T08b | Laço 2b — abertura/bordas (executa MARGIN_CALL, contadores, short deslistado) | T06, T07, T08a | RF-MRG-02, RF-SHT-05, RF-ORD-06 | ⬜ |
+| T01 | Contratos: Signal com direção + Position/Trade qty<0 | — | RF-SHT-01 | ✅ |
+| T02 | Execução short e cobertura no broker | T01 | RF-SHT-02 | ✅ |
+| T03 | Borrow fee + identidade CA-04.2 + ex-dividendo | T01, T02 | RF-SHT-03, RF-SHT-04 | ✅ |
+| T04 | Margem: invariante e utilização | T01 | RF-MRG-01 | ✅ |
+| T05 | Liquidação forçada + fundo quebrado | T04 | RF-MRG-02, RF-MRG-03 | ✅ |
+| T06 | Buy-stop + barreira P2 removida | T03, T04 | RF-ORD-05 | ✅ |
+| T07 | Ambiguidades intrabarra com buy-stop | T06 | RF-ORD-06 | ✅ |
+| T08a | Laço 2b — fechamento (fee → margem → MARGIN_CALL → fundo quebrado) | T03, T05 | RF-SHT-03, RF-MRG-01/02/03 | ✅ |
+| T08b | Laço 2b — abertura/bordas (executa MARGIN_CALL, contadores, short deslistado) | T06, T07, T08a | RF-MRG-02, RF-SHT-05, RF-ORD-06 | ✅ |
 | T09 | Exposição gross/net + turnover | T08b | RF-MRG-04 | ⬜ |
 | T10 | Folds/grid/seleção + sharpe_annualized_rf0 único | T08b | RF-WFK-01, RF-WFK-02 | ⬜ |
 | T11a | run_walkforward + orçamento do WF | T10 | RF-WFK-03, RF-WFK-05 | ⬜ |
@@ -475,12 +483,20 @@ Relatório (T12); gross/net (T09).
 - [ ] `make test-unit` verde; `make typecheck` verde
 - [ ] `test_forced_liquidation_alphabetical_until_margin_restored` (CA-02.1)
 - [ ] `test_forced_liquidation_cancels_pending_orders` (CA-02.2, lado execução)
-- [ ] `test_margin_call_trades_carry_origin_and_counter` (CA-02.3)
+- [ ] `test_margin_call_trades_carry_origin_and_counter` (CA-02.3) — nome do
+  TASKS; o design §10 cita `test_report_counts_margin_call_origin_trades`
+  (divergência registrada na T08b: prevalece o nome do tasks)
 - [ ] `test_forced_liquidation_deterministic_across_runs` (CA-02.4)
 - [ ] `test_broken_fund_reconciliation_still_closes` (CA-03.2)
 - [ ] `test_short_delisted_position_locked_at_last_close` (CA-05.1)
 - [ ] `test_report_counts_buy_stop_ambiguities_in_mechanism_counters` — a
   agregação no laço (CA-06.3; o relatório é T12)
+- [ ] `test_broken_fund_gap_liquidation_freezes_at_open` — NOVO, registrado
+  aqui (não existia no design §10): cronologia do fundo quebrado por gap da
+  emenda P1 (§4 passo 1a) — (1) liquidação integral no open ao preço do gap
+  (ADR-0002) → (2) re-cheque constata equity < 0 → (3) congela (flag, sem
+  trades novos, pendentes canceladas, intenções descartadas) → (4) equity
+  negativa REAL; a conciliação fechando é a CA-03.2 acima
 
 **Riscos**
 Alto — o re-cheque por ativo e o congelamento determinístico (alfabético,

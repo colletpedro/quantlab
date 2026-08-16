@@ -444,13 +444,19 @@ def run_backtest_multi(
     **INVARIANTE — a ordem das operações dentro de cada data-união `u`**
     (extensão da §4.3 da Fase 1, preservada por ativo; 2b T08a):
 
-      1. **Executar** as pendentes de X ao open da barra do PRÓPRIO ativo
-         (ADR-0002 por ativo — POR-05.3), a saída pendente de um EXIT da
-         barra anterior de X (venda ao open, origin=MARKET) e a cobertura
-         pendente de um EXIT_SHORT (compra ao open, T08a);
+      1. **Executar** no open da barra do PRÓPRIO ativo (ADR-0002 por ativo
+         — POR-05.3), em duas passadas: (1a) as LIQUIDAÇÕES do plano da
+         véspera (2b, T08b — RF-MRG-02): `execute_margin_calls` a mercado no
+         open, long → SELL / short → BUY, origin=MARGIN_CALL (CA-02.3),
+         re-checando a margem após CADA ativo e interrompendo quando
+         restaurada (CA-02.1); plano esgotado + margem violada com equity ≥ 0
+         ⇒ EngineError (CA-01.3); liquidação que empurra equity < 0 ⇒ fundo
+         quebrado por gap: congela (emenda P1 — CA-03.1); e (1b) as PENDENTES
+         regulares — a saída de um EXIT (venda ao open, origin=MARKET) e a
+         cobertura de um EXIT_SHORT (compra ao open, T08a);
       2. **Marcar a mercado** pelo último close conhecido (POR-02.2) e
          registrar a equity de `u`;
-      1b. **Rebalance** (só se sizer == EqualWeightOpen): k mudou ⇒ eventos
+      2b. **Rebalance** (só se sizer == EqualWeightOpen): k mudou ⇒ eventos
          com limiar em pp (SIZ-03.3) para o próximo open do próprio ativo
          (2a, inalterado);
       3. **Debitar o borrow fee** no close, etapa própria (2b, T08a —
@@ -458,10 +464,10 @@ def run_backtest_multi(
       4. **Checar margem** (2b, T08a — RF-MRG-01/02): `equity < margem` no
          close ⇒ plano de liquidação alfabético (CA-02.1), integral por ativo,
          cancelando as pendentes dos ativos do plano (CA-02.2); violação no
-         close NÃO é erro (CA-01.3 — janela close→open; o erro pós-open é da
-         T08b). Sem posições e equity < 0 ⇒ **fundo quebrado** (CA-03.1):
-         congela (nenhum trade novo, pendentes canceladas, intenções
-         descartadas, flag);
+         close NÃO é erro (CA-01.3 — janela close→open; a execução do plano
+         no open é a passada 1a da T08b). Sem posições e equity < 0 ⇒
+         **fundo quebrado** (CA-03.1): congela (nenhum trade novo, pendentes
+         canceladas, intenções descartadas, flag);
       5. **Consultar** as estratégias por ÚLTIMO (i ≥ warmup; se não
          congelado), MarketView só com barras do próprio ativo (POR-03.1/05.1);
          `EXIT_SHORT` sem posição short aberta ⇒ EngineError (SHT-01.3).
@@ -537,7 +543,67 @@ def run_backtest_multi(
         u_date = calendar.dates[u]
         k_before = len(portfolio.positions)
 
-        # ── 1. EXECUTAR (alfabético; ADR-0002 por ativo — POR-05.3) ────────
+        # ── 1a. LIQUIDAÇÕES — plano da véspera (T08b, RF-MRG-02 CA-02.1/02.3;
+        #    ADR-0002 por ativo / ADR-0009) ──────────────────────────────────
+        if not broken:
+            for ticker in tickers:
+                order = margin_plan.get(ticker)
+                if order is None:
+                    continue
+                i = calendar.bar_index_at(ticker, u)
+                if i is None:
+                    # Borda rara (design §5): ativo do plano sem barra em u — a
+                    # liquidação espera a próxima barra do PRÓPRIO ativo; a
+                    # ordem permanece no plano (nunca preço inventado).
+                    continue
+                margin_plan.pop(ticker)
+                series_x = series[ticker]
+                bar = BarSlice(
+                    date=series_x.dates[i],
+                    open=float(series_x.open[i]),
+                    high=float(series_x.high[i]),
+                    low=float(series_x.low[i]),
+                    close=float(series_x.close[i]),
+                )
+                liquidated = broker.execute_margin_calls(
+                    (order,), bar, portfolio, cost_model, slippage_model
+                )
+                # CA-02.3 — dono do contador é o laço (§3.7): 1 trade por
+                # liquidação (origin = MARGIN_CALL).
+                counters.margin_calls += sum(
+                    1 for t in liquidated if t.origin == TradeOrigin.MARGIN_CALL
+                )
+                # CA-02.1 — re-checa a margem após CADA ativo liquidado, aos
+                # preços de execução (caixa pós-liquidação + últimos closes
+                # conhecidos), e interrompe quando restaurada.
+                equity_now = portfolio.equity()
+                requirement = margin_requirement(portfolio.positions, portfolio.marks, margin_model)
+                if equity_now < 0:
+                    # FUNDO QUEBRADO POR GAP (emenda P1, §4 passo 1a): a
+                    # liquidação integral no open, ao preço do gap, empurrou a
+                    # equity para NEGATIVO real — congela (CA-03.1): nenhum
+                    # trade novo, pendentes canceladas, intenções descartadas.
+                    broken = True
+                    margin_plan.clear()
+                    exit_pending.clear()
+                    cover_pending.clear()
+                    for t in tickers:
+                        portfolio.pending.cancel_all(t)
+                    break
+                if equity_now >= requirement:
+                    margin_plan.clear()  # restaurada — CA-02.1 (interrompe)
+                    break
+                if not margin_plan:
+                    # CA-01.3 — plano esgotado + margem ainda violada com
+                    # equity >= 0: violação persistindo após o open é erro de
+                    # programação (só o fundo quebrado é saída legítima).
+                    raise EngineError(
+                        "run_backtest_multi: plano de liquidação esgotado e margem "
+                        f"ainda violada após o open de {u_date} (equity {equity_now:.2f} "
+                        f"< exigência {requirement:.2f}) — CA-01.3, erro de programação."
+                    )
+
+        # ── 1b. PENDENTES regulares (alfabético; ADR-0002 por ativo — POR-05.3) ─
         if not broken:
             for ticker in tickers:
                 i = calendar.bar_index_at(ticker, u)
@@ -748,9 +814,10 @@ def run_backtest_multi(
                 if converted is not None:
                     broker.place(portfolio.pending, converted)
 
-    # POR-02.3: posição aberta cuja série terminou antes do fim da união é
-    # travada — marcada pelo último close (passo 2 já usa last_known até o
-    # fim), nunca liquidada, reportada no resultado (determinístico: sorted).
+    # POR-02.3/RF-SHT-05 (T08b): posição ABERTA — long ou SHORT (qty < 0,
+    # CA-05.1) — cuja série terminou antes do fim da união é travada: marcada
+    # pelo último close (passo 2 já usa last_known até o fim), nunca liquidada
+    # a preço inventado, reportada no resultado (determinístico: sorted).
     last_union_date = calendar.dates[-1]
     delisted = tuple(
         sorted(

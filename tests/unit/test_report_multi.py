@@ -133,6 +133,7 @@ def test_report_mechanism_counters_block() -> None:
         "intrabar_ambiguities": 1,
         "unfilled_cash_orders": 1,
         "borrow_rejections": 0,  # 2b (T03) — novo contador, zero sem shorts
+        "margin_calls": 0,  # 2b (T08b) — novo contador, zero sem liquidação
     }
 
 
