@@ -382,7 +382,7 @@ Regra mantida na íntegra: a classe `datetime` e o aparato de fuso (`timezone`, 
 | `MechanismCounters` | — | incrementados apenas pelo engine; donos declarados (§3.7); relatório só reporta | — |
 | `BacktestResultMulti` (2b) | — | `broken_fund`/`borrow_fees`/`margin`/`borrow` presentes e reconstruíveis do JSON (RF-CON-02/CA-06.2) | — |
 | `ReconciliationReport` | result de um run 2b | parcelas completas (incl. `total_borrow_fees`, uma única vez); `reconciles` = `isclose(1e-9)` com `qty < 0` (CA-04.2) | `EngineError` se result inválido (erro de programa) |
-| Laço 2b (§4) | invariantes da 2a + janela close→open | `equity ≥ margem` pós-open (CA-01.3); fundo quebrado congelado (CA-03.1); determinismo (RNF-01) | `EngineError` se violação persistir após o open (CA-01.3) |
+| Laço 2b (§4) | invariantes da 2a + janela close→open | `equity ≥ margem` pós-open (CA-01.3); fundo quebrado congelado (CA-03.1); determinismo (RNF-01) | `EngineError` se violação persistir após o open (CA-01.3); `EngineError` se o gatilho do rebalance disparar com posição short aberta (emenda T09/P0 — rebalance é long-only, D3) |
 
 ## 4. Fluxo da barra 2b — laço multi-ativo estendido
 
@@ -414,7 +414,17 @@ Para cada índice-união `u` em `0..D-1` (em cada fase, ativos processados em **
       SHORT aberta ⇒ cobertura do stop-loss (reduz |qty|, nunca cruza — SHT-02.2);
       sell-stop ativa só com LONG (2a ORD-02.2 estendido). Caixa insuficiente ⇒
       atendimento alfabético, não-atendida logada e contada (2a POR-01.2, mantido).
-   c. REBALANCE (2a, só EqualWeightOpen) — inalterado.
+   c. REBALANCE (2a, só EqualWeightOpen) — DECLARADO LONG-ONLY por
+      construção (emenda T09/P0): o alvo `1/k` é coerente apenas com posições
+      POSITIVAS; tratar shorts no rebalance faria o sizer decidir direção
+      (violaria D3 — a direção é do Signal), e o peso de short (negativo)
+      violaria a pré-condição de `rebalance_deviation_pp` ([0, 1]). O laço
+      guarda EXPLICITAMENTE: gatilho de k com qualquer posição `qty < 0`
+      aberta ⇒ EngineError claro (configuração inválida: EqualWeightOpen não
+      coexiste com short; use um sizer que não decide direção — ex.
+      FixedOneOverN/FixedFraction), nunca o crash obscuro do
+      `rebalance_deviation_pp` (teste: `test_rebalance_with_open_short_
+      raises_engine_error`, registrado no tasks T10).
 
 2. MARCAR A MERCADO (close): equity[u] = cash + Σ_X qty[X] × close_conhecido(X, u)
    — último close conhecido (2a POR-02.2); posição travada entra pelo último close (2a).
