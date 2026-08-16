@@ -522,8 +522,10 @@ def test_convert_maps_kind_limit_stop_and_bracket_from_intent() -> None:
 
 @pytest.mark.unit
 def test_convert_domain_errors_raise_engine_error() -> None:
-    """§3.8 — saída, buy-stop (2b), ticker sem last_close e ref_price ≤ 0 são
-    erro de programação (EngineError)."""
+    """§3.8 — saída, ticker sem last_close e ref_price ≤ 0 são erro de
+    programação (EngineError). (Regressão documentada T06: buy-stop DEIXOU de
+    ser erro — vira kind de entrada válido na 2b; coberto por
+    `test_convert_accepts_buy_stop`.)"""
     broker = Broker()
     base = _inputs(equity=100_000.0, cash=100_000.0, n=1, last_close={_TICKER: 10.0})
 
@@ -531,9 +533,12 @@ def test_convert_domain_errors_raise_engine_error() -> None:
         _convert(broker, Signal.EXIT, base)
     with pytest.raises(EngineError):
         _convert(broker, ConditionalIntent(Signal.EXIT, OrderKind.MARKET), base)
-    # Buy-stop é escopo da 2b (P2) — ENTER com STOP não existe na 2a.
+    # 2b: ENTER_SHORT só existe a mercado — limite/stop de venda não é
+    # constructo da fase (guard de direção, T06).
     with pytest.raises(EngineError):
-        _convert(broker, ConditionalIntent(Signal.ENTER, OrderKind.STOP, stop=11.0), base)
+        _convert(broker, ConditionalIntent(Signal.ENTER_SHORT, OrderKind.STOP, stop=11.0), base)
+    with pytest.raises(EngineError):
+        _convert(broker, ConditionalIntent(Signal.ENTER_SHORT, OrderKind.LIMIT, limit=11.0), base)
 
     without_close = _inputs(equity=100_000.0, cash=100_000.0, n=1, last_close={})
     with pytest.raises(EngineError):
@@ -1681,3 +1686,126 @@ def test_broken_fund_state_holds_negative_equity() -> None:
     state = BrokenFundState(broken=True, final_equity=-1_234.5)
     assert state.broken is True
     assert state.final_equity == pytest.approx(-1_234.5)
+
+
+# ─── T06 — buy-stop e remoção da barreira P2 (RF-ORD-05) ─────────────────────
+
+
+@pytest.mark.unit
+def test_convert_accepts_buy_stop() -> None:
+    """Emenda P1 — a barreira P2 da 2a é removida: STOP vira kind de entrada
+    VÁLIDO no convert (buy-stop); o guard que levantava EngineError saiu."""
+    broker = Broker()
+    base = _inputs(equity=100_000.0, cash=100_000.0, n=1, last_close={_TICKER: 10.0})
+
+    converted = _convert(broker, ConditionalIntent(Signal.ENTER, OrderKind.STOP, stop=11.0), base)
+
+    assert converted is not None
+    assert converted.kind is OrderKind.STOP
+    assert converted.stop == 11.0
+
+
+@pytest.mark.unit
+def test_buy_stop_executes_at_max_stop_open_with_buy_slippage() -> None:
+    """CA-05.1 — buy-stop disparado: compra a `max(S, open)` com slippage de
+    compra (SLP-04.4)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(OrderKind.STOP, side=Side.BUY, stop=9.5, qty=100))
+
+    # open 10.00 >= stop 9.5 ⇒ dispatch a max(9.5, 10) = 10, slippage +1 bps.
+    trades = _run(broker, book, portfolio, _bar(open_=10.0, high=11.0))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.entry_price == pytest.approx(10.0 * (1 + 0.0001))
+    assert trade.origin == TradeOrigin.STOP
+    assert portfolio.positions[_TICKER].quantity == 100
+    assert book.pending_for(_TICKER) == ()  # disparado e consumido
+
+
+@pytest.mark.unit
+def test_buy_stop_undispatched_persists_to_next_bar_of_own_asset() -> None:
+    """CA-05.2 — buy-stop não disparado PERMANECE pendente para a próxima
+    barra do próprio ativo (ADR-0002 por ativo)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(OrderKind.STOP, side=Side.BUY, stop=9.5, qty=100))
+
+    trades = _run(broker, book, portfolio, _bar(open_=9.0, high=9.2))  # high < S
+
+    assert trades == []
+    assert _TICKER not in portfolio.positions
+    assert len(book.pending_for(_TICKER)) == 1  # segue pendente
+    assert portfolio.cash == pytest.approx(2_000.0)  # nada debitado (CA-05.3)
+
+
+@pytest.mark.unit
+def test_buy_stop_never_dispatched_never_debits_cash() -> None:
+    """CA-05.3 — buy-stop que nunca dispara não executa e o caixa nunca é
+    debitado (sem reserva de caixa — ORD-04.3)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(OrderKind.STOP, side=Side.BUY, stop=9.5, qty=100))
+
+    for _ in range(3):
+        _run(broker, book, portfolio, _bar(open_=9.0, high=9.2))
+
+    assert portfolio.cash == pytest.approx(2_000.0)
+    assert _TICKER not in portfolio.positions
+    assert len(book.pending_for(_TICKER)) == 1
+
+
+@pytest.mark.unit
+def test_buy_stop_with_open_long_is_ignored_and_consumed() -> None:
+    """Emenda P1 — guard ENG-05: buy-stop com posição LONG aberta é ignorado e
+    CONSUMIDO (nunca duas posições do mesmo sinal)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    book.place(_pending(qty=100))  # long
+    _run(broker, book, portfolio, _bar())
+    assert portfolio.positions[_TICKER].quantity == 100
+
+    book.place(_pending(OrderKind.STOP, side=Side.BUY, stop=8.0, qty=100))
+    trades = _run(broker, book, portfolio, _bar(low=7.0))  # dispararia
+
+    assert trades == []
+    assert portfolio.positions[_TICKER].quantity == 100  # long intacto
+    assert book.pending_for(_TICKER) == ()  # consumida pelo guard
+
+
+@pytest.mark.unit
+def test_buy_stop_over_short_covers_never_crosses() -> None:
+    """Emenda P1 — buy-stop sobre posição SHORT ativa como COBERTURA do
+    stop-loss: reduz |qty| até 0, nunca cruza de sinal (SHT-02.2)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=200_000.0)
+    book.place(_pending(qty=1_000, side=Side.SELL))  # short
+    _run(broker, book, portfolio, _bar(open_=100.0))
+    assert portfolio.positions[_TICKER].quantity == -1_000
+
+    # Buy-stop (stop-loss do short) dispara a 105: cobre 400, resta -600.
+    book.place(_pending(OrderKind.STOP, side=Side.BUY, stop=105.0, qty=400))
+    trades = _run(broker, book, portfolio, _bar(open_=100.0, high=110.0))
+
+    assert len(trades) == 1
+    assert trades[0].exit_price == pytest.approx(105.0 * (1 + 0.0001))
+    assert portfolio.positions[_TICKER].quantity == -600  # nunca cruza
+
+
+@pytest.mark.unit
+def test_convert_rejects_enter_short_with_stop_or_limit() -> None:
+    """T06 (guard de direção) — ENTER_SHORT só existe a mercado; limite/stop
+    de venda para abrir short não é constructo da 2b (place() montaria o lado
+    errado)."""
+    broker = Broker()
+    base = _inputs(equity=100_000.0, cash=100_000.0, n=1, last_close={_TICKER: 10.0})
+    with pytest.raises(EngineError):
+        _convert(broker, ConditionalIntent(Signal.ENTER_SHORT, OrderKind.STOP, stop=11.0), base)
+    with pytest.raises(EngineError):
+        _convert(broker, ConditionalIntent(Signal.ENTER_SHORT, OrderKind.LIMIT, limit=9.0), base)

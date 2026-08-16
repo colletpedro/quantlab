@@ -518,12 +518,14 @@ class Broker:
             )
             return None
 
-        if kind is OrderKind.STOP:
-            # P2: na 2a o único stop é o sell-stop protetor sobre posição
-            # aberta (saída — T08); buy-stop/entrada condicional é a 2b.
+        if short and kind is not OrderKind.MARKET:
+            # 2b (T06): ENTER_SHORT só existe a MERCADO — limite/stop de VENDA
+            # para abrir short não é constructo da fase (o buy-stop é compra;
+            # sell-stop é saída protetora). Guard de direção: place() montaria
+            # side=BUY e um LIMIT/STOP de short viraria entrada LONG em silêncio.
             raise EngineError(
-                "convert: entrada com STOP (buy-stop) é escopo da Fase 2b (P2). "
-                "Na 2a o stop só aparece como sell-stop protetor (T08)."
+                "convert: ENTER_SHORT só existe a mercado (MARKET) na 2b — "
+                "limite/stop de venda para abrir short não é constructo da fase."
             )
 
         ref_price = inputs.last_close.get(ticker)
@@ -780,6 +782,30 @@ class Broker:
                         remaining,
                         counters,
                     )
+                continue
+
+            if order.side is Side.BUY and order.kind is OrderKind.STOP:
+                # 2b (T06): buy-stop — `high >= S` ⇒ compra a `max(S, open)` +
+                # slippage de compra (CA-05.1); não disparado ⇒ PERMANECE
+                # pendente (CA-05.2); nunca debita caixa antes (CA-05.3).
+                # Ativação por side x ENG-05 (tabela §3.5): flat ⇒ entrada
+                # long; LONG aberta ⇒ guard ignora e CONSUME; SHORT aberta ⇒
+                # cobertura do stop-loss (reduz |qty|, nunca cruza).
+                executed, persist = self._execute_buy_stop(
+                    store,
+                    ticker,
+                    order,
+                    bar,
+                    portfolio,
+                    cost_model,
+                    slippage,
+                    adv,
+                    counters=counters,
+                )
+                if executed is not None:
+                    trades.append(executed)
+                if persist:
+                    remaining.append(order)
                 continue
 
             if order.side is Side.BUY:
@@ -1373,7 +1399,7 @@ class Broker:
         portfolio.check_invariants()
         return trade
 
-    def _execute_cover(
+    def _execute_buy_stop(
         self,
         store: PendingBook,
         ticker: str,
@@ -1384,16 +1410,95 @@ class Broker:
         slippage: SlippageModel,
         adv: float | None,
         counters: MechanismCounters | None = None,
+    ) -> tuple[Trade | None, bool]:
+        """Buy-stop (2b, T06 — RF-ORD-05) — devolve ``(trade, persistir)``.
+
+        Dispara quando ``high[i] >= S`` e executa a ``max(S, open[i])`` com
+        slippage de COMPRA (CA-05.1); não disparado ⇒ PERMANECE pendente para
+        a próxima barra do próprio ativo (CA-05.2, ADR-0002); nunca debita
+        caixa antes de disparar (CA-05.3).
+
+        Ativação por side x guard ENG-05 (emenda P1, tabela §3.5):
+        - posição LONG aberta ⇒ guard ignora e CONSUME (log, como ENTER) —
+          nunca duas posições do mesmo sinal;
+        - posição SHORT aberta ⇒ ativa como COBERTURA do stop-loss (reduz
+          |qty| até 0, nunca cruza — SHT-02.2; ORD-06/CA-06.2);
+        - flat ⇒ entrada long.
+        """
+        position = portfolio.positions.get(ticker)
+        if position is not None and position.quantity > 0:
+            _log.info(
+                "engine.enter_with_open_position",
+                ticker=ticker,
+                date=bar.date.isoformat(),
+            )
+            return None, False  # consumida pelo guard
+        stop_price = order.stop
+        if stop_price is None:
+            raise EngineError(
+                f"execute_pending: buy-stop sem preço em {ticker} — "
+                "ordem malformada (programming error)."
+            )
+        if bar.high < stop_price:
+            return None, True  # não disparou — persiste (CA-05.2)
+        dispatch_price = max(stop_price, bar.open)  # CA-05.1
+        if position is not None and position.quantity < 0:
+            return (
+                self._execute_cover(
+                    store,
+                    ticker,
+                    order,
+                    bar,
+                    portfolio,
+                    cost_model,
+                    slippage,
+                    adv,
+                    forced_ref=dispatch_price,
+                    counters=counters,
+                ),
+                False,
+            )
+        slipped = slippage.execution_price(dispatch_price, Side.BUY, order.qty, adv)
+        return (
+            self._execute_entry(
+                store,
+                ticker,
+                order,
+                bar,
+                portfolio,
+                cost_model,
+                slippage,
+                adv,
+                forced_price=slipped,
+                counters=counters,
+            ),
+            False,
+        )
+
+    def _execute_cover(
+        self,
+        store: PendingBook,
+        ticker: str,
+        order: PendingOrder,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+        forced_ref: float | None = None,
+        counters: MechanismCounters | None = None,
     ) -> Trade | None:
         """Cobertura de posição short — compra que reduz |qty| até 0 (2b, T02).
 
         Preço: MARKET ⇒ ``open`` + slippage de COMPRA (``open x (1 + bps)`` —
         SHT-02.2); LIMIT BUY ⇒ ``min(L, open)`` quando ``low <= L``, senão
-        CANCELA ao fim da barra — o limite NUNCA é violado (CA-02.4/SLP-04.2).
-        A quantidade é limitada por ``|posição|`` (nunca cruza de sinal —
-        SHT-02.2) e pelo caixa após custos (a cobertura consome caixa).
+        CANCELA ao fim da barra — o limite NUNCA é violado (CA-02.4/SLP-04.2);
+        `forced_ref` (T06) impõe a referência do buy-stop disparado
+        (``max(S, open)`` + slippage, SLP-04.4). A quantidade é limitada por
+        ``|posição|`` (nunca cruza de sinal — SHT-02.2) e pelo caixa após
+        custos (a cobertura consome caixa).
         """
-        if order.kind is OrderKind.LIMIT:
+        if order.kind is OrderKind.LIMIT and forced_ref is None:
             limit_price = order.limit
             if limit_price is None:
                 raise EngineError(
@@ -1411,7 +1516,8 @@ class Broker:
                 return None
             price = min(limit_price, bar.open)  # SLP-04.2 — nunca viola o limite
         else:
-            price = slippage.execution_price(bar.open, Side.BUY, order.qty, adv)
+            ref = forced_ref if forced_ref is not None else bar.open
+            price = slippage.execution_price(ref, Side.BUY, order.qty, adv)
 
         position = portfolio.positions.get(ticker)
         if position is None or position.quantity >= 0:  # pragma: no cover - guardado pelo chamador
