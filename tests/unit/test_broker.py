@@ -1809,3 +1809,220 @@ def test_convert_rejects_enter_short_with_stop_or_limit() -> None:
         _convert(broker, ConditionalIntent(Signal.ENTER_SHORT, OrderKind.STOP, stop=11.0), base)
     with pytest.raises(EngineError):
         _convert(broker, ConditionalIntent(Signal.ENTER_SHORT, OrderKind.LIMIT, limit=9.0), base)
+
+
+# ─── T07 — ambiguidades intrabarra com buy-stop (RF-ORD-06, ADR-0007 estendido) ─
+
+
+def _buy_stop_bracket_order(
+    *, trigger: float, protector: float, qty: int = 100, seq: int = 1
+) -> ConvertedOrder:
+    """Ordem convertida de bracket de ENTRADA por buy-stop (2b, T07).
+
+    O overload do convert: `stop` = S_e (gatilho do buy-stop), `limit` = S_s
+    (o sell-stop protetor — o par na mesma intenção, S_s < S_e).
+    """
+    return _converted(
+        kind=OrderKind.STOP, stop=trigger, limit=protector, qty=qty, seq=seq, bracket=True
+    )
+
+
+@pytest.mark.unit
+def test_intrabar_ambiguity_buy_stop_entry_bracket_worst_case() -> None:
+    """RF-ORD-06 CA-06.1 (design §4, ADR-0007 estendido) — par buy-stop
+    S_e=11.5 + sell-stop protetor S_s=10.5, ambos tocados na mesma barra
+    (high 12.0 >= S_e, low 10.0 <= S_s): abre no buy-stop S_e e fecha no
+    sell-stop S_s na MESMA barra — flat, ambiguous=True, sem slippage.
+
+    Forma fechada: entrada 100 x 11.5 = 1.150 (custo 1.115); saída 100 x 10.5
+    = 1.050 (custo 1.105); caixa = 2.000 - 100 - 2.22 = 1.897,78; perda
+    realizada (S_s - S_e) x qty = -100, bruta de custos.
+    """
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _buy_stop_bracket_order(trigger=11.5, protector=10.5))
+
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=12.0, low=10.0))
+
+    assert len(trades) == 1  # só o fechado — o aberto foi substituído
+    trade = trades[0]
+    assert trade.entry_price == pytest.approx(11.5)  # abre em S_e, sem slippage
+    assert trade.exit_price is not None
+    assert trade.exit_price == pytest.approx(10.5)  # fecha em S_s, sem slippage
+    assert trade.ambiguous is True
+    assert trade.origin == TradeOrigin.STOP
+    assert trade.realized_pnl == pytest.approx(-100.0)  # (S_s - S_e) x qty
+    assert trade.entry_cost == pytest.approx(1.115)
+    assert trade.exit_cost == pytest.approx(1.105)
+    assert portfolio.positions == {}  # flat
+    assert portfolio.cash == pytest.approx(2_000.0 - 100.0 - 2.22)
+    assert book.pending_for(_TICKER) == ()  # par consumido — nunca "ambos executam"
+
+
+@pytest.mark.unit
+def test_buy_stop_entry_bracket_only_trigger_fills_and_protector_survives() -> None:
+    """RF-ORD-06 (espelho do ORD-02.2) — só o buy-stop toca (high >= S_e,
+    low > S_s): entra a max(S_e, open) + slippage de compra e o sell-stop do
+    par PERMANECE protegendo a posição recém-aberta (sem stop órfão)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _buy_stop_bracket_order(trigger=11.5, protector=10.5))
+
+    # open 11.0, high 12.0 >= 11.5, low 10.8 > 10.5 — só o gatilho tocou.
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=12.0, low=10.8))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.entry_price == pytest.approx(11.5 * (1 + 0.0001))  # max(S_e, open) + bps
+    assert trade.ambiguous is False
+    assert trade.origin == TradeOrigin.STOP
+    assert portfolio.positions[_TICKER].quantity == 100
+    surviving = book.pending_for(_TICKER)
+    assert len(surviving) == 1
+    assert surviving[0].kind is OrderKind.STOP
+    assert surviving[0].side is Side.SELL
+    assert surviving[0].stop == pytest.approx(10.5)  # protetor vivo
+
+
+@pytest.mark.unit
+def test_buy_stop_entry_bracket_pair_persists_until_trigger() -> None:
+    """RF-ORD-06 (design §4, sem stop órfão por buy-stop) — enquanto o
+    buy-stop não dispara, o PAR permanece pendente junto (o buy-stop é entrada
+    condicional persistente — CA-05.2 — e o sell-stop nunca ativa sem posição
+    — ORD-02.2). Inclui o caso do sell-stop tocado sem entrada (low <= S_s,
+    high < S_e): a intenção não morreu, nada é cancelado."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _buy_stop_bracket_order(trigger=11.5, protector=10.5))
+
+    # Nenhum tocado: open 11.0, high 11.2 < 11.5, low 10.8 > 10.5.
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=11.2, low=10.8))
+    assert trades == []
+    assert portfolio.positions == {}
+    pair = book.pending_for(_TICKER)
+    assert len(pair) == 2  # par inteiro permanece
+    assert all(p.intent_seq == 1 for p in pair)
+
+    # Sell-stop tocado SEM entrada (low 10.4 <= 10.5, high 11.2 < 11.5): o
+    # protetor não ativa (sem posição — ORD-02.2) e o par continua junto.
+    trades2 = _run(broker, book, portfolio, _bar(open_=11.0, high=11.2, low=10.4))
+    assert trades2 == []
+    assert portfolio.positions == {}
+    pair2 = book.pending_for(_TICKER)
+    assert len(pair2) == 2
+    assert {p.side for p in pair2} == {Side.BUY, Side.SELL}
+
+
+@pytest.mark.unit
+def test_intrabar_ambiguity_short_bracket_stop_wins_over_tp() -> None:
+    """RF-ORD-06 CA-06.2 (design §4, ADR-0007 estendido) — bracket short
+    (take-profit buy-limit TP=95 + stop-loss buy-stop SL=105, SL > TP) sobre
+    posição short aberta, ambos tocados (high 110 >= SL, low 90 <= TP): o
+    short é COBERTO no buy-stop SL (pior caso, preço da ordem, sem slippage),
+    ambiguous=True; o limite NUNCA preenche (CA-03.3 — sem dupla contagem).
+
+    Forma fechada: short abre a 99,99 (100 x (1 - 1e-4)); cobre a 105 ⇒ perda
+    realizada (99,99 - 105) x 1.000 = -5.010, bruta de custos.
+    """
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=100_000.0)
+    # Abre o short a 99,99 (venda com slippage — SHT-02.1).
+    book.place(_pending(qty=1_000, side=Side.SELL))
+    _run(broker, book, portfolio, _bar(open_=100.0))
+    assert portfolio.positions[_TICKER].quantity == -1_000
+
+    # Par de saída do short: TP buy-limit + SL buy-stop, mesma intenção;
+    # os DOIS membros carregam bracket=True (mesmo contrato do place).
+    book.place(_pending(OrderKind.LIMIT, side=Side.BUY, limit=95.0, qty=1_000, seq=3, bracket=True))
+    book.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.STOP,
+            side=Side.BUY,
+            limit=None,
+            stop=105.0,
+            qty=1_000,
+            decision_date=_DECIDED,
+            intent_seq=3,
+            bracket=True,
+        )
+    )
+
+    trades = _run(broker, book, portfolio, _bar(open_=100.0, high=110.0, low=90.0))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade.exit_price is not None
+    assert trade.exit_price == pytest.approx(105.0)  # o SL — nunca o TP (min(95, open))
+    assert trade.ambiguous is True
+    assert trade.origin == TradeOrigin.STOP
+    assert trade.realized_pnl == pytest.approx(-5_010.0)  # (99,99 - 105) x 1.000
+    assert portfolio.positions == {}  # flat — uma única cobertura, sem "ambos executam"
+    assert book.pending_for(_TICKER) == ()
+
+
+@pytest.mark.unit
+def test_no_double_execution_buy_stop_brackets() -> None:
+    """RF-ORD-06 / CA-03.3 (herdado) — nunca \"ambos executam\" na sequência
+    favorável: o pior caso resolve com UMA única execução (o fechado), nos
+    DOIS brackets com buy-stop (long de entrada e short de saída)."""
+    # Bracket long de entrada (S_e=11.5, S_s=10.5), ambos tocados.
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _buy_stop_bracket_order(trigger=11.5, protector=10.5))
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=12.0, low=10.0))
+    assert len(trades) == 1  # nunca a entrada + a saída como dois fills separados
+    assert portfolio.positions == {}  # flat — uma perda fechada só
+
+    # Bracket short de saída (TP=95, SL=105), ambos tocados.
+    broker2 = Broker()
+    book2 = PendingBook()
+    portfolio2 = Portfolio(cash=100_000.0)
+    book2.place(_pending(qty=1_000, side=Side.SELL))
+    _run(broker2, book2, portfolio2, _bar(open_=100.0))
+    book2.place(
+        _pending(OrderKind.LIMIT, side=Side.BUY, limit=95.0, qty=1_000, seq=3, bracket=True)
+    )
+    book2.place(
+        PendingOrder(
+            ticker=_TICKER,
+            kind=OrderKind.STOP,
+            side=Side.BUY,
+            limit=None,
+            stop=105.0,
+            qty=1_000,
+            decision_date=_DECIDED,
+            intent_seq=3,
+            bracket=True,
+        )
+    )
+    trades2 = _run(broker2, book2, portfolio2, _bar(open_=100.0, high=110.0, low=90.0))
+    assert len(trades2) == 1  # o SL cobre — o TP nunca preenche junto
+    assert portfolio2.positions == {}
+
+
+@pytest.mark.unit
+def test_buy_stop_bracket_no_orphan_stop() -> None:
+    """RF-ORD-06 (herança T09 da 2a) — o sell-stop do par de buy-stop NUNCA
+    ativa sem posição aberta: mesmo quando `low <= S_s` (tocado), sem o
+    buy-stop ter disparado não há trade e o par permanece — sem stop órfão
+    esperando uma posição que nunca abriu (design §4)."""
+    broker = Broker()
+    book = PendingBook()
+    portfolio = Portfolio(cash=2_000.0)
+    broker.place(book, _buy_stop_bracket_order(trigger=11.5, protector=10.5))
+
+    # low 10.4 <= S_s (10.5) mas high 11.2 < S_e (11.5): o protetor toca mas
+    # não há posição — nada executa, o par fica junto.
+    trades = _run(broker, book, portfolio, _bar(open_=11.0, high=11.2, low=10.4))
+
+    assert trades == []
+    assert portfolio.positions == {}
+    pair = book.pending_for(_TICKER)
+    assert len(pair) == 2  # sem stop órfão: os DOIS membros continuam no book
+    assert {p.side for p in pair} == {Side.BUY, Side.SELL}

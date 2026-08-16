@@ -504,6 +504,12 @@ class Broker:
                 else (intent.bracket.stop if intent.bracket is not None else None)
             )
             bracket = intent.bracket is not None
+            if bracket and kind is OrderKind.STOP and intent.bracket is not None:
+                # 2b (T07): no bracket de ENTRADA por buy-stop, o `limit` do
+                # ConvertedOrder carrega o SELL-STOP protetor (S_s) — overload
+                # documentado: o par são os dois preços (limit/stop) e o kind
+                # discrimina qual é o gatilho de entrada (aqui `stop` = S_e).
+                limit = intent.bracket.stop
 
         if short and borrow is not None and not borrow.is_available(ticker, decision_date):
             # 2b (T03, RF-SHT-03 CA-03.4 direita): aluguel indisponível ⇒ a
@@ -627,10 +633,49 @@ class Broker:
         intrabarra (abre em L e fecha no stop na mesma barra).
 
         Raises:
-            EngineError: `bracket` sem `kind = LIMIT` ou sem `limit`/`stop`
-                (ordem malformada — erro de programação).
+            EngineError: `bracket` sem `kind = LIMIT`/`STOP` ou sem os dois
+                preços (ordem malformada — erro de programação).
         """
         if order.bracket:
+            if order.kind is OrderKind.STOP:
+                # 2b (T07): bracket de ENTRADA por buy-stop — par (buy-stop
+                # S_e + sell-stop protetor S_s), mesmos intent_seq/decision_date.
+                # `order.stop` = S_e (gatilho de entrada, convert), `order.limit`
+                # = S_s (o protetor — overload documentado no convert).
+                if order.limit is None or order.stop is None:
+                    raise EngineError(
+                        "place: bracket de buy-stop malformado — exige stop (S_e) "
+                        "e limit carregando o protetor (S_s)."
+                    )
+                store.place(
+                    PendingOrder(
+                        ticker=order.ticker,
+                        kind=OrderKind.STOP,
+                        side=Side.BUY,
+                        limit=None,
+                        stop=order.stop,
+                        qty=order.qty,
+                        decision_date=order.decision_date,
+                        intent_seq=order.intent_seq,
+                        bracket=True,
+                        cut_reason=order.cut_reason,
+                    )
+                )
+                store.place(
+                    PendingOrder(
+                        ticker=order.ticker,
+                        kind=OrderKind.STOP,
+                        side=Side.SELL,
+                        limit=None,
+                        stop=order.limit,
+                        qty=order.qty,
+                        decision_date=order.decision_date,
+                        intent_seq=order.intent_seq,
+                        bracket=True,
+                        cut_reason=order.cut_reason,
+                    )
+                )
+                return
             if order.kind is not OrderKind.LIMIT or order.limit is None or order.stop is None:
                 raise EngineError(
                     "place: ordem bracket malformada — exige kind=LIMIT com limit e stop."
@@ -739,6 +784,37 @@ class Broker:
             if order.intent_seq in consumed_seq:
                 continue  # par de bracket já resolvido acima
 
+            if order.bracket and order.kind is OrderKind.STOP and order.side is Side.BUY:
+                # 2b (T07): bracket de ENTRADA por buy-stop — par (buy-stop
+                # S_e + sell-stop protetor S_s), resolvido JUNTO (ADR-0007
+                # estendido: pior caso quando ambos tocam na mesma barra).
+                partner = next(
+                    (
+                        o
+                        for o in store.pending_for(ticker)
+                        if o.intent_seq == order.intent_seq
+                        and o.kind is OrderKind.STOP
+                        and o.side is Side.SELL
+                    ),
+                    None,
+                )
+                consumed_seq.add(order.intent_seq)
+                self._execute_entry_buy_stop_bracket(
+                    store,
+                    ticker,
+                    order,
+                    partner,
+                    bar,
+                    portfolio,
+                    cost_model,
+                    slippage,
+                    adv,
+                    trades,
+                    remaining,
+                    counters,
+                )
+                continue
+
             if order.bracket and order.kind is OrderKind.LIMIT:
                 # O par de bracket (mesma intenção) é resolvido JUNTO — a
                 # ambiguidade intrabarra (ADR-0007/D2) e o "sem stop órfão"
@@ -753,20 +829,40 @@ class Broker:
                 )
                 consumed_seq.add(order.intent_seq)
                 if order.side is Side.BUY:
-                    self._execute_entry_bracket(
-                        store,
-                        ticker,
-                        order,
-                        partner,
-                        bar,
-                        portfolio,
-                        cost_model,
-                        slippage,
-                        adv,
-                        trades,
-                        remaining,
-                        counters,
-                    )
+                    position = portfolio.positions.get(ticker)
+                    if position is not None and position.quantity < 0:
+                        # 2b (T07): bracket SHORT de saída (TP buy-limit + SL
+                        # buy-stop sobre posição short) — pior caso coberto no
+                        # SL, nunca no TP (CA-06.2).
+                        self._execute_short_exit_bracket(
+                            store,
+                            ticker,
+                            order,
+                            partner,
+                            bar,
+                            portfolio,
+                            cost_model,
+                            slippage,
+                            adv,
+                            trades,
+                            remaining,
+                            counters,
+                        )
+                    else:
+                        self._execute_entry_bracket(
+                            store,
+                            ticker,
+                            order,
+                            partner,
+                            bar,
+                            portfolio,
+                            cost_model,
+                            slippage,
+                            adv,
+                            trades,
+                            remaining,
+                            counters,
+                        )
                 else:
                     self._execute_exit_bracket(
                         store,
@@ -1107,6 +1203,210 @@ class Broker:
         if stop_order is not None:
             remaining.append(stop_order)
 
+    def _execute_entry_buy_stop_bracket(
+        self,
+        store: PendingBook,
+        ticker: str,
+        buy_stop: PendingOrder,
+        stop_order: PendingOrder | None,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+        trades: list[Trade],
+        remaining: list[PendingOrder],
+        counters: MechanismCounters | None = None,
+    ) -> None:
+        """Bracket de ENTRADA por buy-stop (S_e + sell-stop protetor S_s,
+        S_s < S_e) — ADR-0007 estendido (2b, T07, RF-ORD-06 CA-06.1).
+
+        - ambos tocados (``high >= S_e`` E ``low <= S_s``): AMBIGUIDADE — a
+          posição **abre no buy-stop S_e** e **fecha no sell-stop S_s na
+          mesma barra** (fills nos preços das ordens, sem slippage — tabela
+          D2 do design §4); perda realizada ``(S_e - S_s) x qty + custos``,
+          fica **flat**, `ambiguous=True`;
+        - só o buy-stop tocou: entrada normal (``max(S_e, open)`` + slippage
+          de compra, regra do ORD-05) e o protetor PERMANECE pendente;
+        - buy-stop não disparou: o PAR PERMANECE pendente — o buy-stop é
+          entrada condicional PERSISTENTE (CA-05.2) e o sell-stop continua
+          incapaz de ativar sem posição (ORD-02.2): sem stop órfão, o par
+          anda junto (design §4, herança T09);
+        - guard ENG-05 (emenda P1): posição LONG aberta ⇒ ignora e CONSUME
+          o par inteiro (nunca duas posições do mesmo sinal).
+
+        O par é sempre consumido do book; nunca "ambos executam" na
+        sequência favorável (CA-03.3).
+        """
+        position = portfolio.positions.get(ticker)
+        if position is not None and position.quantity > 0:
+            _log.info(
+                "engine.enter_with_open_position",
+                ticker=ticker,
+                date=bar.date.isoformat(),
+            )
+            return  # guard consome o par inteiro
+        entry_price = buy_stop.stop
+        stop_price = stop_order.stop if stop_order is not None else None
+        if entry_price is None or stop_price is None:
+            raise EngineError(
+                f"execute_pending: bracket de buy-stop malformado em {ticker} — "
+                "par sem gatilho ou sem protetor (programming error)."
+            )
+
+        if bar.high >= entry_price and bar.low <= stop_price:
+            # Pior caso: abre em S_e, fecha em S_s na mesma barra.
+            entry = self._execute_entry(
+                store,
+                ticker,
+                buy_stop,
+                bar,
+                portfolio,
+                cost_model,
+                slippage,
+                adv,
+                forced_price=entry_price,
+                ambiguous=True,
+                counters=counters,
+            )
+            if entry is not None:
+                closed = self.sell(
+                    portfolio,
+                    ticker=ticker,
+                    price=stop_price,
+                    execution_date=bar.date,
+                    decision_date=buy_stop.decision_date,
+                    origin=TradeOrigin.STOP,
+                    ambiguous=True,
+                )
+                assert closed is not None  # posição acabou de abrir
+                trades.append(closed)  # o fechado substituiu o aberto no portfolio
+            # Sem caixa para 1 ação: nada abre; o par morre igualmente.
+            return
+
+        if bar.high >= entry_price:
+            # Só o buy-stop tocou: entrada normal (regra do ORD-05: max(S_e,
+            # open) + slippage de COMPRA) — `_execute_entry` não aceita kind
+            # STOP direto (barrado por convert), então o preço já slipado é
+            # passado como forced_price; o protetor segue vivo.
+            dispatch = max(entry_price, bar.open)
+            slipped = slippage.execution_price(dispatch, Side.BUY, buy_stop.qty, adv)
+            entry = self._execute_entry(
+                store,
+                ticker,
+                buy_stop,
+                bar,
+                portfolio,
+                cost_model,
+                slippage,
+                adv,
+                forced_price=slipped,
+                counters=counters,
+            )
+            if entry is not None:
+                trades.append(entry)
+                if stop_order is not None:
+                    remaining.append(stop_order)
+            # Entrada sem caixa (None): a intenção morre — o par sai junto.
+            return
+
+        # Buy-stop não disparou: o par permanece pendente (CA-05.2 + sem
+        # stop órfão — o sell-stop nunca ativa sem posição, ORD-02.2).
+        remaining.append(buy_stop)
+        if stop_order is not None:
+            remaining.append(stop_order)
+
+    def _execute_short_exit_bracket(
+        self,
+        store: PendingBook,
+        ticker: str,
+        tp_order: PendingOrder,
+        stop_order: PendingOrder | None,
+        bar: BarSlice,
+        portfolio: Portfolio,
+        cost_model: CostModel,
+        slippage: SlippageModel,
+        adv: float | None,
+        trades: list[Trade],
+        remaining: list[PendingOrder],
+        counters: MechanismCounters | None = None,
+    ) -> None:
+        """Bracket de SAÍDA de short (take-profit buy-limit TP + stop-loss
+        buy-stop SL, SL > TP) sobre posição short aberta — ADR-0007 estendido
+        (2b, T07, RF-ORD-06 CA-06.2).
+
+        - ``high >= SL`` E ``low <= TP``: AMBIGUIDADE — o short é **coberto
+          no buy-stop SL** (pior caso, preço da ordem, sem slippage),
+          `ambiguous=True`; o limite NUNCA preenche (CA-06.2 — nunca ambos
+          executam, CA-03.3);
+        - só o SL tocou (``high >= SL``, ``low > TP``): cobertura a
+          ``max(SL, open)`` + slippage de compra (regra do ORD-05); o TP
+          cancela ao fim da barra (Q2);
+        - só o TP tocou (``low <= TP``, ``high < SL``): cobertura a
+          ``min(TP, open)`` (limite nunca violado, SLP-04.2); o SL cancela
+          (posição fechada);
+        - nenhum tocado: o TP cancela (Q2) e o SL PERMANECE protegendo
+          (espelho do bracket de saída da 2a).
+        """
+        tp_price = tp_order.limit
+        stop_price = stop_order.stop if stop_order is not None else None
+        if tp_price is None or stop_price is None:
+            raise EngineError(
+                f"execute_pending: bracket short malformado em {ticker} — "
+                "par sem take-profit ou sem stop-loss (programming error)."
+            )
+
+        if bar.high >= stop_price and bar.low <= tp_price:
+            closed = self.cover(
+                portfolio,
+                ticker=ticker,
+                price=stop_price,
+                execution_date=bar.date,
+                decision_date=tp_order.decision_date,
+                origin=TradeOrigin.STOP,
+                ambiguous=True,
+            )
+            assert closed is not None  # posição short aberta (pré-condição do par)
+            trades.append(closed)
+            return
+
+        if bar.high >= stop_price:
+            # Só o stop-loss tocou: regra normal do buy-stop (max(SL, open) +
+            # slippage de compra); o TP cancela ao fim da barra (Q2).
+            assert stop_order is not None  # stop_price derivou de stop_order (guard acima)
+            ref = max(stop_price, bar.open)
+            price = slippage.execution_price(ref, Side.BUY, stop_order.qty, adv)
+            closed = self.cover(
+                portfolio,
+                ticker=ticker,
+                price=price,
+                execution_date=bar.date,
+                decision_date=tp_order.decision_date,
+                origin=TradeOrigin.STOP,
+            )
+            assert closed is not None
+            trades.append(closed)
+            return
+
+        if bar.low <= tp_price:
+            # Só o take-profit tocou: cobertura a min(TP, open) — o limite
+            # nunca é violado (SLP-04.2); o SL cancela (posição fechada).
+            closed = self.cover(
+                portfolio,
+                ticker=ticker,
+                price=min(tp_price, bar.open),
+                execution_date=bar.date,
+                decision_date=tp_order.decision_date,
+                origin=TradeOrigin.LIMIT,
+            )
+            assert closed is not None
+            trades.append(closed)
+            return
+
+        # Nenhum tocado: TP cancela (Q2); o SL persiste protegendo.
+        if stop_order is not None:
+            remaining.append(stop_order)
+
     def _close_partial(
         self,
         portfolio: Portfolio,
@@ -1118,6 +1418,7 @@ class Broker:
         decision_date: date,
         origin: TradeOrigin | None = None,
         rebalance: bool = True,
+        ambiguous: bool | None = None,
     ) -> Trade | None:
         """Redução PARCIAL da posição aberta — venda de LONG (rebalance, 2a) ou
         COBERTURA de SHORT (2b, T02).
@@ -1179,6 +1480,7 @@ class Broker:
                 decision_date=decision_date,
                 origin=origin,
                 rebalance=rebalance,
+                ambiguous=ambiguous,
             )
         else:
             portfolio.positions[ticker] = Position(
@@ -1210,7 +1512,7 @@ class Broker:
                 exit_decision_date=decision_date,
                 origin=origin,
                 cut_reason=open_trade.cut_reason,
-                ambiguous=open_trade.ambiguous,
+                ambiguous=ambiguous if ambiguous is not None else open_trade.ambiguous,
                 rebalance=rebalance,
             )
             portfolio.trades.append(closed)
@@ -1625,12 +1927,15 @@ class Broker:
         execution_date: date,
         decision_date: date,
         origin: TradeOrigin | None = None,
+        ambiguous: bool | None = None,
     ) -> Trade | None:
         """Cobertura INTEGRAL da posição short (2b, T02 — EXIT_SHORT do laço).
 
         Espelho da ``sell`` da Fase 1 para o lado negativo: compra que zera a
         posição short, debitando notional + custo do caixa. `origin` default
-        MARKET (EXIT_SHORT vai por cancel_all + cobertura ao open — T08a).
+        MARKET (EXIT_SHORT vai por cancel_all + cobertura ao open — T08a);
+        `ambiguous` (T07) força o flag na cobertura ambígua do pior caso
+        (ADR-0007).
         """
         position = portfolio.positions.get(ticker)
         if position is None or position.quantity >= 0:
@@ -1652,6 +1957,7 @@ class Broker:
             execution_date=execution_date,
             decision_date=decision_date,
             origin=origin,
+            ambiguous=ambiguous,
         )
         portfolio.check_invariants()
         return closed

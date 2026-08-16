@@ -97,12 +97,24 @@ class ConditionalIntent:
             raise EngineError("stop presente exige order_type=STOP.")
 
         if self.bracket is not None:
-            if self.order_type is not OrderKind.LIMIT:
-                raise EngineError("bracket exige order_type=LIMIT.")
-            if self.limit is None or self.limit != self.bracket.limit:
-                raise EngineError(
-                    "bracket exige limit espelhando bracket.limit na mesma intenção (SIG-01.2)."
-                )
+            if self.order_type is OrderKind.LIMIT:
+                # 2a: par (limite de entrada L + sell-stop protetor S), L na
+                # própria intenção espelhando bracket.limit (SIG-01.2).
+                if self.limit is None or self.limit != self.bracket.limit:
+                    raise EngineError(
+                        "bracket exige limit espelhando bracket.limit na mesma intenção (SIG-01.2)."
+                    )
+            elif self.order_type is OrderKind.STOP:
+                # 2b (T07): par de ENTRADA por buy-stop — o gatilho de entrada
+                # (self.stop) é o buy-stop S_e, que coincide com bracket.limit;
+                # o protetor é bracket.stop (S_s, com S_s < S_e).
+                if self.stop is None or self.stop != self.bracket.limit:
+                    raise EngineError(
+                        "bracket de buy-stop exige stop (gatilho de entrada) "
+                        "espelhando bracket.limit na mesma intenção (2b, T07)."
+                    )
+            else:
+                raise EngineError("bracket exige order_type=LIMIT (2a) ou STOP (2b, buy-stop).")
 
 
 @runtime_checkable

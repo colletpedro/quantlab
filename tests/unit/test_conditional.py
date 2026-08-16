@@ -86,11 +86,30 @@ def test_bracket_carries_limit_and_stop_in_same_intention() -> None:
 
 @pytest.mark.unit
 def test_bracket_requires_limit_entry_type() -> None:
-    """Bracket é limite de entrada (ou take-profit) com stop — nunca STOP puro."""
-    with pytest.raises(EngineError, match="bracket exige order_type=LIMIT"):
+    """Bracket exige um tipo de entrada válido — LIMIT (2a) ou STOP (2b,
+    buy-stop) com o gatilho espelhando `bracket.limit`; MARKET nunca.
+
+    Regressão documentada (2b, T07): na 2a, bracket STOP puro levantava
+    EngineError; com o buy-stop (RF-ORD-06), o bracket de ENTRADA por buy-stop
+    é constructo válido (S_e = bracket.limit = stop, protetor em bracket.stop).
+    """
+    # 2b: bracket de buy-stop VÁLIDO — gatilho S_e espelha bracket.limit.
+    intent = ConditionalIntent(
+        Signal.ENTER, OrderKind.STOP, stop=10.0, bracket=Bracket(limit=10.0, stop=9.5)
+    )
+    assert intent.bracket is not None
+    assert intent.stop == intent.bracket.limit == 10.0
+    assert intent.bracket.stop == 9.5
+
+    # Gatilho divergente do bracket.limit é erro — o par é um só (SIG-01.2).
+    with pytest.raises(EngineError, match=r"espelhando bracket\.limit"):
         ConditionalIntent(
             Signal.ENTER, OrderKind.STOP, stop=9.5, bracket=Bracket(limit=10.0, stop=9.5)
         )
+
+    # MARKET nunca é bracket.
+    with pytest.raises(EngineError, match=r"bracket exige order_type=LIMIT \(2a\) ou STOP"):
+        ConditionalIntent(Signal.ENTER, OrderKind.MARKET, bracket=Bracket(limit=10.0, stop=9.5))
 
 
 @pytest.mark.unit
