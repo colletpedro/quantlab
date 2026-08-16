@@ -197,8 +197,12 @@ def execute_pending(self, store: PendingBook, ticker: str, bar: BarSlice,
                     portfolio: Portfolio, cost_model: CostModel,
                     slippage: SlippageModel, adv: float | None) -> list[Trade]:
     """Regras da 2a PRESERVADAS (regressão zero) + extensões 2b:
-       - MARKET BUY/SELL → open ± slippage (2a; short = SELL com qty < 0 — SHT-02.1;
-         cobertura = BUY reduzindo |qty| — SHT-02.2, sem cruzar)
+       - MARKET BUY/SELL → open ± slippage (2a; short: `ConvertedOrder.qty`
+         carrega o sinal NEGATIVO (alvo −, SHT-01.2) e o `Broker.place` DERIVA o
+         side: `qty > 0` ⇒ BUY, `qty < 0` ⇒ SELL com a MAGNITUDE — `PendingOrder.qty`
+         é sempre positiva e o side carrega a direção (SHT-02.1 — a negatividade
+         nasce no `Position`/`Trade.quantity`); cobertura = BUY reduzindo |qty|
+         — SHT-02.2, sem cruzar)
        - LIMIT → min/max(L, open) ou cancela ao fim da barra (2a); cover short por buy-limit
          NUNCA viola o limite (SHT-02.4)
        - sell-stop → low ≤ S ? min(S, open) + slippage : persiste (2a)
