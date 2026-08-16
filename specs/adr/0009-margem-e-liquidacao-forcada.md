@@ -1,6 +1,6 @@
 # ADR-0009 — Invariante de margem e liquidação forçada determinística (substitui ENG-04.4/POR-04.3)
 
-**Status:** proposto (gate 2 da Fase 2b)
+**Status:** aceito
 **Data:** 2026-08-14
 **Contexto de decisão:** Fase 2b — engine (margem e liquidação)
 

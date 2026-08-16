@@ -17,7 +17,7 @@ Cada transição entre etapas é um **gate check** explícito. Um gate reprovado
 |---|---|---|---|---|---|
 | `00-plataforma/fase-1` | 1.0 | ✅ aprovada | ✅ aprovada (v0.2) | ✅ aprovada (v0.1) | 🟡 Bloco A |
 | `fase-2a` | 0.2 | 🟢 gate 1 aprovado (em revisão) | ✅ aprovada (v0.1) | 🟢 aprovada (v0.1) | ✅ T01–T18 |
-| `fase-2b` | 0.2 | 🟢 gate 1 aprovado | 🟡 v0.1 em revisão (gate 2) | — | — |
+| `fase-2b` | 0.2 | 🟢 gate 1 aprovado | 🟢 gate 2 aprovado (v0.1) | — | — |
 | `01-ingestao` | — | — | — | — | ⬜ |
 | `02-persistencia` | — | — | — | — | ⬜ |
 | `03-engine` | — | — | — | — | ⬜ |
@@ -42,9 +42,9 @@ Decisões arquiteturais são **numeradas e imutáveis**. Quando uma decisão mud
 | [0006](adr/0006-modelo-de-slippage.md) | Modelo de slippage (fixo bps + participação com cap, forma funcional cravada) | aceito |
 | [0007](adr/0007-ambiguidade-intrabarra.md) | Resolução da ambiguidade intrabarra (pior caso para o executor) | aceito |
 | [0008](adr/0008-politica-de-sizing.md) | Política de sizing default (1/N, N do run, N=1 ⇒ all-in) | aceito |
-| [0009](adr/0009-margem-e-liquidacao-forcada.md) | Invariante de margem e liquidação forçada determinística (substitui ENG-04.4/POR-04.3) | proposto |
-| [0010](adr/0010-modelo-de-aluguel.md) | Modelo de aluguel (borrow fee determinístico e disponibilidade) | proposto |
-| [0011](adr/0011-walk-forward-e-fronteira-de-mutacao.md) | Protocolo walk-forward e fronteira de mutação IS/OOS | proposto |
+| [0009](adr/0009-margem-e-liquidacao-forcada.md) | Invariante de margem e liquidação forçada determinística (substitui ENG-04.4/POR-04.3) | aceito |
+| [0010](adr/0010-modelo-de-aluguel.md) | Modelo de aluguel (borrow fee determinístico e disponibilidade) | aceito |
+| [0011](adr/0011-walk-forward-e-fronteira-de-mutacao.md) | Protocolo walk-forward e fronteira de mutação IS/OOS | aceito |
 
 ## Roadmap
 

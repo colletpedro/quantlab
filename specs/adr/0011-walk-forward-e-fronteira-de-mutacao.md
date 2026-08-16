@@ -1,6 +1,6 @@
 # ADR-0011 — Protocolo walk-forward e fronteira de mutação IS/OOS
 
-**Status:** proposto (gate 2 da Fase 2b)
+**Status:** aceito
 **Data:** 2026-08-14
 **Contexto de decisão:** Fase 2b — engine (walk-forward, RF-WFK)
 
@@ -17,7 +17,7 @@ Três decisões de peso precisam de registro próprio:
 ## Decisão
 
 - **Isolamento estrito por construção (CA-01.1):** cada fold constrói `PriceSeries`/`UnionCalendar` **truncados no fim do IS** para o run IS; o `MarketView` indexa o array truncado e qualquer acesso além do fim é `EngineError` — a fronteira é do array, não da disciplina de quem chama. A série OOS **não é passada** a nenhum run IS.
-- **Warmup do OOS = cauda do IS (R4):** a avaliação OOS roda sobre a série composta (últimas `warmup` barras ≤ fronteira, dados IS — sem lookahead) + segmento OOS; decisões durante a cauda são aquecimento (descartadas); equity registrado a partir do primeiro bar OOS. Mutar o OOS não altera o warmup (CA-01.3).
+- **Warmup do OOS = cauda do IS (R4, precisão da emenda P1 do design §3.6):** a avaliação OOS roda sobre a série composta (últimas `warmup` barras ≤ fronteira, dados IS — sem lookahead) + segmento OOS; **a estratégia não é consultada na cauda** — o mecanismo é o gate de warmup do próprio laço (`i ≥ warmup` com `len(cauda) = warmup` ⇒ a primeira barra consultada é o primeiro bar OOS), então a cauda entra **como histórico puro** do MarketView e a estratégia nunca trade a cauda; equity registrado a partir do primeiro bar OOS (`oos_equity = equity_curve[tail_len:]`). Mutar o OOS não altera a cauda ⇒ não altera o warmup (CA-01.3).
 - **Métrica de seleção IS (R5):** **Sharpe anualizado com `rf = 0`** sobre a equity IS — forma fechada única, compartilhada com o relatório (sem drift entre seleção e declaração de MHT).
 - **Resultado honesto:** equity = **concatenação exata dos segmentos OOS** (RF-WFK-03 CA-03.1); relatório mostra a tabela fold a fold (IS/OOS, parâmetros selecionados — CA-03.2) e os parâmetros médios.
 - **Ancoragem (D7/R7):** **rolling** (janela IS de tamanho fixo, deslizante) como **default**; **anchored** (janela IS crescente) configurável para **medir a diferença**, não adivinhar.

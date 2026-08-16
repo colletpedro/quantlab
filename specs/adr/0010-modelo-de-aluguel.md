@@ -1,6 +1,6 @@
 # ADR-0010 — Modelo de aluguel (borrow fee determinístico e disponibilidade)
 
-**Status:** proposto (gate 2 da Fase 2b)
+**Status:** aceito
 **Data:** 2026-08-14
 **Contexto de decisão:** Fase 2b — engine (short/aluguel, RF-SHT-03)
 

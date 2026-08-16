@@ -1,6 +1,6 @@
 # Fase 2b — Venda a descoberto, margem e walk-forward — Design técnico
 
-**Status:** em revisão — gate 2
+**Status:** aprovada — gate check 2 concluído
 **Versão:** 0.1
 **Data:** 2026-08-14
 **Requisitos de origem:** `specs/fase-2b-requirements.md` v0.2 (aprovada, gate 1)
@@ -619,3 +619,4 @@ Opções, futuros e derivativos; fracionário (quantidades inteiras — SIZ-01 d
 |---|---|---|
 | 0.1 | 2026-08-14 | Rascunho inicial — gate 2. Design completo no template da 2a (§1–§11): contratos completos com campos/tipos/defaults (§3.1–§3.7), exceções com pré/pós-condições por interface (§3.8), fronteira de instante (§3.9), fluxo da barra 2b com sequência declarada como invariante (§4), bordas (§5), identidade estendida com borrow fees (§6), analytics gross/net + MHT + fundo quebrado (§7), decisões D1–D7 comprometidas com ADRs (§8), 54 CAs mapeados 1:1 (§10). ADRs **0009–0011 propostos** (margem + liquidação; modelo de aluguel; protocolo walk-forward). Emenda spec-first no requirements v0.2 §8: a missão do gate 2 reagrupa os ADRs (D1+D2 → 0009; fee de aluguel → 0010; D6+D7 → 0011) — tabela atualizada para não divergir. |
 | 0.1 (emenda P1) | 2026-08-14 | Verificação do gate 2 (P1), sem reabrir o gate 1: (1) regra de ativação por side do buy-stop × guard ENG-05, tabela explícita (§3.5/§3.8/§4 passo 1b); (2) barreira P2 da 2a removida no `convert` (STOP vira kind válido) + regressão documentada do teste 2a `test_convert_domain_errors_raise_engine_error` (§3.5/§3.8, teste novo `test_convert_accepts_buy_stop`); (3) mecanismo do warmup OOS explicitado — cauda como histórico puro via gate i ≥ warmup, `oos_equity = equity_curve[tail_len:]`, pré-condição `strategy.warmup == warmup` (§3.6); (4) fonte única do Sharpe — `metrics.sharpe()` (2a) delega ao helper do engine (§7); (5) cronologia do fundo quebrado por gap no §4 (liquida → constata → congela → métricas None). §10: 58 testes nomeados para 54 CAs. |
+| 0.1 (aprovação do gate 2) | 2026-08-14 | Checklist final do gate 2 (CONTRIBUTING.md) executado item a item: anti-lacuna 1–5 confirmado no texto; §3.8 completa com os DOIS stops por side; §10 com os 58 testes mapeando os 54 CAs (CA-03.4 nos dois lados; 3 testes novos da P1 na tabela); §9 declarado e sem pendências; D1–D7 comprometidos com ADRs 0009–0011 sem divergência com a tabela §8 da spec v0.2. ADRs 0009–0011 formalizados como **aceitos**. |

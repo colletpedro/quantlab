@@ -32,6 +32,20 @@ Rodada de verificação P1 antes do fechamento do gate 2 (5 itens, todos resolvi
 
 §10 atualizado: **58 testes nomeados para 54 CAs** (+3: guard ENG-05 do buy-stop nos dois lados e convert aceita buy-stop).
 
+### fase-2b-design 0.1 — aprovada (gate 2 fechado)
+
+Checklist final do gate 2 (CONTRIBUTING.md) executado item a item em 2026-08-14, validado pelo tech lead do web:
+
+- **Anti-lacuna 1–5** confirmado no texto real: (1) zero tipo referenciado sem definição (todo tipo do §3 tem bloco próprio com campos/tipos/defaults); (2) zero assinatura incompleta (params de `execute_margin_calls`, `execute_pending` 2b, `build_folds`, `run_walkforward`, `sharpe_annualized_rf0` existem no §3 e são usados no §4); (3) imutabilidade/pureza com dono de mutação declarado (§3.3 "Quem muta, quem lê"); (4) agregações com dono (§3.7 — `margin_calls`/`intrabar_ambiguities` derivadas pelo laço; `borrow_rejections` contado no `convert`; `borrow_fees` acumulado no laço); (5) datas naive (RNF-07, §3.9).
+- **§3.8** completa: os DOIS stops com ativação por side (emenda P1); pré/pós de margem, borrow fee, folds e WF em `EngineError`; fronteira de instante §3.9.
+- **§10** com os **58 testes nomeados** mapeando os **54 CAs** (CA-03.4 nos dois lados; os 3 testes novos da P1 na tabela).
+- **§9** fora do escopo declarado e vazio de pendências.
+- **D1–D7** cada decisão comprometida com ADR (0009/0010/0011), sem divergência com a tabela §8 da spec v0.2 — a emenda P1 não reabriu o gate 1 (numeração conferida: D1/D2 → 0009; D3 → contrato + fee → 0010; D4/D5 → fórmulas/ADR-0007 estendido; D6/D7 → 0011).
+
+**ADR-0009 a ADR-0011 — aceitos** (promovidos de propostos a aceitos na aprovação formal do gate 2; cada ADR cita invariantes + testes nomeados e a condição "revisitar quando"; ADR-0011 teve o mecanismo do warmup OOS alinhado à precisão da emenda P1 do design §3.6).
+
+Veredito: **Gate 2 APROVADO — design v0.1 da Fase 2b e ADRs 0009–0011 aceitos. Gate 3 (tarefas → implementação) pode abrir.**
+
 ### fase-2b-requirements 0.2 — gate 1 aprovado
 
 Gate 1 da Fase 2b declarado **APROVADO** após checklist validado pelo tech lead do web.
