@@ -4,6 +4,22 @@ Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versioname
 
 ## 2026-08-14
 
+### fase-2b-design 0.1 — em revisão (gate 2)
+
+Design técnico v0.1 da Fase 2b produzido no template da 2a (§1–§11) + ADRs **0009–0011 propostos**.
+
+**Estrutura** — §1 princípio organizador com portador de garantia por RF (construção × teste nomeado); §2 arquitetura (módulos novos `engine/margin.py` e `engine/walkforward.py`, WF como caixa preta sobre `run_backtest_multi` — herança por construção, filosofia do benchmark 1/N da T15); §3 contratos COMPLETOS (Signal com `ENTER_SHORT`/`EXIT_SHORT`; Position/Trade com `qty < 0` e `origin = MARGIN_CALL`; MarginModel/MarginCallOrder/BrokenFundState; BorrowFeeModel; Fold/ParameterGrid/WalkForwardResult; MechanismCounters +margin_calls/borrow_rejections; BacktestResultMulti +broken_fund/borrow_fees); §4 fluxo da barra 2b com sequência declarada como invariante (executar → marcar → fee → margem → consultar) e pior caso intrabarra estendido aos brackets com buy-stop; §5 bordas (short deslistado, ex-dividendo); §6 identidade CA-04.2 com `total_borrow_fees`; §7 analytics gross/net + MHT + fundo quebrado com `None` explícito; §9 fora do escopo; §10 os **54 CAs mapeados 1:1** (55 testes — CA-03.4 tem dois lados).
+
+**Checklist anti-lacuna (lição da 2a)** — 1) todo tipo citado no §3 tem bloco próprio com campos/tipos/defaults (nenhum `BarSlice`/`PendingOrder`/`CutStage` só referenciado); 2) toda assinatura completa (parâmetros + retorno + pré/pós em §3.8); 3) imutabilidade/pureza declarada (quem muta: laço/broker/portfolio; quem só lê: margin_requirement, margin_utilization, daily_fee, build_folds, run_walkforward); 4) dono de cada agregação declarado (margin_calls/ambiguidades derivados dos trades pelo laço; borrow_rejections contado no convert; borrow_fees acumulado no laço; relatório só reporta); 5) datas naive, zero datetime/timezone nos módulos novos.
+
+**Emenda spec-first no requirements v0.2 §8** — a missão do gate 2 reagrupa os ADRs: **D1+D2 → ADR-0009** (margem + liquidação + fundo quebrado; a spec tinha D2 → ADR-0010), **fee de aluguel (RF-SHT-03/D3) → ADR-0010**, **D6+D7 → ADR-0011**. Tabela §8 atualizada para não divergir (D1/D2 → 0009; D3 → contrato + 0010; D6/D7 → 0011).
+
+**ADR-0009** — invariante de margem (`equity ≥ Σ|qty|×close×factor`, factor default 1.0, regressão long-only = cash ≥ 0) + liquidação forçada determinística (close detecta → open executa, alfabética, integral por ativo, cancela pendentes, `origin = MARGIN_CALL`) + fundo quebrado congelado com métricas `None` explícito (nunca NaN).
+
+**ADR-0010** — modelo de aluguel: fee diário `|qty| × close × 0,005/252` no close, categoria própria, termo próprio na conciliação; disponibilidade ilimitada default (R1) com restrição configurável (bloqueia short, loga e conta); viés não calibrado declarado.
+
+**ADR-0011** — protocolo walk-forward: isolamento estrito IS/OOS por construção (série truncada, guard no array); warmup do OOS pela cauda do IS (R4); seleção = Sharpe anualizado rf=0 (R5); rolling default (D7/R7) com anchored configurável; mutação ENG-01.2 estendida ao OOS (mutar OOS não altera params IS); WF como caixa preta; orçamento por fold + total (RNF-10).
+
 ### fase-2b-requirements 0.2 — gate 1 aprovado
 
 Gate 1 da Fase 2b declarado **APROVADO** após checklist validado pelo tech lead do web.
