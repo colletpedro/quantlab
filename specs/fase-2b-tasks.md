@@ -779,21 +779,29 @@ bloqueante).
 Harness do WF no CI (T12b); E2E (T13).
 
 **Critério de verificação**
-- [ ] `make test-unit` verde; `make typecheck` verde
-- [ ] `test_report_counts_margin_call_origin_trades` (CA-02.3)
-- [ ] `test_report_borrow_fee_own_category` (CA-03.3)
-- [ ] `test_broken_fund_metrics_are_explicit_none_never_nan` (CA-03.2)
-- [ ] `test_broken_fund_result_excluded_from_auto_comparison` (CA-03.3)
-- [ ] `test_report_benchmark_is_1n_long_only_with_long_short_vs_long_only` (CA-05.1);
+- [x] `make test-unit` verde; `make typecheck` verde
+- [x] `test_report_counts_margin_call_origin_trades` (CA-02.3)
+- [x] `test_report_borrow_fee_own_category` (CA-03.3)
+- [x] `test_broken_fund_metrics_are_explicit_none_never_nan` (CA-03.2)
+- [x] `test_broken_fund_result_excluded_from_auto_comparison` (CA-03.3)
+- [x] `test_report_benchmark_is_1n_long_only_with_long_short_vs_long_only` (CA-05.1);
   `test_benchmark_never_shorts` (CA-05.2)
-- [ ] `test_bias_section_includes_2b_items` (CA-06.1)
-- [ ] `test_run_section_reports_mht_metric_grid_folds_reconstructible` (CA-06.2)
-- [ ] `test_report_flags_locked_short_position` (CA-05.2 do SHT-05)
-- [ ] `test_architecture_timezone_imports` (estendido) — `margin`/`walkforward`
-  não importam datetime/timezone (RNF-07, bloqueante)
-- [ ] `test_rnf_heritage_tests_pass_on_long_short_run` (CA-02.1)
-- [ ] `test_spec_architecture_fails_without_adr_0009` (CA-02.3)
-- [ ] Regressão zero: relatório da 2a continua verde
+- [x] `test_bias_section_includes_2b_items` (CA-06.1)
+- [x] `test_run_section_reports_mht_metric_grid_folds_reconstructible` (CA-06.2)
+- [x] `test_report_shows_fold_by_fold_table_with_selected_params` (CA-WFK-03.2) —
+  tabela fold a fold; `None` renderizado como traço "—" (R6 — decisão com
+  dono, registrada: nunca NaN, nunca string vazia)
+- [x] `test_report_flags_locked_short_position` (CA-05.2 do SHT-05)
+- [x] `test_architecture_date_isolation` (estendido) — `margin`/`walkforward`
+  no glob (RNF-07, bloqueante); o teste real do repo é
+  `test_scan_covers_every_subpackage` em test_architecture_date_isolation.py
+  (o nome `test_architecture_timezone_imports` do tasks/design não existe no
+  código — divergência registrada: o guard é o mesmo, com o nome do arquivo)
+- [x] `test_rnf_heritage_tests_pass_on_long_short_run` (CA-02.1)
+- [x] `test_spec_architecture_fails_without_adr_0009` (CA-02.3)
+- [x] `test_ci_coverage_floor_85_includes_margin_walkforward` (CA-02.2) — piso
+  85% com `margin.py`/`walkforward.py` dentro do escopo de engine/
+- [x] Regressão zero: relatório da 2a continua verde
 
 **Riscos**
 Médio — o relatório é o único lugar que pode "mentir" sem o engine mentir;

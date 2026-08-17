@@ -134,7 +134,14 @@ def test_scan_covers_every_subpackage() -> None:
         "engine/conditional.py",
         "engine/broker.py",
     }
-    assert fase_2a_engine_modules <= names, (
-        f"módulos novos da Fase 2a fora da varredura: "
-        f"{sorted(fase_2a_engine_modules - names)} — RNF-07 não estaria sendo checado neles"
+    # Fase 2b (T12, CA-RNF-02.2): `margin.py` e `walkforward.py` nascem nesta
+    # fase — a regra de instante tem que valer neles desde o primeiro dia.
+    fase_2b_engine_modules = {
+        "engine/margin.py",
+        "engine/walkforward.py",
+    }
+    required_modules = fase_2a_engine_modules | fase_2b_engine_modules
+    assert required_modules <= names, (
+        f"módulos novos fora da varredura: "
+        f"{sorted(required_modules - names)} — RNF-07 não estaria sendo checado neles"
     )

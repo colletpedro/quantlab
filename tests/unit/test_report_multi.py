@@ -172,6 +172,9 @@ def test_full_run_configuration_is_reconstructible_from_the_json_alone() -> None
         # C converteu mas NÃO preencheu (caixa na execução) — nunca negociou (R2).
         "never_traded": ["C"],
         "delisted": [],
+        # 2b (T12, CA-05.2) — categoria própria de shorts travados por
+        # deslistagem; vazia em run long-only (regressão documentada).
+        "locked_shorts": [],
     }
     run_block = payload["run"]
     assert run_block["initial_capital"] == 100_000.0

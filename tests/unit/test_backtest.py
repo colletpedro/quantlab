@@ -1564,3 +1564,69 @@ def test_rebalance_with_open_short_raises_engine_error() -> None:
         sizer=EqualWeightOpen(threshold_pp=1.0),
     )
     assert long_run.portfolio.positions["A"].quantity == 10_000  # all-in (N=1)
+
+
+# ─── T12: herança RNF — as RNFs da 2a valem num run long+short (CA-RNF-02.1) ─
+
+
+@pytest.mark.unit
+def test_rnf_heritage_tests_pass_on_long_short_run() -> None:
+    """CA-RNF-02.1 — as garantias da 2a continuam valendo quando o run usa
+    short + margem + borrow: determinismo (RNF-01), conciliação fechando com
+    o termo próprio de borrow fee (RNF-08/§6), contadores no laço (MET-05) e
+    o invariante de margem (ADR-0009) — nenhuma RNF é relaxada pela 2b.
+
+    Run de papel: A long all-in (0 → 10.000@10), B short all-in com cobertura
+    (0 → ENTER_SHORT, 1 → EXIT_SHORT); borrow fee 0,50% a.a. sobre o short
+    nas barras em que ele fica aberto. O que interessa não é o valor, é que
+    TODAS as invariantes fecham no mesmo run.
+    """
+
+    def run_once() -> BacktestResultMulti:
+        series = {
+            "A": _series([10, 10, 11, 11], [10, 10, 11, 11], ticker="A", dates=_dates(4)),
+            "B": _series([10, 10, 9, 9], [10, 10, 9, 9], ticker="B", dates=_dates(4)),
+        }
+        return run_backtest_multi(
+            series,
+            {
+                "A": ScriptedStrategy({0: Signal.ENTER}),
+                "B": ScriptedStrategy({0: Signal.ENTER_SHORT, 1: Signal.EXIT_SHORT}),
+            },
+            costs=_FREE,
+            slippage=_NO_SLIP,
+            # factor 1.0 com pernas de 40%: requirement = 80k < equity 100k —
+            # folga para o borrow fee do close não violar a margem (o objetivo
+            # é a herança das RNFs, não o margin call, que tem testes próprios).
+            sizer=FixedFractionSizer(0.4),
+            margin=MarginModel(factor=1.0),
+            borrow=BorrowFeeModel(fee_annual=0.005),
+        )
+
+    first = run_once()
+    second = run_once()
+
+    # RNF-01 — determinismo: mesma entrada, mesma saída completa.
+    assert first.equity_curve == second.equity_curve
+    assert first.portfolio.trades == second.portfolio.trades
+    assert first.counters.to_dict() == second.counters.to_dict()
+    assert first.borrow_fees == second.borrow_fees
+    assert first.broken_fund == second.broken_fund
+
+    # RNF-08/§6 — a identidade fecha com o termo próprio de borrow fee
+    # (nunca dentro de custos — a armadilha da dupla contagem da T13).
+    reconciliation = reconcile_multi(first)
+    assert reconciliation.reconciles is True
+    assert reconciliation.total_borrow_fees == pytest.approx(first.borrow_fees)
+    assert reconciliation.total_borrow_fees > 0  # o short aberto pagou fee
+
+    # MET-05 — contadores agregados pelo laço (dono §3.7).
+    assert first.counters.margin_calls == 0  # margem nunca violada no papel
+    assert first.counters.borrow_rejections == 0  # disponibilidade ilimitada
+
+    # ADR-0009 — o invariante de margem vale no run inteiro (não quebrou).
+    assert first.broken_fund is False
+    assert first.final_equity > 0
+    # O short existiu de verdade (qty < 0 no round trip).
+    b_trades = [t for t in first.portfolio.trades if t.ticker == "B"]
+    assert any(t.quantity < 0 for t in b_trades)
