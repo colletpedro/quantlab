@@ -351,6 +351,12 @@ class BacktestResultMulti:
     #: 2b (T08a): config do run — reconstruível do JSON (RF-CON-02/CA-06.2).
     margin: MarginModel = field(default_factory=MarginModel)
     borrow: BorrowFeeModel = field(default_factory=BorrowFeeModel)
+    #: 2b (T12, emenda §3.7): séries DIÁRIAS da seção de alavancagem (CA-04.2) —
+    #: um ponto por data-união, após marcar (mesmo ponto da equity curve),
+    #: alinhadas a `dates`/`equity_curve`. Dono: o laço; o relatório só reporta.
+    daily_gross_notional: tuple[float, ...] = ()
+    daily_net_notional: tuple[float, ...] = ()
+    daily_requirement: tuple[float, ...] = ()
 
     @property
     def final_equity(self) -> float:
@@ -538,6 +544,9 @@ def run_backtest_multi(
     margin_seq = 0
     broken = False
     borrow_fees = 0.0
+    daily_gross_notional: list[float] = []
+    daily_net_notional: list[float] = []
+    daily_requirement: list[float] = []
 
     for u in range(len(calendar.dates)):
         u_date = calendar.dates[u]
@@ -672,6 +681,18 @@ def run_backtest_multi(
                 close_by_ticker[ticker] = float(series[ticker].close[idx])
         portfolio.market_to_market(close_by_ticker)
         equity_curve.append(portfolio.equity())
+        # 2b (T12, emenda §3.7): séries DIÁRIAS da seção de alavancagem
+        # (CA-04.2) — agregadas AQUI (dono: o laço), um ponto por data-união,
+        # após marcar (mesmo ponto da equity curve), alinhadas a dates/equity.
+        daily_gross_notional.append(
+            sum(abs(p.quantity) * portfolio.marks[t] for t, p in portfolio.positions.items())
+        )
+        daily_net_notional.append(
+            sum(p.quantity * portfolio.marks[t] for t, p in portfolio.positions.items())
+        )
+        daily_requirement.append(
+            margin_requirement(portfolio.positions, portfolio.marks, margin_model)
+        )
         portfolio.check_invariants(n)
 
         # ── 1b. REBALANCE (SIZ-03; só EqualWeightOpen; k mudou?) ────────────
@@ -854,4 +875,8 @@ def run_backtest_multi(
         broken_fund=broken,  # T08a: RF-MRG-03 CA-03.1
         margin=margin_model,
         borrow=borrow_model,
+        # T12 (emenda §3.7): séries diárias da alavancagem — alinhadas a dates.
+        daily_gross_notional=tuple(daily_gross_notional),
+        daily_net_notional=tuple(daily_net_notional),
+        daily_requirement=tuple(daily_requirement),
     )
