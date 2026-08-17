@@ -1807,3 +1807,88 @@ migração determinística de 9.030 barras (backup em `/tmp`, idempotente).
   O placar de CAGR permaneceu 19/20 (META, único vencedor em ambas).
   Confirma a lição da seção acima: suspeitar de fator constante antes de
   acreditar em "vitória" da estratégia.
+
+## Fase 2b — implementação completa (2026-08-16/17)
+
+Implementação commit a commit (T01–T13, gates 1–3 fechados). O corpo e o
+resultado estão em `docs/STATE.md`, `specs/CHANGELOG.md` e
+`results/fase_2b_run_20_ativos_long_short.json`. Esta seção registra as
+lições que valem para as próximas fases — o mesmo papel do registro do
+ADR-0004 na v0.5 da Fase 1 e do erro de fator constante no fechamento da 2a.
+
+### A lição 1: o E2E com dados reais é o verdadeiro detector
+
+A T13 (run long+short real de 20 ativos × ~10 anos) entregou **dois bugs que
+566 testes unitários não pegavam** — ambos de borda do caminho short,
+corrigidos spec-first (emenda T13 no design §4, sem reabrir o gate 2):
+
+| Bug | Por que a unidade não pegava | Sintoma no E2E |
+|---|---|---|
+| Equity de `u` registrada ANTES do borrow fee do close | as fixtures do fee simulavam o débito e montavam o `equity_curve` à mão, pós-fee; a do heritage fechava o short antes da última barra | a identidade CA-04.2 **abria exatamente no valor do último fee** (US$ ~1,38 no run real) — só aparece com short aberto até a última barra |
+| `cost_for(notional negativo)` zerava o custo de saída do short no `sell` | nenhuma fixture fechava short por `EXIT` (todas usavam `EXIT_SHORT`/`cover`) | `exit_cost = 0.0000` em todos os shorts cobertos por venda — o custo sumia |
+
+A lição é de processo, não de aritmética: **a suíte unitária prova que cada
+peça está certa sob as condições que a fixture constrói; o E2E prova que as
+peças se comportam sob condições que ninguém previu.** As duas categorias
+não se substituem — o E2E do DoD (dados reais ou sintéticos herméticos com
+stack real) é parte obrigatória do fechamento, não um extra. A estratégia do
+run (flip sempre-no-mercado com fechamento por `EXIT`) foi exatamente o
+instrumento que faltava para exercitar o caminho `sell`-sobre-short.
+
+### A lição 2: a derrota honesta do short — a sofisticação tem preço
+
+O resultado final da 2b é uma derrota completa do lado curto, medida com o
+engine honesto: long+short **+6,83%** (CAGR 0,57%, Sharpe 0,11) vs a própria
+estratégia em modo long-only **+217,93%** (10,50%) vs 1/N buy-and-hold
+**+2.509,09%** (32,50%) — com **111 chamadas de margem**, US$ 2.086,89 de
+borrow fees, 1.240 trades (turnover 5,34 vs 2,69 do long-only) e 5 shorts
+travados no último close. Nenhum número foi ajustado; a regra de ouro manda
+reportar a derrota como está, e foi o que o relatório fez.
+
+A leitura que fica: num mercado de alta prolongado (2015–2026), o short
+**ingênuo** de mega caps em tendência de alta paga custo de aluguel + custo
+de virada + a liquidação da margem fator 1.0 nos piores momentos (o portfólio
+roda na fronteira `equity ≥ margem`; qualquer perda dispara liquidação
+alfabética). O long+short até reduziu o maxDD (24,28% vs 43,00% do 1/N B&H),
+mas o custo de oportunidade e o custo real não compensaram. É o mesmo
+mecanismo da 2a (simples vence sofisticado em alta prolongada), agora com o
+custo do aluguel e a margem **medidos**, não assumidos. Para uma próxima fase,
+a pergunta que fica aberta não é "short funciona?" (nesta janela, não) — é
+"quando o regime muda, o preço do aluguel e a margem estão modelados de forma
+calibrável o suficiente para medir a diferença?" Hoje: aluguel 0,50% a.a.
+não calibrado e disponibilidade ilimitada, ambos vieses declarados no
+relatório.
+
+### A lição 3: o determinismo cruzado 2a↔2b como verificação
+
+A coluna long-only do run 2b (a mesma `SmaCross` 20/50, sinais de short
+descartados, mesmo N/custos/slippage/cap) reproduziu **exatamente** o run da
+2a: +217,93%, CAGR 10,50%, Sharpe 1,04, maxDD 14,74%, 618 trades. Dois runs
+independentes, separados por uma fase inteira de mudanças (short + margem +
+borrow no laço), batendo nos mesmos números — o determinismo RNF-01 e a
+regressão long-only (SHT-01.1/CA-01.2) verificados por construção, não por
+asserção isolada. Quando uma fase nova adiciona mecanismo ao laço, rodar o
+run da fase anterior como coluna de controle é a verificação mais barata e
+mais forte que existe.
+
+### O que uma próxima fase herda
+
+- `engine/` 2b completo: short (`ENTER_SHORT`/`EXIT_SHORT`, qty < 0),
+  borrow fee (ADR-0010), margem + liquidação forçada + fundo quebrado
+  (ADR-0009), buy-stop/ambiguidades intrabarra (RF-ORD-05/06), laço 2b com
+  sequência declarada (marcar → fee → margem → consultar).
+- A emenda T13 (equity pós-fee; custo |notional| no `sell`) — sem ela, o
+  CA-04.2 não fecha com short aberto na última barra e o custo de saída do
+  short é subcobrado.
+- Walk-forward por caixa preta com isolamento IS/OOS por construção
+  (ADR-0011), `run_walkforward`, harness `make rnf04` com orçamento por fold
+  + total (RNF-10) e piso de cobertura 85% no CI.
+- `SmaCrossLongShort` e `scripts/e2e_run_2b.py` como ponto de partida para
+  qualquer teste de short; o teste hermético
+  `tests/integration/test_e2e_2b_long_short.py` guarda determinismo +
+  conciliação + shorts no CI.
+- **Ideias registradas, sem compromisso:** curto de índices (o short de
+  ativo individual pagou o aluguel sem hedge de mercado), dados de aluguel
+  calibrados (hard-to-borrow real, por ticker e data — hoje é ilimitado e
+  não calibrado), e CLI com flags para o run 2b (hoje o runner é
+  programático).
