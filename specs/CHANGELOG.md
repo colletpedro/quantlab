@@ -2,6 +2,20 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versionamento por spec, não global.
 
+## 2026-08-17
+
+### Fechamento da sessão — Fase 2b completa (T01–T13, DoD v0.2 coberto)
+
+Fase 2b encerrada: implementação ponta a ponta, resultado honesto persistido
+(`results/fase_2b_run_20_ativos_long_short.json`) e documentação de
+fechamento (docs/STATE.md, HANDOFF.md, README seção de resultados). A
+coluna long-only do run 2b reproduz exatamente o run da 2a (+217,93%, 618
+trades) — determinismo cruzado 2a↔2b como verificação de regressão. O E2E
+pegou dois bugs que a suíte unitária não pegava (timing do fee na equity da
+última barra; custo zerado no `sell` sobre short), corrigidos spec-first na
+emenda T13 do design §4. Lições de processo e heranças registradas no
+HANDOFF. Estado do projeto: escopo atual completo, sem Fase 3 definida.
+
 ## 2026-08-16
 
 ### fase-2b-tasks 0.1 (T13) — Fase 2b implementada
