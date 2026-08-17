@@ -17,7 +17,7 @@ Cada transição entre etapas é um **gate check** explícito. Um gate reprovado
 |---|---|---|---|---|---|
 | `00-plataforma/fase-1` | 1.0 | ✅ aprovada | ✅ aprovada (v0.2) | ✅ aprovada (v0.1) | 🟡 Bloco A |
 | `fase-2a` | 0.2 | 🟢 gate 1 aprovado (em revisão) | ✅ aprovada (v0.1) | 🟢 aprovada (v0.1) | ✅ T01–T18 |
-| `fase-2b` | 0.2 | 🟢 gate 1 aprovado | 🟢 gate 2 aprovado (v0.1) | 🟡 em revisão (v0.1 — gate 3) | — |
+| `fase-2b` | 0.2 | 🟢 gate 1 aprovado | 🟢 gate 2 aprovado (v0.1) | 🟢 aprovada (v0.1) | ✅ T01–T13 |
 | `01-ingestao` | — | — | — | — | ⬜ |
 | `02-persistencia` | — | — | — | — | ⬜ |
 | `03-engine` | — | — | — | — | ⬜ |

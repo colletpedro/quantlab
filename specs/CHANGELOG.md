@@ -2,6 +2,36 @@
 
 Formato: [Keep a Changelog](https://keepachangelog.com/pt-BR/1.1.0/). Versionamento por spec, não global.
 
+## 2026-08-16
+
+### fase-2b-tasks 0.1 (T13) — Fase 2b implementada
+
+**T13 concluída — o DoD v0.2 está coberto ponta a ponta (T01–T13).**
+
+Run long+short real de 20 ativos × ~10 anos contra o 1/N long-only e contra a
+própria estratégia em modo long-only, persistido em
+`results/fase_2b_run_20_ativos_long_short.json`: conciliação CA-04.2 fechando
+(isclose 1e-9) com `qty < 0` e borrow fees no termo próprio, determinismo
+(RNF-01) OK, RNF-04 1,33 s < 30 s. **Resultado honesto: derrota completa do
+lado curto** — +6,83% acumulado (0,57% CAGR) vs +217,93% (10,50% CAGR) da
+mesma estratégia long-only vs +2.509,09% (32,50% CAGR) do 1/N buy-and-hold;
+111 margin calls, USD 2.086,89 de borrow fees, 5 shorts travados.
+
+**Dois casos de borda do caminho short expostos pelo dado real e corrigidos
+spec-first (emenda T13 no design §4, sem reabrir o gate 2):** (1) o registro
+da equity de `u` passou a acontecer **após** o débito do borrow fee do close —
+antes, um short aberto até a última barra deixava o último ponto da curva sem
+o fee do último dia e a identidade de §6 abria exatamente nesse valor;
+(2) o `EXIT` sobre short (Q2) passou a cobrar custo sobre **|notional|** —
+antes, `cost_for` com notional negativo subcobrava e zerava o custo de saída
+com `min_cost = 0`. Fixes com testes nomeados novos
+(`test_reconciliation_closes_with_short_open_through_last_bar`,
+`test_exit_sell_on_short_charges_cost_on_absolute_notional`) e o teste
+hermético do E2E (`tests/integration/test_e2e_2b_long_short.py`).
+
+Novos: `strategies/sma_cross_long_short.py`, `scripts/e2e_run_2b.py`,
+`tests/integration/test_e2e_2b_long_short.py`, `results/fase_2b_run_20_ativos_long_short.json`.
+
 ## 2026-08-14
 
 ### fase-2b-tasks 0.1 — em revisão (gate 3)

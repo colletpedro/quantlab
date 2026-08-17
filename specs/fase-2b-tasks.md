@@ -894,17 +894,23 @@ está — NUNCA ajustar premissa/parâmetro para melhorar número (regra de ouro
 CLI com flags novas (runner programático basta para o DoD); gráficos.
 
 **Critério de verificação**
-- [ ] `make up` + `make test-integration` verde (hermético — CI sobe Mongo
+- [x] `make up` + `make test-integration` verde (hermético — CI sobe Mongo
   fresco; dados sintéticos RNF-03 no banco descartável, stack real)
-- [ ] Conciliação CA-04.2 passando no run real (isclose 1e-9)
-- [ ] Determinismo do run long+short de 20 ativos
-- [ ] RNF-04 re-medido < 30 s
-- [ ] Resultado persistido em `results/` e COMPARADO contra o 1/N long-only
-- [ ] `make check` verde ao final
+- [x] Conciliação CA-04.2 passando no run real (isclose 1e-9)
+- [x] Determinismo do run long+short de 20 ativos
+- [x] RNF-04 re-medido < 30 s (1,33 s)
+- [x] Resultado persistido em `results/` e COMPARADO contra o 1/N long-only
+- [x] `make check` verde ao final
 
 **Riscos**
 Médio — dado real pode expor caso de borda não previsto em fixture; o caminho
-é corrigir a spec antes do código, nunca ajustar número.
+é corrigir a spec antes do código, nunca ajustar número. **Materializou:** o
+dado real expôs DOIS casos de borda do caminho short, corrigidos spec-first
+(emenda T13 no design §4 — ver Histórico): o registro da equity de `u` agora
+acontece após o débito do borrow fee (a identidade de §6 fechava só com o
+fee da última barra fora do termo final — abria exatamente nesse valor) e o
+`EXIT` sobre short cobra custo sobre |notional| (antes, `cost_for` com
+notional negativo zerava o custo de saída).
 
 **Commit**
 `chore: run long+short de 20 ativos vs 1/N long-only e commit honesto (DoD 2b)` —
@@ -992,3 +998,4 @@ Se uma tarefa não couber num commit revisável, divide-se (padrão T11a/T11b da
 | Versão | Data | Mudança |
 |---|---|---|
 | 0.1 | 2026-08-14 | Rascunho inicial — gate 3. 16 tarefas em 6 blocos ordenados por dependência (contratos → broker → laço → analytics → WF → E2E), cada uma com RFs/CA, arquivos, testes nomeados do design §10/§10.1, comandos exatos do Makefile, mensagem de commit com o porquê, regressões documentadas (barreira P2; Position qty<0) e o mapeamento DoD → tarefa. |
+| 0.1 (T13) | 2026-08-16 | T13 concluída — run long+short de 20 ativos vs 1/N long-only e vs a própria estratégia long-only, com o resultado honesto persistido em `results/fase_2b_run_20_ativos_long_short.json` (derrota completa do lado curto: +6,83% vs +217,93% long-only vs +2.509,09% 1/N B&H; 111 margin calls; conciliação CA-04.2 fechando; RNF-04 1,33 s; determinismo OK). O E2E expôs dois casos de borda do caminho short, corrigidos spec-first (emenda T13 no design §4): equity registrada após o borrow fee do close e custo de saída sobre \|notional\| no EXIT sobre short. Novos: `strategies/sma_cross_long_short.py`, `scripts/e2e_run_2b.py`, `tests/integration/test_e2e_2b_long_short.py`. |

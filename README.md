@@ -281,6 +281,55 @@ ingestão da Fase 1 (dupla contagem de splits no raw — ver
 corrigida; os 20 relatórios por ticker da Fase 1 foram regenerados sobre a
 mesma base (ver [acima](#regeneração-após-a-correção-de-splits-2026-08-14)).
 
+### Fase 2b — long+short com margem vs long-only e 1/N (2026-08-16)
+
+**A MESMA SMA cross 20/50, estendida para o lado curto (`SmaCrossLongShort`,
+T13) — flip sempre-no-mercado: tendência de alta ⇒ long, de baixa ⇒ short —
+sobre o portfólio 1/N dos mesmos 20 tickers, 2015-01-02 a 2026-08-05 (2.914
+barras de união), contra DOIS parâmetros: a própria estratégia em modo
+long-only (sinais de short descartados — `SmaCross` 20/50, idêntica à da 2a)
+e o benchmark 1/N buy-and-hold. Custos (USD 1 + 1 bps), slippage (1 bps) e
+cap (10% do ADV) idênticos nos três; margem (fator 1.0) e aluguel (0,50%
+a.a., disponibilidade ilimitada) só no long+short.** Relatório completo em
+[`results/fase_2b_run_20_ativos_long_short.json`](results/fase_2b_run_20_ativos_long_short.json).
+
+| | Long+short (flip) | Mesma estratégia long-only | Benchmark (1/N B&H) |
+|---|---:|---:|---:|
+| Retorno acumulado | +6,83% | +217,93% | +2.509,09% |
+| CAGR | 0,57% | 10,50% | 32,50% |
+| Sharpe | 0,11 | 1,04 | 1,15 |
+| Max drawdown | 24,28% | 14,74% | 43,00% |
+| Trades | 1.240 | 618 | 20 |
+| Turnover anualizado | 5,34 | — | — |
+| Exposição gross média | 91,92% | — | — |
+| Exposição net média | 28,10% | — | — |
+| Utilização de margem | 91,92% | — | — |
+| Borrow fees (10 anos) | USD 2.086,89 | — | — |
+
+**O lado curto destruiu valor — derrota honesta e completa.** Contra a própria
+estratégia em modo long-only, o flip perdeu ~211 pp de retorno acumulado
+(+6,83% vs +217,93%): num mercado de alta prolongado (2015–2026), shortar
+mega caps em tendência de alta paga borrow fee + custos de virada (1.240
+trades, turnover 5,34 vs 2,69 do long-only) e a margem fator 1.0 liquida o
+portfólio exatamente nos piores momentos — **111 chamadas de margem** no run.
+O long+short reduziu o drawdown máximo (24,28% vs 43,00% do 1/N B&H), mas o
+custo de oportunidade e o custo real do aluguel não compensaram. Nenhum
+parâmetro foi ajustado para melhorar o número — a regra de ouro do projeto
+manda reportar a derrota como está, e é o que o relatório faz.
+
+Notas de honestidade: (1) a coluna long-only reproduz exatamente o run da 2a
+(+217,93%, 618 trades, Sharpe 1,04) — determinismo cruzado entre fases; (2)
+os 16 tickers com série truncada (terminam 2026-07-31; AAPL a 2026-08-05) são
+reportados como "deslistados" (POR-02.3), com **5 shorts travados** no último
+close (AMZN, CAT, GOOGL, MSFT, NVDA); (3) os vieses da 2b (aluguel não
+calibrado e ilimitado, MHT com métrica/grid/folds, liquidação alfabética com
+viés) estão na seção fixa do relatório. O E2E expôs dois casos de borda do
+caminho short, corrigidos spec-first (emenda T13 no design): a equity de `u`
+passou a ser registrada após o débito do borrow fee do close (a identidade de
+§6 abria exatamente no valor do último fee com short aberto até o fim) e o
+`EXIT` sobre short passou a cobrar custo sobre |notional| (antes zerava com
+`min_cost = 0`).
+
 ### Interpretação
 
 Isto é o resultado esperado, não uma falha do engine. Mega caps americanas entre
