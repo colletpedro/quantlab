@@ -1630,3 +1630,35 @@ def test_rnf_heritage_tests_pass_on_long_short_run() -> None:
     # O short existiu de verdade (qty < 0 no round trip).
     b_trades = [t for t in first.portfolio.trades if t.ticker == "B"]
     assert any(t.quantity < 0 for t in b_trades)
+
+
+@pytest.mark.unit
+def test_reconciliation_closes_with_short_open_through_last_bar() -> None:
+    """Emenda T13 — o fee do ÚLTIMO close entra no termo final de §6.
+
+    O ponto de equity de `u` é registrado APÓS o débito do borrow fee do
+    close: com um short aberto até a última barra, `final_equity` (o último
+    ponto da curva) inclui o fee do último dia e a identidade de §6 fecha.
+    Antes da emenda, o registro vinha antes do débito e a conciliação abria
+    exatamente no valor do último fee — o caso de borda que o E2E da T13
+    expôs (um short aberto até o fim do run).
+    """
+    series = {
+        "A": _series([10, 10, 11, 11], [10, 10, 11, 11], ticker="A", dates=_dates(4)),
+    }
+    result = run_backtest_multi(
+        series,
+        {"A": ScriptedStrategy({0: Signal.ENTER_SHORT})},
+        costs=_FREE,
+        slippage=_NO_SLIP,
+        sizer=FixedFractionSizer(0.4),
+        margin=MarginModel(factor=1.0),
+        borrow=BorrowFeeModel(fee_annual=0.005),
+    )
+
+    # O short abre no open de d1 e fica aberto até o fim — fee em d1, d2 e d3.
+    assert result.borrow_fees > 0
+    # O último ponto da curva É a equity pós-fee (registro após o débito).
+    assert result.equity_curve[-1] == pytest.approx(result.portfolio.equity())
+    reconciliation = reconcile_multi(result)
+    assert reconciliation.reconciles is True

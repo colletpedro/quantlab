@@ -460,13 +460,15 @@ def run_backtest_multi(
          quebrado por gap: congela (emenda P1 — CA-03.1); e (1b) as PENDENTES
          regulares — a saída de um EXIT (venda ao open, origin=MARKET) e a
          cobertura de um EXIT_SHORT (compra ao open, T08a);
-      2. **Marcar a mercado** pelo último close conhecido (POR-02.2) e
-         registrar a equity de `u`;
+      2. **Marcar a mercado** pelo último close conhecido (POR-02.2);
       2b. **Rebalance** (só se sizer == EqualWeightOpen): k mudou ⇒ eventos
          com limiar em pp (SIZ-03.3) para o próximo open do próprio ativo
          (2a, inalterado);
       3. **Debitar o borrow fee** no close, etapa própria (2b, T08a —
-         RF-SHT-03 CA-03.1/03.2): só com short aberto no close;
+         RF-SHT-03 CA-03.1/03.2): só com short aberto no close — e
+         **registrar a equity de `u`** (emenda T13: o ponto de equity é o
+         valor ao FIM de `u`, incluindo o fee do próprio close; é o que
+         fecha a identidade de §6 na última barra com short aberto);
       4. **Checar margem** (2b, T08a — RF-MRG-01/02): `equity < margem` no
          close ⇒ plano de liquidação alfabético (CA-02.1), integral por ativo,
          cancelando as pendentes dos ativos do plano (CA-02.2); violação no
@@ -680,10 +682,11 @@ def run_backtest_multi(
             if idx is not None:
                 close_by_ticker[ticker] = float(series[ticker].close[idx])
         portfolio.market_to_market(close_by_ticker)
-        equity_curve.append(portfolio.equity())
         # 2b (T12, emenda §3.7): séries DIÁRIAS da seção de alavancagem
         # (CA-04.2) — agregadas AQUI (dono: o laço), um ponto por data-união,
         # após marcar (mesmo ponto da equity curve), alinhadas a dates/equity.
+        # O ponto de EQUITY é registrado após o débito do borrow fee (passo 3,
+        # emenda T13) — a equity de u é o valor ao FIM de u.
         daily_gross_notional.append(
             sum(abs(p.quantity) * portfolio.marks[t] for t, p in portfolio.positions.items())
         )
@@ -746,6 +749,13 @@ def run_backtest_multi(
                     fee = borrow_model.daily_fee(position.quantity, portfolio.marks[ticker])
                     portfolio.cash -= fee  # fora do preço de execução (SLP-04.3)
                     borrow_fees += fee  # dono: o laço (§3.7); termo próprio (§6)
+
+        # ── 2c. REGISTRAR A EQUITY DE u (emenda T13 — APÓS o fee do close) ──
+        # A equity de u é o valor ao FIM de u, incluindo o borrow fee do
+        # próprio close — sem isso, um short aberto na última barra deixaria o
+        # último ponto da curva sem o último fee e a identidade de §6 abriria
+        # exatamente nesse valor (caso exposto pelo E2E da T13).
+        equity_curve.append(portfolio.equity())
 
         # ── 4. CHECAR MARGEM (2b, T08a — equity < margem ⇒ plano; close não
         #    é erro — CA-01.3; a execução no open é da T08b) ─────────────────

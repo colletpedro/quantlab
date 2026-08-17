@@ -369,6 +369,11 @@ class Broker:
         auditoria do ENG-01.2 (ORD-04.4). `ambiguous` (T09): ``None`` preserva o flag da entrada;
         ``True``/``False`` força — a ambiguidade intrabarra é da SAÍDA
         (ADR-0007). `None` preserva o caminho da Fase 1.
+
+        **Emenda T13:** o `EXIT` sobre posição SHORT (venda que zera a posição
+        — semântica Q2) cobra o custo sobre **|notional|**, a MESMA regra da
+        cobertura canônica por `EXIT_SHORT` (SHT-02.1): `cost_for` com notional
+        negativo subcobra o custo e pode zerá-lo com `min_cost = 0`.
         """
         position = portfolio.positions.get(ticker)
         if position is None:
@@ -378,7 +383,7 @@ class Broker:
             )
 
         notional = position.quantity * price
-        cost = self._costs.cost_for(notional)
+        cost = self._costs.cost_for(abs(notional))  # emenda T13 — |notional| (Q2 sobre short)
         portfolio.cash += notional - cost
         del portfolio.positions[ticker]
 

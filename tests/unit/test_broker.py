@@ -2026,3 +2026,47 @@ def test_buy_stop_bracket_no_orphan_stop() -> None:
     pair = book.pending_for(_TICKER)
     assert len(pair) == 2  # sem stop órfão: os DOIS membros continuam no book
     assert {p.side for p in pair} == {Side.BUY, Side.SELL}
+
+
+@pytest.mark.unit
+def test_exit_sell_on_short_charges_cost_on_absolute_notional() -> None:
+    """Emenda T13 (Q2) — o `EXIT` sobre short (a venda que zera a posição)
+    cobra o custo sobre |notional|, a MESMA regra da cobertura canônica por
+    `EXIT_SHORT` (SHT-02.1).
+
+    Antes da emenda, `sell()` usava `cost_for(notional com sinal)`: para um
+    short o notional é NEGATIVO e o custo saía subcobrado (podendo zerar com
+    `min_cost = 0`) — a saída de um short custava menos que a de um long de
+    mesmo tamanho, com `exit_cost = 0` no caso mais comum. A matemática de
+    caixa da venda (débito de |notional| + custo) é a da cobertura por
+    `EXIT_SHORT`; o custo agora segue a mesma regra.
+    """
+    costs = CostModel(fixed=1.0, rate=0.0001)
+    broker = Broker(costs)
+    book = PendingBook()
+    portfolio = Portfolio(cash=100_000.0)
+    # ENTER_SHORT de 1.000 ações a 100 — a venda credita o caixa (SHT-02.1).
+    book.place(_pending(qty=1_000, side=Side.SELL))
+    _run(broker, book, portfolio, _bar(open_=100.0))
+    assert portfolio.positions[_TICKER].quantity == -1_000
+
+    cash_before = portfolio.cash
+    price = 90.0
+    closed = broker.sell(
+        portfolio,
+        ticker=_TICKER,
+        price=price,
+        execution_date=_TODAY,
+        decision_date=_DECIDED,
+        origin=TradeOrigin.MARKET,
+    )
+    assert closed is not None
+
+    notional = 1_000.0 * price
+    expected_cost = costs.cost_for(notional)  # |notional| — o notional positivo
+    assert closed.exit_cost == pytest.approx(expected_cost)
+    # Sem o abs, cost_for(-90.000) = max(1 - 9, 0) = 0 — o custo sumiria.
+    assert expected_cost == pytest.approx(10.0)
+    # Caixa: débito de |notional| + custo (mesma matemática da cover).
+    assert portfolio.cash == pytest.approx(cash_before - notional - expected_cost)
+    assert portfolio.positions == {}
