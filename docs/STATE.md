@@ -70,6 +70,13 @@ abaixo. Os números originais do fechamento de F4 eram 367/333/60.)
 - **RNF-04 medido no run real completo** (20 ativos × ~10 anos): **0,73 s <
   30 s** (meta). Harness de escopo declarado em `scripts/rnf04_harness.py`
   (`make rnf04`) — mede só o cômputo (P5).
+- **RNF-10 (2b, T12b) medido no mesmo harness** — walk-forward em duas
+  escalas, UMA passada, séries sintéticas determinísticas declaradas (20
+  ativos × 10 anos úteis, 5 folds, grid 4 combinações, warmup 20): tempo
+  por fold (IS+OOS) **0,95 s a 1,70 s** (orçamento 30 s por fold) e total
+  **6,69 s** (orçamento 160 s = 5×30 + 10) — folga de ~20x no pior fold e
+  ~24x no total. O harness sai não-zero se estourar (limite bloqueante no
+  CI).
 - **Resultado honesto (E2E do DoD):** estratégia sma-cross 20/50 1/N
   +217,93% (CAGR 10,50%; Sharpe 1,04; maxDD 14,74%; 618 trades; turnover
   2,69) vs benchmark 1/N buy-and-hold +2.509,09% (CAGR 32,50%; Sharpe 1,15;

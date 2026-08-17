@@ -74,7 +74,7 @@ T01–T07; T09 depende de T08b; T10–T13 dependem da cadeia completa.
 | T11a | run_walkforward + orçamento do WF | T10 | RF-WFK-03, RF-WFK-05 | ✅ |
 | T11b | Mutação ENG-01.2 estendida ao OOS (teste puro) | T11a | RF-WFK-04 | ✅ |
 | T12 | Relatório 2b + benchmark long-only + vieses + herança RNF + ADR-0009 + timezone | T09, T11a | RF-MET-05, RF-MET-06, RF-RNF-02 | ⬜ |
-| T12b | Harness RNF-04 2b (WF) + arquitetura + cobertura 85% | T12 | RF-WFK-05, RNF-02, RNF-07 | ⬜ |
+| T12b | Harness RNF-04 2b (WF) + arquitetura + cobertura 85% | T12 | RF-WFK-05, RNF-02, RNF-07 | ✅ |
 | T13 | Run long+short ponta a ponta vs 1/N long-only (DoD) | T12b | DoD | ⬜ |
 
 Estados: ⬜ não iniciada · 🟡 em andamento · ✅ concluída · ⛔ bloqueada
@@ -820,30 +820,44 @@ honesta do que shorts/margem/WF acrescentam (D4/R1/R5).
 **Depende de:** T12
 **RFs cobertos:** RF-WFK-05 (CA-05.1 — harness no CI), RNF-02 (CA-02.2),
 RNF-07 (arquitetura)
-**Arquivos:** `scripts/walkforward_harness.py` (novo), `Makefile` (alvo),
-`pyproject.toml` (fail_under 85 estendido a margin/walkforward — verificar que
-o escopo já cobre engine/), `.github/workflows/ci.yml` (se preciso),
-`tests/unit/test_walkforward.py` (estendido — CA-05.1 no CI)
+**Arquivos:** `scripts/rnf04_harness.py` (ESTENDIDO — divergência de forma
+registrada: a missão manda estender o harness existente; o `walkforward_harness.py`
+novo sugerido abaixo não foi criado — o mesmo arquivo já roda os dois RNFs e o
+teste AST compute-only cobre o arquivo inteiro), `Makefile` (alvo `rnf04`
+estendido), `tests/unit/test_rnf04_harness.py` (estendido — caminho WF).
+`pyproject.toml`/`ci.yml`: verificado — o escopo `source_pkgs` já cobre
+`engine/` (margin/walkforward dentro) e o piso 85 (CA-02.2) está coberto pela
+T12; CI não muda (o harness é alvo manual, padrão da 2a; o teste unitário do
+caminho WF roda no CI).
 
 **Escopo**
 Harness do WF (RNF-10): mede `run_walkforward` em duas escalas — por fold
 (default 30 s para IS+OOS de 20 ativos × janela) e total (`n_folds×30 s` +
 margem) — com escopo declarado (cômputo apenas, sem ingestão/serialização/
 PNG); sem base ingerida, séries sintéticas determinísticas com origem
-declarada (padrão T17 da 2a). Alvo no Makefile (mediana de N execuções, padrão
-da casa). Piso de cobertura: verificar que o `fail_under` de 85 cobre
-`engine/margin.py` e `engine/walkforward.py` (RNF-02 CA-02.2).
+declarada (padrão T17 da 2a). Janela sintética REPRESENTATIVA declarada como
+constante literal (T12b): 20 ativos × 10 anos de DIAS ÚTEIS, 5 folds (IS
+1260, OOS 252 dias úteis), grid 4 combinações de SmaCross (slow fixo 20 ⇒
+warmup 20 em todas), via `measure_walkforward` do engine em UMA passada
+(callback de fold — sem re-execução); exit NÃO-ZERO se qualquer escala
+extourar (limite bloqueante). Piso de cobertura: verificado na T12 —
+`fail_under` 85 cobre `engine/margin.py` e `engine/walkforward.py` (RNF-02
+CA-02.2).
 
 **Fora do escopo**
 E2E (T13).
 
 **Critério de verificação**
-- [ ] `make test-unit` verde; `make typecheck` verde
-- [ ] `test_walkforward_harness_reports_per_fold_and_total_budgets` (CA-05.1) —
-  o harness roda de verdade e reporta ambas as escalas
-- [ ] `test_ci_coverage_floor_85_includes_margin_walkforward` (CA-02.2)
-- [ ] `make check` com fail_under 85 VERDE (cobertura hoje ~97%, folgada)
-- [ ] O harness roda de verdade (medida real registrada, não presumida)
+- [x] `make test-unit` verde; `make typecheck` verde
+- [x] `test_walkforward_harness_reports_per_fold_and_total_budgets` (CA-05.1,
+  T11a — nível engine) + `test_walkforward_harness_measures_one_pass_and_reports_budgets`
+  (T12b — nível harness: 5 folds, 4 combinações, orçamentos declarados,
+  `within_budget`, UMA passada)
+- [x] `test_ci_coverage_floor_85_includes_margin_walkforward` (CA-02.2 — T12)
+- [x] `make check` com fail_under 85 VERDE (cobertura 95,61% hoje)
+- [x] O harness roda de verdade — medição REAL (séries sintéticas declaradas):
+  RNF-10 por fold 0,95 s a 1,70 s (orçamento 30 s) e total 6,69 s (orçamento
+  160 s = 5×30 + 10) — `make rnf04` exit 0; RNF-04 run único 1,31 s < 30 s
 
 **Riscos**
 Baixo — o orçamento por fold vs total é a única coisa nova; o "30 s" da 2a

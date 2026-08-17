@@ -1,4 +1,5 @@
-"""T17 — harness do RNF-04 e piso de cobertura (RF-RNF-01 CA-01.3, RNF-02).
+"""T17 — harness do RNF-04 e piso de cobertura (RF-RNF-01 CA-01.3, RNF-02);
+T12b — caminho do walk-forward (RNF-10/WFK-05 CA-05.1).
 
 O harness do RNF-04 (P5/D3) declara o escopo como constante literal e mede
 APENAS o cômputo — o teste abaixo prova isso por construção: a função
@@ -7,6 +8,13 @@ não referencia `to_json`/`to_dict`/plot/render (a exclusão de P5 é real, não
 retórica). O piso de cobertura (RNF-02 supersedido: 80 -> 85 sobre
 `engine/` + `analytics/`) é lido do próprio `pyproject.toml` — o teste quebra
 se o CI mudar sem a spec acompanhar.
+
+O caminho WF (T12b) usa a MESMA função `measure_walkforward` do engine —
+que a T11a já provou rodar em UMA passada (callback de fold, sem re-execução)
+e sem alterar o run. Aqui o teste prova que o HARNESS (scripts/) declara a
+janela sintética representativa, chama a medição de verdade e reporta as
+duas escalas com `within_budget` — o orçamento vira limite BLOQUEANTE no CI
+(exit não-zero se estourar).
 """
 
 import ast
@@ -65,6 +73,42 @@ def test_rnf04_harness_measures_compute_only() -> None:
         "o harness do RNF-04 importa renderização de gráfico — a medição "
         "deixaria de ser compute-only (CA-01.3/P5)."
     )
+
+
+@pytest.mark.unit
+def test_walkforward_harness_measures_one_pass_and_reports_budgets() -> None:
+    """CA-WFK-05.1 (T12b) — o caminho WF do harness roda de verdade e reporta
+    as duas escalas (por fold + total) contra os orçamentos DECLARADOS.
+
+    A janela sintética REPRESENTATIVA é declarada como constante literal no
+    harness (20 ativos x ~10 anos de dias úteis, 5 folds, grid 4 combinações,
+    warmup 20) — a escolha é parte do contrato do limite. O teste roda a
+    medição com um universo PEQUENO (o custo do cômputo é o que mede; o
+    universo de 20 é para o `make rnf04` real), mas usa a MESMA função
+    `measure_wf` do harness: se a janela declarada mudar, o número de folds
+    aqui acende (5) e o teste quebra — o limite não flakearia em silêncio.
+    """
+    result, report = harness.measure_wf(["AAA", "BBB", "CCC"])
+
+    # A janela declarada produz exatamente os folds prometidos (5).
+    assert result.n_folds == 5
+    assert result.grid_size == len(harness.WF_GRID_FASTS) == 4
+
+    # Orçamentos declarados do engine (T11a) — o harness compara contra eles.
+    assert report.per_fold_budget_s == 30.0
+    assert report.total_budget_s == pytest.approx(5 * 30.0 + 10.0)  # 5 folds
+
+    # UMA passada: um tempo por fold, alinhado aos folds; total >= soma.
+    assert len(report.per_fold_s) == result.n_folds == 5
+    assert all(t >= 0 for t in report.per_fold_s)
+    assert report.total_s >= sum(report.per_fold_s)
+
+    # Dentro do orçamento (universo pequeno: segundos, muito abaixo de 30 s).
+    assert isinstance(report.within_budget, bool)
+    assert report.within_budget
+    # O harness declara a origem (sintética determinística — RNF-03).
+    assert harness.WF_TICKERS == 20
+    assert harness.WF_YEARS == 10
 
 
 @pytest.mark.unit

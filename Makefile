@@ -66,7 +66,7 @@ audit: ## Vulnerabilidades conhecidas nas dependências instaladas
 
 check: lint typecheck test ## Portão local completo — espelha o job "quality" do CI
 
-rnf04: ## Harness do RNF-04 — mede o cômputo (20 ativos x 10 anos < 30 s; escopo declarado em scripts/rnf04_harness.py)
+rnf04: ## Harness do RNF-04 + RNF-10 — run único (< 30 s) e walk-forward (por fold < 30 s + total); escopo declarado em scripts/rnf04_harness.py
 	$(RUN) python scripts/rnf04_harness.py
 
 verify-raw: ## Guarda de consistência bruto×split na base real (design Fase 1 v0.10 §3.1) — falha se houver dupla contagem de splits
