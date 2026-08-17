@@ -330,6 +330,12 @@ class BacktestResultMulti:          # 2a + 2b (campos novos)
     borrow_fees: float              # Σ fees debitados — termo próprio da conciliação (§6); acumulado no laço
     margin: MarginModel             # config do run (reconstruível do JSON — RF-CON-02/CA-06.2)
     borrow: BorrowFeeModel          # config do run (idem)
+    # EMENDA T12 — séries DIÁRIAS para a seção de alavancagem (CA-04.2): agregadas pelo
+    # LAÇO (dono §3.7 — o relatório só reporta), um ponto por data-união, após marcar
+    # (mesmo ponto da equity curve), alinhadas a `dates`/`equity_curve`.
+    daily_gross_notional: tuple[float, ...]   # Σᵢ |qtyᵢ| × closeᵢ (pós-marcação)
+    daily_net_notional: tuple[float, ...]     # Σᵢ qtyᵢ × closeᵢ (pós-marcação)
+    daily_requirement: tuple[float, ...]      # margem exigida (pós-marcação)
 
 @dataclass(frozen=True)
 class ReconciliationReport:         # 2a + total_borrow_fees (RF-SHT-04 estende RF-POR-04 CA-04.2)
@@ -343,7 +349,7 @@ class ReconciliationReport:         # 2a + total_borrow_fees (RF-SHT-04 estende 
     def reconciles(self) -> bool: ...   # math.isclose(rel_tol=1e-9, abs_tol=1e-9); nunca igualdade exata (RNF-08)
 ```
 
-- **Dono de cada agregação (checklist 4):** `margin_calls` e `intrabar_ambiguities` (novas) são **derivados pelo laço** dos trades de execução (`origin == MARGIN_CALL` / `ambiguous`), como a 2a faz com stops — 1 trade por ocorrência. `borrow_rejections` é **contado no broker.convert** (onde o evento acontece), como `unfilled_cash_orders`. `borrow_fees` é **acumulado no laço** no débito do close. O relatório só reporta.
+- **Dono de cada agregação (checklist 4):** `margin_calls` e `intrabar_ambiguities` (novas) são **derivados pelo laço** dos trades de execução (`origin == MARGIN_CALL` / `ambiguous`), como a 2a faz com stops — 1 trade por ocorrência. `borrow_rejections` é **contado no broker.convert** (onde o evento acontece), como `unfilled_cash_orders`. `borrow_fees` é **acumulado no laço** no débito do close. **`daily_gross_notional`/`daily_net_notional`/`daily_requirement` (emenda T12) são acumulados pelo laço** no passo de marcar (pós-marcação, um ponto por data-união) — o relatório só reporta. O relatório só reporta.
 
 ### 3.9 Fronteira de instante — §3.7 da 2a estendido (RNF-07)
 
@@ -523,6 +529,53 @@ def sharpe_annualized_rf0(returns) -> float:
 #     com buy-stop; + itens da 2a preservados
 #   - Alavancagem (gross > 100%) reportada junto com a utilização de margem (CA-04.2)
 #   - Borrow fee em categoria própria (CA-03.3); short travado com categoria própria (CA-05.2)
+#
+# EMENDA T12 (formas exatas que o bloco acima apenas anuncia; RF-MET-05 CA-05.1,
+# RF-MET-06 CA-06.1/06.2, RF-MRG-03 CA-03.3, RF-WFK-03 CA-03.2):
+#
+#   1. COMPARAÇÃO long+short x long-only da PRÓPRIA estratégia (CA-05.1):
+#      `BacktestReportMulti.build(..., strategy_long_only: BacktestResultMulti | None = None)`.
+#      O relatório recebe o run long-only da MESMA estratégia (mesma configuração, sinais de
+#      short descartados — quem o produz é quem chama, ex.: wrapper na estratégia); o relatório
+#      SÓ reporta (nunca re-roda). Quando presente, a seção "comparação com long-only" mostra as
+#      métricas lado a lado (retorno acumulado, CAGR, Sharpe, drawdown, trades) — a diferença é
+#      o que os shorts acrescentam. Quando ausente (None), a seção não existe (regressão 2a).
+#
+#   2. Alavancagem (CA-04.2): a seção mostra `gross_exposure_avg`, `net_exposure_avg` e
+#      `margin_utilization_avg` da estratégia. As séries DIÁRIAS (gross/net notional e
+#      requirement) são agregadas pelo LAÇO (dono: §3.7 — o relatório só reporta) e carregadas
+#      no `BacktestResultMulti` como `daily_gross_notional` / `daily_net_notional` /
+#      `daily_requirement` (tuplas alinhadas a `dates`/`equity_curve`, um ponto por data-união,
+#      após marcar — mesmo ponto da equity curve). Fundo quebrado ⇒ `None` explícito (R6).
+#
+#   3. WalkForwardReport (novo, em report.py): renderiza o `WalkForwardResult` —
+#      ```python
+#      @dataclass(frozen=True)
+#      class WalkForwardReport:
+#          selection_metric: str        # "sharpe_annualized_rf0" — literal, R5 (CA-06.2)
+#          grid_size: int               # |grid| — declarado no MHT (CA-06.2)
+#          n_folds: int                 # nº de folds — declarado no MHT (CA-06.2)
+#          folds: tuple[FoldRow, ...]   # por fold: janela IS/OOS, params, sharpe_is, ret_oos (CA-03.2)
+#          broken_fund: bool            # algum fold quebrou o fundo (CA-03.3)
+#          biases: tuple[str, ...]      # BIAS_DISCLOSURE_2B — constante literal (CA-06.1)
+#      ```
+#      - `FoldRow` = (fold: Fold, selected_params: dict, sharpe_is: float | None, ret_oos: float | None).
+#      - Renderização de `None` na tabela fold a fold (R6 — decisão com dono, T12): traço claro
+#        "—", nunca NaN, nunca string vazia — fundo quebrado no IS/OOS do fold é leitura honesta.
+#      - `to_text`/`to_dict`/`to_json` como os demais relatórios (mesmo dado, dois formatos).
+#
+#   4. BIAS_DISCLOSURE_2B: tuple[str, ...] — constante literal (padrão Fase 1 §5.2):
+#      *BIAS_DISCLOSURE_MULTI* (2a preservada) + itens novos do RF-MET-06 (CA-06.1): aluguel
+#      NÃO calibrado (0,50% a.a. é premissa); disponibilidade de aluguel ILIMITADA (sem
+#      hard-to-borrow — otimista); liquidação forçada alfabética é determinística mas qualquer
+#      regra de seleção é seleção com viés; MHT: seleção IS otimista com métrica (Sharpe
+#      anualizado rf=0), grid size e nº de folds declarados; pior caso intrabarra ampliado aos
+#      brackets com buy-stop.
+#
+#   5. Fundo quebrado no `BacktestReportMulti` (CA-03.2/03.3): flag `broken_fund` + as métricas
+#      de retorno derivam `None` explícito (CAGR/Sharpe/turnover/exposição — R6, nunca NaN);
+#      a seção de comparação automática estratégia x benchmark é EXCLUÍDA (flag
+#      `comparison_excluded` no relatório — CA-03.3) — a leitura exige decisão de quem lê.
 ```
 
 **Harness do WF (RNF-10/WFK-05):** mede o walk-forward em duas escalas — por fold (default 30 s para IS+OOS de 20 ativos × janela) e total (`n_folds × 30 s` + margem declarada) — com o escopo declarado (cômputo apenas, padrão T17/P5 da 2a); sem base ingerida, séries sintéticas determinísticas com a origem declarada. O "30 s" do RNF-04 da 2a continua valendo para o **run único** e não se aplica a centenas de runs (RNF-10).
