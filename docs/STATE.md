@@ -22,6 +22,15 @@ CA-04.2 fechando (isclose 1e-9), ENG-01.2 reformulado testado por mutação
 resultado honesto vs benchmark 1/N persistido em
 `results/fase_2a_run_20_ativos.json`.
 
+**Fase 2b implementada ponta a ponta (2026-08-16/17, T01–T13).** Gates 1–3
+fechados (requirements v0.2, design v0.1 + emenda T13, ADRs 0009–0011
+aceitos, tasks v0.1). DoD v0.2 coberto: run real long+short de 20 ativos ×
+~10 anos com margem e aluguel, conciliação CA-04.2 fechando (isclose 1e-9)
+com `qty < 0` e borrow fees no termo próprio, mutação ENG-01.2 estendida ao
+IS/OOS passando (ADR-0011), RNF-04 1,30 s < 30 s e RNF-10 do WF 6,69 s <
+160 s, cobertura 95,61% ≥ 85%, resultado honesto persistido em
+`results/fase_2b_run_20_ativos_long_short.json`.
+
 | Bloco | Escopo | Estado |
 |---|---|---|
 | A | `storage/` — persistência, ajuste em tempo de leitura | ✅ |
@@ -32,13 +41,18 @@ resultado honesto vs benchmark 1/N persistido em
 | F | CLI `backtest` + persistência (F1), gráfico (F2), RNF-04 + cobertura (F3), README + resultado honesto (F4) | ✅ |
 | 2a | `engine/` multi-ativo — conditional, liquidity, slippage, sizing, calendar, broker estendido, portfolio multi, laço calendário-driven | ✅ T01–T11 |
 | 2a | garantias — mutação ENG-01.2, conciliação multi, benchmark 1/N, relatório multi, harness RNF-04 + piso 85% | ✅ T12–T18 |
+| 2b | short + margem + buy-stop — Signal com direção, borrow fee, margem/liquidação/fundo quebrado, laço 2b | ✅ T01–T08 |
+| 2b | analytics + walk-forward — exposição gross/net, folds/grid/seleção, relatório 2b, harness RNF-10 | ✅ T09–T12b |
+| 2b | DoD — run long+short vs 1/N e vs próprio long-only, resultado honesto | ✅ T13 |
 
-CI: 3 jobs verdes em todo push a `main`. Último run verificado:
-[30881248393](https://github.com/colletpedro/quantlab/actions/runs/30881248393).
+CI: 3 jobs verdes em todo push a `main`. Último run verificado (T13):
+[32068419283](https://github.com/colletpedro/quantlab/actions/runs/32068419283).
 
-**Próximo:** Fase 2b — short/margem, buy-stop e entradas condicionais
-(declarados fora da 2a), walk-forward, analytics de risco. Nenhuma spec de
-Fase 2b escrita ainda; `specs/README.md` tem o roadmap de alto nível.
+**Próximo:** o escopo atual termina aqui — a Fase 2b está encerrada e não há
+Fase 3 definida. O roadmap de `specs/README.md` segue valendo; ideias
+registradas para quando houver uma próxima fase em [HANDOFF.md](../HANDOFF.md)
+§"Fase 2b — implementação completa" (curto de índices, dados de aluguel
+calibrados, CLI do run 2b).
 
 ## Números finais da Fase 1
 
@@ -87,6 +101,28 @@ abaixo. Os números originais do fechamento de F4 eram 367/333/60.)
   não-atendidas: 2}`; caixa ocioso final 85.269,19; 13 tickers com série
   truncada pela ingestão (reportados como deslistados — semântica POR-02.3,
   não deslistagem real).
+
+## Números finais da Fase 2b
+
+- **628 testes** (566 unitários offline + 62 de integração com `make up`).
+- Cobertura `make check`: **95,61%** total, escopo `engine/` + `analytics/`,
+  piso 85% (RNF-02 CA-02.2, inclui `engine/margin.py` e
+  `engine/walkforward.py`).
+- **RNF-04 medido no run real long+short** (20 ativos × ~10 anos): **1,30 s
+  < 30 s** (mediana de 3, cômputo apenas). **RNF-10 (WF)** no mesmo harness:
+  por fold 0,95 s a 1,70 s (orçamento 30 s) e total 6,69 s (orçamento 160 s).
+- **Resultado honesto (E2E do DoD, T13):** estratégia SmaCross 20/50
+  long+short (flip sempre-no-mercado) **+6,83%** (CAGR 0,57%; Sharpe 0,11;
+  maxDD 24,28%; 1.240 trades; turnover 5,34) vs a própria estratégia em modo
+  long-only **+217,93%** (10,50%; Sharpe 1,04; 618 trades — reproduz exatamente
+  o run da 2a) vs benchmark 1/N buy-and-hold **+2.509,09%** (32,50%; Sharpe
+  1,15). **O lado curto destruiu valor** — derrota honesta e completa,
+  reportada como está.
+- Contadores de mecanismo do run long+short: `{stops: 0, ambiguidades: 0,
+  não-atendidas: 0, borrow_rejections: 0, margin_calls: 111}`; borrow fees
+  totais US$ 2.086,89; caixa ocioso final 73.131,23; 16 tickers com série
+  truncada (reportados como deslistados — POR-02.3), **5 shorts travados** no
+  último close (AMZN, CAT, GOOGL, MSFT, NVDA).
 
 ## Invariantes que não são sugestões (ver CLAUDE.md e ADRs)
 
@@ -164,6 +200,35 @@ local desta máquina**; os dados não vão no git. Qualquer outro ambiente que
 precise da base corrigida roda o script determinístico e idempotente
 versionado no repo (`scripts/migrate_raw_split_backout.py`, backup em
 `/tmp`) e valida com `make verify-raw` antes de rodar E2E com dados reais.
+
+### (Fase 2b, T13) Dois bugs do caminho short que 566 testes unitários não pegaram
+
+O E2E do DoD (run long+short real de 20 ativos) expôs **dois bugs de borda
+que nenhuma fixture unitária exercitava**, corrigidos spec-first (emenda T13
+no design §4, sem reabrir o gate 2):
+
+1. **Timing do borrow fee na equity da última barra.** O ponto de equity de
+   `u` era registrado no passo de marcar, ANTES do débito do borrow fee do
+   mesmo close. Com um short aberto até a última barra, `final_equity` (o
+   último ponto da curva) ficava sem o fee do último dia e a identidade de §6
+   (CA-04.2) **abria exatamente nesse valor** — o run real não conciliava por
+   US$ ~1,38. Corrigido: o registro da equity de `u` passou para **após** o
+   débito (a equity de `u` é o valor ao fim de `u`; a ordem marcar → fee →
+   margem → consultar é preservada). Teste:
+   `test_reconciliation_closes_with_short_open_through_last_bar`.
+2. **Custo de saída do short no `sell` zerado.** O `EXIT` sobre posição short
+   (a venda que zera — semântica Q2) calculava o custo com
+   `cost_for(notional com sinal)`: notional negativo subcobrava e **zerava o
+   custo de saída** com `min_cost = 0` (`exit_cost = 0.0000` nos trades reais).
+   Corrigido: custo sobre **|notional|**, a mesma regra da cobertura canônica
+   por `EXIT_SHORT`. Teste:
+   `test_exit_sell_on_short_charges_cost_on_absolute_notional`.
+
+A lição de processo está no [HANDOFF.md](../HANDOFF.md): o **E2E com dados
+reais é o verdadeiro detector** — as fixtures unitárias construíam o estado
+manualmente consistente (débito do fee simulado antes do `equity_curve`) ou
+fechavam o short antes da última barra, e o caminho `sell`-sobre-short só
+aparece com uma estratégia que fecha short por `EXIT`.
 
 ## O que Bloco F entregou
 
@@ -268,11 +333,17 @@ tickers byte-idênticos, 5 com números novos; placar de Sharpe 17/20 → 19/20
 (vitórias de AMZN/GOOGL eram artefato do split duplicado). Detalhe na
 subseção do bug dos splits.
 
-**Para a Fase 2b, quando começar:** nenhuma spec escrita ainda. Ideias que já
-apareceram ao longo da Fase 1 e vale revisitar então — não implementar agora:
-cache de ajuste em Redis (ADR-0003 já deixa isso escopado, condicionado a
-RNF-04 virar problema real — não virou), otimização de leitura de histórico
-completo com injeção de mapa `data → close` se a leitura de `bars` virar
-gargalo medido (ADR-0004 "Revisitar quando"), fallback de provedor de dados
-pago caso a qualidade do yfinance grátis continue sendo um risco (o bug de
-`NaN` desta sessão é evidência concreta desse risco, não hipotética).
+**Resolvido (2026-08-16/17):** a Fase 2b foi implementada ponta a ponta
+(T01–T13) e encerrada — o item abaixo virou a seção própria
+"Fase 2b — implementação completa" no HANDOFF. Dois bugs reais do caminho
+short foram pegos pelo E2E e corrigidos spec-first (ver "Bugs reais
+encontrados e corrigidos" acima).
+
+**Para uma próxima fase (não definida):** o escopo atual termina na 2b.
+Ideias registradas, sem compromisso de implementar: cache de ajuste em Redis
+(ADR-0003 deixa escopado, condicionado a RNF-04 virar problema real — não
+virou), otimização de leitura de histórico completo com injeção de mapa
+`data → close` se a leitura de `bars` virar gargalo medido (ADR-0004
+"Revisitar quando"), fallback de provedor de dados pago (o bug de `NaN` de F4
+é evidência concreta do risco), e as heranças da 2b no HANDOFF (curto de
+índices, aluguel calibrado, CLI do run 2b).
